@@ -1,0 +1,61 @@
+model:
+  name: "gemma4:e4b"
+  ollama_host: "http://host.docker.internal:11434"
+  timeout_seconds: 60
+
+gate:
+  max_input_length: 4096
+  # Deterministic regex patterns for prompt injection detection.
+  # These are evaluated in order; any match raises a flag.
+  injection_patterns:
+    - "ignore (previous|all|prior) instructions"
+    - "forget (everything|what|your)"
+    - "you are now"
+    - "disregard (your|all|previous)"
+    - "override (your|all|system)"
+    - "act as (if you are|a|an)"
+    - "pretend (you are|to be)"
+    - "jailbreak"
+    - "do anything now"
+    - "DAN mode"
+    - "<\\|system\\|>"
+    - "<\\|user\\|>"
+    - "\\[INST\\]"
+    - "###\\s*(instruction|system|prompt)"
+
+hyperparameters:
+  # Retrieval
+  retrieval_keyword_pool_size: 20
+  retrieval_level1_top_k: 3
+  retrieval_level2_top_k: 1
+  directional_edge_weight_multiplier: 1.5
+  retrieval_keyword_count: 5
+
+  # Context
+  context_token_budget: 2048
+  summarization_trigger_tokens: 1500
+  session_compression_threshold: 8000
+  extractor_min_sentences: 2
+
+  # Learning
+  initial_edge_weight: 0.5        # OPEN — see open questions in BUILD-PLAN.md
+  weight_update_rate: 0.1
+  decay_rate: 0.01                 # OPEN — see open questions in BUILD-PLAN.md
+  pruning_threshold: 0.05
+  algorithm: "simple_rl"
+
+  # System
+  tool_loop_max_iterations: 5
+  snapshot_frequency: "every_interaction"
+  dreaming_cycle_interval_minutes: 60  # deferred to Phase 2
+
+tools:
+  registered:
+    - name: "file_read"
+      module: "tools.file_tool"
+      class: "FileTool"
+      operation: "read"
+    - name: "file_write"
+      module: "tools.file_tool"
+      class: "FileTool"
+      operation: "write"

@@ -3,24 +3,36 @@
 ## Current state
 
 Project: Local Corvus — local LLM learning research platform  
-Phase: Planning complete  
-Current milestone: 1 — Foundation (not started)  
-Next step: Create `config.yaml` with the full hyperparameter registry (see BUILD-PLAN.md)
+Phase: Building  
+Current milestone: 1 — Foundation — COMPLETE  
+Next step: Review and merge Milestone 1 PR, then start Milestone 2 (Memory Engine)
 
 ## Session log
 
 - 2026-06-14: Architecture document drafted — `.agents/local_corvus_architecture_v0.1.md`
 - 2026-06-15: Build plan created — `BUILD-PLAN.md`, 4 milestones defined
+- 2026-06-15: /build — Milestone 1 complete
+  - Created: `config.yaml`, `backend/gate/`, `backend/memory/store.py`, `backend/core/session.py`, `backend/api/chat.py`
+  - Updated: `backend/main.py`, `backend/requirements.txt`
+  - Added: `tests/test_gate/`, `tests/test_memory/`, `pytest.ini`
+  - Tests: 32 new tests, all passing
+  - Branch: milestone-1-foundation
+  - PR: (see GitHub)
+  - Bug found and fixed: aiosqlite `async with await connection` pattern starts the background thread twice on Python 3.9 — must use `db = await connect(...)` then explicit `await db.close()` instead
 
 ## What exists
 
-- `backend/main.py` — minimal FastAPI skeleton with `/health`, `/ollama-health`, `/chat`
-- `backend/Dockerfile` + `docker-compose.yml` — backend service only, working
-- `backend/requirements.txt` — fastapi, uvicorn, httpx
-- `.env` — `OLLAMA_HOST=http://host.docker.internal:11434`
-- `.agents/local_corvus_architecture_v0.1.md` — full architecture design document
-
-The skeleton connects to Ollama but has no UM gate, no graph store, no session management, and no memory. The `/chat` endpoint calls Ollama directly and discards the response after returning it.
+- `backend/main.py` — FastAPI app with UM-gated /chat, /health, /ollama-health
+- `backend/api/chat.py` — POST /chat: session management, UM gate (in/out), MU persistence, audit log
+- `backend/gate/um.py` — UniversalMessage schema + create_um() factory
+- `backend/gate/sanitize.py` — sanitize_in() / sanitize_out() (pure, stateless)
+- `backend/gate/audit.py` — append_audit() → /app/memory/audit.log (JSONL, append-only)
+- `backend/memory/store.py` — GraphStore: async CRUD for memory_units + edges (aiosqlite)
+- `backend/core/session.py` — create_session() / get_session() (in-memory)
+- `backend/Dockerfile` + `docker-compose.yml` — backend service, ./memory:/app/memory volume
+- `config.yaml` — full hyperparameter registry (single source of truth)
+- `tests/test_gate/` — 20 tests for sanitize + um/audit
+- `tests/test_memory/` — 12 tests for GraphStore CRUD
 
 ## Decisions made
 
@@ -30,6 +42,8 @@ The skeleton connects to Ollama but has no UM gate, no graph store, no session m
 - **Ollama runs natively on Windows**, not in Docker — app container reaches it at `host.docker.internal:11434`
 - **aiosqlite** for async-safe SQLite access (stdlib `sqlite3` is not async-safe)
 - **Admin UI is a separate React app** (port 3001), not routes in the chat UI
+- **flags field is free strings**, not an enum — patterns are embedded in the flag text for debugging visibility
+- **Connection-per-operation** pattern for aiosqlite (not pooling) — appropriate for local research volume and avoids thread lifecycle bugs
 
 ## Open questions
 
@@ -40,7 +54,7 @@ The skeleton connects to Ollama but has no UM gate, no graph store, no session m
 
 ## Upcoming milestones
 
-1. **Foundation** — UM Gate + Graph Store + Session Management (2 sessions)
+1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
 2. **Memory Engine** — BM25 Retrieval + Traversal Funnel + Analyzer/Extractor (2-3 sessions)
 3. **Tool System** — Universal Tool Interface + File Tool + Task Suite + Baseline Measurements (2-3 sessions)
 4. **Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI (3-4 sessions)

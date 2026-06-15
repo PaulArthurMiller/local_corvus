@@ -763,8 +763,10 @@ These must be followed consistently across all milestones:
 ## Status
 
 ```
-Current milestone: 1 — Foundation (not started)
+Current milestone: 2 — Memory Engine (not started)
 Last updated: 2026-06-15
 ```
 
-**Milestone 1 first action:** Create `config.yaml` in the project root with the full hyperparameter registry template above. This is the first artifact and the reference point for all subsequent implementation decisions.
+**Milestone 1:** Complete — branch `milestone-1-foundation`, PR open on GitHub.
+
+**Milestone 2 first action:** Install `rank_bm25` package. Build `memory/retrieval.py` with BM25 index over all MU raw_content. Test with a populated graph.

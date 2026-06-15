@@ -1,18 +1,42 @@
-import httpx
+"""
+Local Corvus — FastAPI application entry point.
+
+Registers all routers. Contains no business logic.
+"""
+
+import logging
 import os
+
+import httpx
 from fastapi import FastAPI
-from pydantic import BaseModel
+
+from api.chat import router as chat_router
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Local Corvus Backend")
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
-class ChatRequest(BaseModel):
-    message: str
+# ---------------------------------------------------------------------------
+# Routers
+# ---------------------------------------------------------------------------
+
+app.include_router(chat_router)
+
+# ---------------------------------------------------------------------------
+# Utility endpoints
+# ---------------------------------------------------------------------------
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 @app.get("/ollama-health")
 async def ollama_health():
@@ -22,19 +46,3 @@ async def ollama_health():
             return {"status": "ok", "ollama": response.json()}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
-@app.post("/chat")
-async def chat(request: ChatRequest):
-    payload = {
-        "model": "gemma4:e4b",
-        "messages": [{"role": "user", "content": request.message}],
-        "stream": False
-    }
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{OLLAMA_HOST}/v1/chat/completions",
-            json=payload,
-            timeout=60.0
-        )
-    data = response.json()
-    return {"response": data["choices"][0]["message"]["content"]}

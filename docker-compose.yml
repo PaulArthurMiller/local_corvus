@@ -1,0 +1,12 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./memory:/app/memory
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

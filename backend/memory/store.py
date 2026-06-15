@@ -256,6 +256,16 @@ class GraphStore:
             await db.close()
         return [dict(r) for r in rows]
 
+    async def get_all_edges(self) -> list[dict]:
+        """Return all edges. Used by retrieval traversal funnel."""
+        db = await _open_db()
+        try:
+            async with db.execute("SELECT * FROM edges") as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
+
 
 # Module-level singleton — imported by other modules
 store = GraphStore()

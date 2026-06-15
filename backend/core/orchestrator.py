@@ -16,6 +16,7 @@ from typing import Optional
 import httpx
 import yaml
 
+from core.session import append_session_message, get_session_messages
 from gate.audit import append_audit
 from gate.sanitize import sanitize_in, sanitize_out
 from gate.um import create_um
@@ -168,14 +169,39 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
     prompt_gate = sanitize_out(prompt_text, boundary="agent->llm")
     all_flags.extend(prompt_gate.flags)
 
-    # --- Step 7: Call Ollama ---
+    # --- Step 7: Build multi-turn messages array and call Ollama ---
+    #
+    # Structure:
+    #   [optional system message with memory context]
+    #   [all prior turns from session history]
+    #   [current user message]
+    #
+    # Memory context is injected as a system message so it doesn't pollute the
+    # stored conversation history. History contains clean user/assistant pairs.
+    ollama_messages: list[dict] = []
+    if condensed_context:
+        ollama_messages.append({
+            "role": "system",
+            "content": f"[Context from memory]\n{condensed_context}",
+        })
+    history = get_session_messages(session_id)
+    ollama_messages.extend(history)
+    ollama_messages.append({"role": "user", "content": prompt_gate.content})
+
+    logger.info(
+        "orchestrator: sending %d messages to Ollama (history=%d context=%s)",
+        len(ollama_messages),
+        len(history),
+        "yes" if condensed_context else "no",
+    )
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{OLLAMA_HOST}/v1/chat/completions",
                 json={
                     "model": MODEL_NAME,
-                    "messages": [{"role": "user", "content": prompt_gate.content}],
+                    "messages": ollama_messages,
                     "stream": False,
                 },
                 timeout=OLLAMA_TIMEOUT,
@@ -195,6 +221,11 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
     except httpx.RequestError as exc:
         logger.error("orchestrator: Ollama connection error — %s", exc)
         raise
+
+    # Append clean user message + assistant response to session history.
+    # Stored without memory context so future turns see a clean conversation.
+    append_session_message(session_id, {"role": "user", "content": input_result.content})
+    append_session_message(session_id, {"role": "assistant", "content": llm_content})
 
     # --- Step 8: Gate LLM response (entering agent boundary) ---
     output_result = sanitize_in(llm_content, boundary="llm->agent")

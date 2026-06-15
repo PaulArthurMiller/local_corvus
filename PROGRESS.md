@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 1 — Foundation — COMPLETE  
-Next step: Review and merge Milestone 1 PR, then start Milestone 2 (Memory Engine)
+Current milestone: 2 — Memory Engine — COMPLETE  
+Next step: Review and merge Milestone 2 PR, then start Milestone 3 (Tool System)
 
 ## Session log
 
@@ -19,6 +19,15 @@ Next step: Review and merge Milestone 1 PR, then start Milestone 2 (Memory Engin
   - Branch: milestone-1-foundation
   - PR: (see GitHub)
   - Bug found and fixed: aiosqlite `async with await connection` pattern starts the background thread twice on Python 3.9 — must use `db = await connect(...)` then explicit `await db.close()` instead
+- 2026-06-15: /build — Milestone 2 complete
+  - Created: `backend/memory/retrieval.py`, `backend/memory/extractor.py`, `backend/core/orchestrator.py`
+  - Updated: `backend/memory/store.py` (added get_all_edges()), `backend/api/chat.py` (delegates to orchestrator), `backend/requirements.txt` (rank-bm25)
+  - Added: `tests/test_memory/test_retrieval.py`, `tests/test_memory/test_extractor.py`
+  - Tests: 36 new tests, 68 total — all passing
+  - Branch: milestone-2-memory-engine
+  - PR: (see GitHub)
+  - Decision: BM25 index rebuilt on every retrieval call (simple; corpus is small for local research)
+  - Decision: Multi-hit threshold is 2+ keyword hits for K1 (exact word matching, no stemming)
 
 ## What exists
 
@@ -55,6 +64,6 @@ Next step: Review and merge Milestone 1 PR, then start Milestone 2 (Memory Engin
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
-2. **Memory Engine** — BM25 Retrieval + Traversal Funnel + Analyzer/Extractor (2-3 sessions)
+2. ~~**Memory Engine** — BM25 Retrieval + Traversal Funnel + Analyzer/Extractor~~ ✅ COMPLETE
 3. **Tool System** — Universal Tool Interface + File Tool + Task Suite + Baseline Measurements (2-3 sessions)
 4. **Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI (3-4 sessions)

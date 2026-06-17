@@ -36,11 +36,13 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+    run_id: str
     input_mu_id: str
     output_mu_id: str
     prompt_mu_id: str
     activated_mu_ids: list[str]
     activated_edge_ids: list[str]
+    tool_call_mu_ids: list[str]
     flags: list[str]
 
 
@@ -85,10 +87,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
     return ChatResponse(
         response=result.response,
         session_id=result.session_id,
+        run_id=result.run_id,
         input_mu_id=result.input_mu_id,
         output_mu_id=result.output_mu_id,
         prompt_mu_id=result.prompt_mu_id,
         activated_mu_ids=result.activated_mu_ids,
         activated_edge_ids=result.activated_edge_ids,
+        tool_call_mu_ids=result.tool_call_mu_ids,
         flags=result.flags,
     )

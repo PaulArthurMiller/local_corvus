@@ -13,7 +13,7 @@ Errors raised here are part of the public contract:
 import importlib
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -40,7 +40,7 @@ class ToolRegistry:
     stateless across calls.
     """
 
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(self, config: Optional[dict] = None) -> None:
         if config is None:
             config = self._load_config()
         self._config = config

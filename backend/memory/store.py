@@ -336,7 +336,7 @@ class GraphStore:
 
     async def query_runs(
         self,
-        session_id: str | None = None,
+        session_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
@@ -422,7 +422,7 @@ class GraphStore:
             )
         return updated
 
-    async def get_run(self, run_id: str) -> dict | None:
+    async def get_run(self, run_id: str) -> Optional[dict]:
         """Fetch a single run record by ID. Returns None if not found."""
         import json
         db = await _open_db()

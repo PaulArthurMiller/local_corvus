@@ -10,3 +10,21 @@ services:
       - OLLAMA_HOST=${OLLAMA_HOST}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+  admin:
+    build: ./admin
+    ports:
+      - "3001:3001"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend

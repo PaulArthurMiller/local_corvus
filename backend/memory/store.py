@@ -48,8 +48,29 @@ CREATE TABLE IF NOT EXISTS edges (
     traversal_count INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS analytics (
+    run_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    input_mu_id TEXT,
+    output_mu_id TEXT,
+    tool_calls TEXT NOT NULL DEFAULT '[]',
+    activated_mu_ids TEXT NOT NULL DEFAULT '[]',
+    activated_edge_ids TEXT NOT NULL DEFAULT '[]',
+    prompt_mu_id TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    latency_ms INTEGER,
+    feedback_signal INTEGER,
+    weight_updates TEXT NOT NULL DEFAULT '[]',
+    hyperparameters_snapshot TEXT NOT NULL DEFAULT '{}',
+    algorithm TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_mu_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_mu_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics(session_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON analytics(timestamp);
 """
 
 
@@ -265,6 +286,167 @@ class GraphStore:
         finally:
             await db.close()
         return [dict(r) for r in rows]
+
+    async def insert_run(self, run: dict) -> None:
+        """
+        Insert a run record into the analytics table.
+
+        JSON-serializable list/dict fields are stored as JSON strings.
+        """
+        import json
+        db = await _open_db()
+        try:
+            await db.execute(
+                """
+                INSERT INTO analytics (
+                    run_id, session_id, timestamp, input_mu_id, output_mu_id,
+                    tool_calls, activated_mu_ids, activated_edge_ids, prompt_mu_id,
+                    tokens_in, tokens_out, latency_ms, feedback_signal,
+                    weight_updates, hyperparameters_snapshot, algorithm
+                ) VALUES (
+                    :run_id, :session_id, :timestamp, :input_mu_id, :output_mu_id,
+                    :tool_calls, :activated_mu_ids, :activated_edge_ids, :prompt_mu_id,
+                    :tokens_in, :tokens_out, :latency_ms, :feedback_signal,
+                    :weight_updates, :hyperparameters_snapshot, :algorithm
+                )
+                """,
+                {
+                    "run_id": run["run_id"],
+                    "session_id": run["session_id"],
+                    "timestamp": run["timestamp"],
+                    "input_mu_id": run.get("input_mu_id"),
+                    "output_mu_id": run.get("output_mu_id"),
+                    "tool_calls": json.dumps(run.get("tool_calls", [])),
+                    "activated_mu_ids": json.dumps(run.get("activated_mu_ids", [])),
+                    "activated_edge_ids": json.dumps(run.get("activated_edge_ids", [])),
+                    "prompt_mu_id": run.get("prompt_mu_id"),
+                    "tokens_in": run.get("tokens_in"),
+                    "tokens_out": run.get("tokens_out"),
+                    "latency_ms": run.get("latency_ms"),
+                    "feedback_signal": run.get("feedback_signal"),
+                    "weight_updates": json.dumps(run.get("weight_updates", [])),
+                    "hyperparameters_snapshot": json.dumps(run.get("hyperparameters_snapshot", {})),
+                    "algorithm": run.get("algorithm"),
+                },
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info("store: inserted run run_id=%s session_id=%s", run["run_id"], run["session_id"])
+
+    async def query_runs(
+        self,
+        session_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """
+        Query run records from the analytics table.
+
+        Optionally filter by session_id. Returns rows ordered by timestamp DESC.
+        JSON string fields are decoded back to Python objects.
+        """
+        import json
+        db = await _open_db()
+        try:
+            if session_id:
+                async with db.execute(
+                    """
+                    SELECT * FROM analytics
+                    WHERE session_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (session_id, limit, offset),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            else:
+                async with db.execute(
+                    """
+                    SELECT * FROM analytics
+                    ORDER BY timestamp DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        json_fields = {
+            "tool_calls", "activated_mu_ids", "activated_edge_ids",
+            "weight_updates", "hyperparameters_snapshot",
+        }
+        result = []
+        for row in rows:
+            r = dict(row)
+            for field in json_fields:
+                if r.get(field):
+                    try:
+                        r[field] = json.loads(r[field])
+                    except (ValueError, TypeError):
+                        pass
+            result.append(r)
+        return result
+
+    async def update_run_feedback(
+        self,
+        run_id: str,
+        feedback_signal: int,
+        weight_updates: list[dict],
+    ) -> bool:
+        """
+        Update a run record with feedback signal and resulting weight updates.
+
+        Returns True if a row was updated.
+        """
+        import json
+        db = await _open_db()
+        try:
+            cursor = await db.execute(
+                """
+                UPDATE analytics
+                SET feedback_signal = ?, weight_updates = ?
+                WHERE run_id = ?
+                """,
+                (feedback_signal, json.dumps(weight_updates), run_id),
+            )
+            await db.commit()
+            updated = cursor.rowcount > 0
+        finally:
+            await db.close()
+        if updated:
+            logger.info(
+                "store: updated run feedback run_id=%s signal=%d updates=%d",
+                run_id, feedback_signal, len(weight_updates),
+            )
+        return updated
+
+    async def get_run(self, run_id: str) -> Optional[dict]:
+        """Fetch a single run record by ID. Returns None if not found."""
+        import json
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM analytics WHERE run_id = ?", (run_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        if row is None:
+            return None
+        r = dict(row)
+        json_fields = {
+            "tool_calls", "activated_mu_ids", "activated_edge_ids",
+            "weight_updates", "hyperparameters_snapshot",
+        }
+        for field in json_fields:
+            if r.get(field):
+                try:
+                    r[field] = json.loads(r[field])
+                except (ValueError, TypeError):
+                    pass
+        return r
 
 
 # Module-level singleton — imported by other modules

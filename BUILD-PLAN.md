@@ -763,10 +763,12 @@ These must be followed consistently across all milestones:
 ## Status
 
 ```
-Current milestone: 2 — Memory Engine (not started)
+Current milestone: 3 — Tool System (not started)
 Last updated: 2026-06-15
 ```
 
-**Milestone 1:** Complete — branch `milestone-1-foundation`, PR open on GitHub.
+**Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
 
-**Milestone 2 first action:** Install `rank_bm25` package. Build `memory/retrieval.py` with BM25 index over all MU raw_content. Test with a populated graph.
+**Milestone 2:** Complete — branch `milestone-2-memory-engine`, PR open on GitHub.
+
+**Milestone 3 first action:** Build `tools/base.py` (Tool abstract class + ToolResult schema), then `tools/registry.py` (config-driven dispatch), then `tools/file_tool.py` (workspace file read/write).

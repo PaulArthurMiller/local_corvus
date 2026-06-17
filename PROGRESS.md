@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 3 — Tool System — COMPLETE  
-Next step: Review and merge Milestone 3 PR, then start Milestone 4 (Learning + Admin UI)
+Current milestone: 4 — Learning + Admin UI + Chat UI — COMPLETE  
+Next step: Review and merge Milestone 4 PR. All milestones complete — ready for post-learning experiment.
 
 ## Session log
 
@@ -101,9 +101,22 @@ Next step: Review and merge Milestone 3 PR, then start Milestone 4 (Learning + A
 2. **Decay function shape** — linear / exponential / sigmoid? Decide before Phase 4 results are meaningful.
 3. **RL reward distribution along activated edges** — Build Milestone 4 with uniform distribution as default; revisit after first learning run.
 
+- 2026-06-17: /build — Milestone 4 complete
+  - Created: `backend/learning/interface.py` (LearningAlgorithm ABC)
+  - Created: `backend/learning/simple_rl.py` (uniform weight update RL)
+  - Updated: `backend/api/chat.py` (POST /feedback endpoint with SimpleRL)
+  - Created: `admin/` — React Admin UI (port 3001): RunLogTable, LearningCurveChart, MemoryInspector
+  - Created: `frontend/` — React Chat UI (port 3000): ChatWindow, MessageBubble, FeedbackButtons
+  - Updated: `docker-compose.yml` (adds frontend and admin services)
+  - Added: `tests/test_learning/test_simple_rl.py` (11 tests)
+  - Tests: 11 new tests, 119 total — all passing
+  - Branch: milestone-4-learning-admin-ui
+  - Decision: Uniform RL reward distribution (open question #3) — all activated edges receive same delta
+  - Decision: MemoryInspector uses paginated table (not force-directed graph) for reliability at scale
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
 2. ~~**Memory Engine** — BM25 Retrieval + Traversal Funnel + Analyzer/Extractor~~ ✅ COMPLETE
 3. ~~**Tool System** — Universal Tool Interface + File Tool + Analytics + Snapshots~~ ✅ COMPLETE
-4. **Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI (3-4 sessions)
+4. ~~**Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI~~ ✅ COMPLETE

@@ -763,7 +763,7 @@ These must be followed consistently across all milestones:
 ## Status
 
 ```
-Current milestone: 4 — Learning + Admin UI + Chat UI (not started)
+Current milestone: ALL COMPLETE
 Last updated: 2026-06-17
 ```
 
@@ -771,6 +771,6 @@ Last updated: 2026-06-17
 
 **Milestone 2:** Complete — branch `milestone-2-memory-engine`, PR merged to main.
 
-**Milestone 3:** Complete — branch `milestone-3-tool-system`, PR open on GitHub.
+**Milestone 3:** Complete — branch `milestone-3-tool-system`, PR merged to main.
 
-**Milestone 4 first action:** Build `learning/interface.py` (LearningAlgorithm ABC), then `learning/simple_rl.py` (uniform weight update), then `POST /feedback` endpoint in `api/chat.py`, then Admin UI React app (port 3001), then Chat UI (port 3000).
+**Milestone 4:** Complete — branch `milestone-4-learning-admin-ui`, PR open on GitHub.

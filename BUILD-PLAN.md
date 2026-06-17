@@ -763,12 +763,14 @@ These must be followed consistently across all milestones:
 ## Status
 
 ```
-Current milestone: 3 — Tool System (not started)
-Last updated: 2026-06-15
+Current milestone: 4 — Learning + Admin UI + Chat UI (not started)
+Last updated: 2026-06-17
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
 
-**Milestone 2:** Complete — branch `milestone-2-memory-engine`, PR open on GitHub.
+**Milestone 2:** Complete — branch `milestone-2-memory-engine`, PR merged to main.
 
-**Milestone 3 first action:** Build `tools/base.py` (Tool abstract class + ToolResult schema), then `tools/registry.py` (config-driven dispatch), then `tools/file_tool.py` (workspace file read/write).
+**Milestone 3:** Complete — branch `milestone-3-tool-system`, PR open on GitHub.
+
+**Milestone 4 first action:** Build `learning/interface.py` (LearningAlgorithm ABC), then `learning/simple_rl.py` (uniform weight update), then `POST /feedback` endpoint in `api/chat.py`, then Admin UI React app (port 3001), then Chat UI (port 3000).

@@ -3,7 +3,7 @@ Audit log — append-only JSONL writer.
 
 Every UM record that passes through the gate gets a line written here.
 The file is opened in append mode on every call; never truncated.
-Path is /app/memory/audit.log inside the container (Docker volume).
+Path is /app/data/audit.log inside the container (Docker volume).
 """
 
 import json
@@ -15,7 +15,7 @@ from gate.um import UniversalMessage
 
 logger = logging.getLogger(__name__)
 
-_AUDIT_LOG_PATH = Path(os.getenv("MEMORY_PATH", "/app/memory")) / "audit.log"
+_AUDIT_LOG_PATH = Path(os.getenv("MEMORY_PATH", "/app/data")) / "audit.log"
 
 
 def append_audit(um: UniversalMessage) -> None:

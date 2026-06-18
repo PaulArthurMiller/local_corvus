@@ -18,7 +18,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(os.getenv("MEMORY_PATH", "/app/memory")) / "graph.db"
+_DB_PATH = Path(os.getenv("MEMORY_PATH", "/app/data")) / "graph.db"
 
 
 # ---------------------------------------------------------------------------

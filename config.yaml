@@ -2,6 +2,7 @@ model:
   name: "gemma4:e4b"
   ollama_host: "http://host.docker.internal:11434"
   timeout_seconds: 60
+  context_window_tokens: 8192
 
 gate:
   max_input_length: 4096

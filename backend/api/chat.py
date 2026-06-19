@@ -58,6 +58,8 @@ class ChatResponse(BaseModel):
     activated_edge_ids: list[str]
     tool_call_mu_ids: list[str]
     flags: list[str]
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +111,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
         activated_edge_ids=result.activated_edge_ids,
         tool_call_mu_ids=result.tool_call_mu_ids,
         flags=result.flags,
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
     )
 
 

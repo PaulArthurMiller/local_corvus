@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 4 — Learning + Admin UI + Chat UI — COMPLETE  
-Next step: Review and merge Milestone 4 PR. All milestones complete — ready for post-learning experiment.
+Current milestone: 5 — Chat UI Quality — COMPLETE  
+Next step: Review and merge Milestone 5 PR. All milestones complete — ready for post-learning experiment.
 
 ## Session log
 
@@ -125,9 +125,20 @@ Next step: Review and merge Milestone 4 PR. All milestones complete — ready fo
   - Fix 4: gate/sanitize.py missing `import os` needed for the CONFIG_PATH fix
   - Status: all 3 containers start cleanly; /chat → /feedback pipeline works end-to-end; memory retrieval active on second message; admin endpoints return correct data; 119 tests passing
 
+- 2026-06-19: /build — Milestone 5 complete
+  - Modified: `config.yaml` (added model.context_window_tokens: 8192)
+  - Modified: `backend/core/orchestrator.py` (extract Ollama usage tokens; return tokens_in/tokens_out from _run_tool_loop; populate RunRecord and InteractionResult)
+  - Modified: `backend/api/chat.py` (tokens_in/tokens_out added to ChatResponse)
+  - Modified: `frontend/src/components/ChatWindow.jsx` (token bar, New Session button, /admin/config fetch for context window size)
+  - Modified: `frontend/src/components/MessageBubble.jsx` (Copy button with Copied! confirmation)
+  - Tests: 119 existing tests — all passing; no new backend tests (frontend-heavy milestone; manual verification required)
+  - Branch: milestone-5-chat-ui-quality
+  - Note: navigator.clipboard requires secure context (HTTPS or localhost) — safe in development, note for production
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
 2. ~~**Memory Engine** — BM25 Retrieval + Traversal Funnel + Analyzer/Extractor~~ ✅ COMPLETE
 3. ~~**Tool System** — Universal Tool Interface + File Tool + Analytics + Snapshots~~ ✅ COMPLETE
 4. ~~**Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI~~ ✅ COMPLETE
+5. ~~**Chat UI Quality** — Token counter, copy button, New Session button~~ ✅ COMPLETE

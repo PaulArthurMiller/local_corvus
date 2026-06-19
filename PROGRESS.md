@@ -114,6 +114,17 @@ Next step: Review and merge Milestone 4 PR. All milestones complete — ready fo
   - Decision: Uniform RL reward distribution (open question #3) — all activated edges receive same delta
   - Decision: MemoryInspector uses paginated table (not force-directed graph) for reliability at scale
 
+- 2026-06-19: /smoketest — full Docker stack tested, 4 bugs found and fixed
+  - Bugs found: 4
+  - Bugs fixed: 4
+  - Branch: fix/smoketest-2026-06-19
+  - PR: (see GitHub)
+  - Fix 1: Missing CORS middleware (critical — browser blocked all API calls from port 3000 to 8000)
+  - Fix 2: OLLAMA_HOST env var passing empty string when not set in shell (bypassed Python fallback)
+  - Fix 3: config.yaml not accessible in Docker — path ../../config.yaml resolves to /config.yaml in container (fixed in orchestrator.py, chat.py, gate/sanitize.py, tools/registry.py, memory/extractor.py, api/admin.py)
+  - Fix 4: gate/sanitize.py missing `import os` needed for the CONFIG_PATH fix
+  - Status: all 3 containers start cleanly; /chat → /feedback pipeline works end-to-end; memory retrieval active on second message; admin endpoints return correct data; 119 tests passing
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE

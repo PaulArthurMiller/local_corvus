@@ -32,7 +32,10 @@ from tools.registry import ToolLoopError, ToolNotFoundError, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+_CONFIG_PATH = os.getenv(
+    "CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml"),
+)
 
 
 def _load_config() -> dict:

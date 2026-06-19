@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+_CONFIG_PATH = os.getenv(
+    "CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml"),
+)
 
 
 def _load_weight_update_rate() -> float:

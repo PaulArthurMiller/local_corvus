@@ -32,7 +32,10 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+_CONFIG_PATH = os.getenv(
+    "CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml"),
+)
 _CHARS_PER_TOKEN = 4
 
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")

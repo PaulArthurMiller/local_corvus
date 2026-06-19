@@ -6,9 +6,11 @@ services:
     volumes:
       - ./backend:/app
       - ./memory:/app/data
+      - ./config.yaml:/app/config.yaml
     environment:
-      - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
       - MEMORY_PATH=/app/data
+      - CONFIG_PATH=/app/config.yaml
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

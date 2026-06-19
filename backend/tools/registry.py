@@ -21,7 +21,10 @@ from tools.base import Tool, ToolResult
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+_CONFIG_PATH = os.getenv(
+    "CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml"),
+)
 
 
 class ToolNotFoundError(Exception):

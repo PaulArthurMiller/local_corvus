@@ -18,3 +18,4 @@ node_modules/
 venv/
 env/
 .vscode/
+backend/config.yaml

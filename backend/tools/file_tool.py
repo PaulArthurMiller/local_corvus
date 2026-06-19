@@ -1,5 +1,5 @@
 """
-FileTool — read and write files within /app/memory/workspace/.
+FileTool — read and write files within /app/data/workspace/.
 
 Path traversal outside the workspace directory is rejected. Both operations
 are registered separately in config.yaml so the LLM sees distinct tool names
@@ -16,7 +16,7 @@ from tools.base import Tool, ToolResult
 
 logger = logging.getLogger(__name__)
 
-_WORKSPACE = Path(os.getenv("MEMORY_PATH", "/app/memory")) / "workspace"
+_WORKSPACE = Path(os.getenv("MEMORY_PATH", "/app/data")) / "workspace"
 
 
 def _safe_path(relative_path: str) -> Path:
@@ -37,7 +37,7 @@ def _safe_path(relative_path: str) -> Path:
 
 class FileTool(Tool):
     """
-    Read or write files inside /app/memory/workspace/.
+    Read or write files inside /app/data/workspace/.
 
     The operation ("read" or "write") is bound at registration time via the
     config.yaml entry, so one class serves both file_read and file_write.

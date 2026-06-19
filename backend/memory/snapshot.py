@@ -2,7 +2,7 @@
 Graph snapshot — dumps the full MU + edge graph to compressed JSON after
 each interaction.
 
-Snapshots are written to /app/memory/snapshots/{timestamp}.json.gz.
+Snapshots are written to /app/data/snapshots/{timestamp}.json.gz.
 They are append-only; nothing in this module reads or deletes existing files.
 """
 
@@ -17,7 +17,7 @@ from memory.store import store as graph_store
 
 logger = logging.getLogger(__name__)
 
-_SNAPSHOTS_DIR = Path(os.getenv("MEMORY_PATH", "/app/memory")) / "snapshots"
+_SNAPSHOTS_DIR = Path(os.getenv("MEMORY_PATH", "/app/data")) / "snapshots"
 
 
 async def take_snapshot() -> str:

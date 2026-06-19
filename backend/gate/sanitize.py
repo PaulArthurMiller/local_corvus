@@ -9,6 +9,7 @@ sanitize_in  — cleans data entering the agent (user input, tool results, LLM r
 sanitize_out — cleans data leaving the agent (tool calls, final responses, memory writes)
 """
 
+import os
 import re
 import logging
 from pathlib import Path
@@ -22,7 +23,9 @@ logger = logging.getLogger(__name__)
 # Config — loaded once at import time
 # ---------------------------------------------------------------------------
 
-_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
+_CONFIG_PATH = Path(
+    os.getenv("CONFIG_PATH", str(Path(__file__).parent.parent.parent / "config.yaml"))
+)
 
 
 def _load_gate_config() -> dict:

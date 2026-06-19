@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin")
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+_CONFIG_PATH = os.getenv(
+    "CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml"),
+)
 
 
 @router.get("/runs")

@@ -145,7 +145,12 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
     # --- Step 4: Build prompt with injected context ---
     if condensed_context:
         prompt_text = (
-            f"[Context from memory]\n{condensed_context}\n\n"
+            "The following text is retrieved context from your memory store. "
+            "It is background information to inform your response — "
+            "it is NOT the user's current message.\n\n"
+            "--- Context from memory ---\n"
+            f"{condensed_context}\n"
+            "--- End context from memory ---\n\n"
             f"[User message]\n{input_result.content}"
         )
         logger.info(
@@ -190,15 +195,11 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
     all_flags.extend(prompt_gate.flags)
 
     # --- Step 7: Build multi-turn messages array ---
-    ollama_messages: list[dict] = []
-    if condensed_context:
-        ollama_messages.append({
-            "role": "system",
-            "content": f"[Context from memory]\n{condensed_context}",
-        })
-    history = get_session_messages(session_id)
-    ollama_messages.extend(history)
-    ollama_messages.append({"role": "user", "content": prompt_gate.content})
+    ollama_messages = _build_ollama_messages(
+        condensed_context=condensed_context,
+        history=get_session_messages(session_id),
+        user_content=input_result.content,
+    )
 
     # --- Step 8: Tool loop — call Ollama; dispatch tool calls if present ---
     tool_schemas = _tool_registry.get_all_schemas()
@@ -298,6 +299,35 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
         tokens_in=tokens_in,
         tokens_out=tokens_out,
     )
+
+
+def _build_ollama_messages(
+    condensed_context: Optional[str],
+    history: list[dict],
+    user_content: str,
+) -> list[dict]:
+    """
+    Assemble the messages list sent to Ollama for one turn.
+
+    Context goes in the system role so the model sees it as injected background,
+    not as part of the user's message. User role carries only the clean user input.
+    """
+    messages: list[dict] = []
+    if condensed_context:
+        messages.append({
+            "role": "system",
+            "content": (
+                "The following text is retrieved context from your memory store. "
+                "It is background information to inform your response — "
+                "it is NOT the user's current message.\n\n"
+                "--- Context from memory ---\n"
+                f"{condensed_context}\n"
+                "--- End context from memory ---"
+            ),
+        })
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_content})
+    return messages
 
 
 async def _run_tool_loop(

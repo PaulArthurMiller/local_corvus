@@ -764,7 +764,7 @@ These must be followed consistently across all milestones:
 
 ```
 Current milestone: ALL COMPLETE
-Last updated: 2026-06-17
+Last updated: 2026-06-19
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -773,4 +773,6 @@ Last updated: 2026-06-17
 
 **Milestone 3:** Complete — branch `milestone-3-tool-system`, PR merged to main.
 
-**Milestone 4:** Complete — branch `milestone-4-learning-admin-ui`, PR open on GitHub.
+**Milestone 4:** Complete — branch `milestone-4-learning-admin-ui`, PR merged to main.
+
+**Milestone 5:** Complete — branch `milestone-5-chat-ui-quality`, PR open on GitHub.

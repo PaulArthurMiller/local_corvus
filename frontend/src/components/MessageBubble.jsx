@@ -2,13 +2,22 @@
  * MessageBubble — a single chat message with role styling.
  *
  * role: "user" | "assistant"
- * Agent responses include FeedbackButtons if run_id is present.
+ * Agent responses include FeedbackButtons and a Copy button if run_id is present.
  */
 
+import { useState } from 'react'
 import FeedbackButtons from './FeedbackButtons'
 
 export default function MessageBubble({ role, content, runId }) {
   const isUser = role === 'user'
+  const [copied, setCopied] = useState(false)
+
+  function handleCopy() {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
 
   return (
     <div style={{
@@ -31,9 +40,23 @@ export default function MessageBubble({ role, content, runId }) {
       }}>
         {content}
       </div>
-      {!isUser && runId && (
-        <div style={{ marginTop: 2 }}>
-          <FeedbackButtons runId={runId} />
+      {!isUser && (
+        <div style={{ marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+          {runId && <FeedbackButtons runId={runId} />}
+          <button
+            onClick={handleCopy}
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: 11,
+              color: copied ? '#22c55e' : '#999',
+              fontFamily: 'monospace',
+              padding: '2px 6px',
+            }}
+          >
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
         </div>
       )}
     </div>

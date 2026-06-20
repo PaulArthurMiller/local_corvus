@@ -75,6 +75,8 @@ class InteractionResult:
     activated_edge_ids: list[str] = field(default_factory=list)
     tool_call_mu_ids: list[str] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
 
 
 async def run_interaction(message: str, session_id: str) -> InteractionResult:
@@ -200,7 +202,7 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
 
     # --- Step 8: Tool loop — call Ollama; dispatch tool calls if present ---
     tool_schemas = _tool_registry.get_all_schemas()
-    llm_content, tool_call_mu_ids = await _run_tool_loop(
+    llm_content, tool_call_mu_ids, tokens_in, tokens_out = await _run_tool_loop(
         messages=ollama_messages,
         session_id=session_id,
         tool_schemas=tool_schemas,
@@ -271,6 +273,8 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
         activated_mu_ids=activated_mu_ids,
         activated_edge_ids=activated_edge_ids,
         prompt_mu_id=prompt_um.mu_id,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
         latency_ms=latency_ms,
         hyperparameters_snapshot=_HP,
         algorithm=str(_HP.get("algorithm", "simple_rl")),
@@ -291,6 +295,8 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
         activated_edge_ids=activated_edge_ids,
         tool_call_mu_ids=tool_call_mu_ids,
         flags=all_flags,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
     )
 
 
@@ -299,16 +305,20 @@ async def _run_tool_loop(
     session_id: str,
     tool_schemas: list[dict],
     all_flags: list[str],
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], Optional[int], Optional[int]]:
     """
     Call Ollama with registered tools, dispatch any tool calls, and repeat
     until Ollama returns a text response or max_iterations is reached.
 
-    Returns (final_text_response, list_of_tool_call_mu_ids).
+    Returns (final_text_response, list_of_tool_call_mu_ids, tokens_in, tokens_out).
+    tokens_in = prompt_tokens from the final Ollama call (best proxy for context window usage).
+    tokens_out = sum of completion_tokens across all iterations.
     """
     tool_call_mu_ids: list[str] = []
     iteration = 0
     max_iter = _tool_registry.max_iterations
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
 
     while iteration <= max_iter:
         logger.info(
@@ -340,7 +350,21 @@ async def _run_tool_loop(
             logger.error("orchestrator: Ollama connection error — %s", exc)
             raise
 
-        choice = resp.json()["choices"][0]
+        resp_json = resp.json()
+        usage = resp_json.get("usage") or {}
+        if usage.get("prompt_tokens") is not None:
+            tokens_in = int(usage["prompt_tokens"])
+        if usage.get("completion_tokens") is not None:
+            completion = int(usage["completion_tokens"])
+            tokens_out = (tokens_out or 0) + completion
+        logger.info(
+            "orchestrator: Ollama usage iteration=%d prompt_tokens=%s completion_tokens=%s",
+            iteration,
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+        )
+
+        choice = resp_json["choices"][0]
         finish_reason = choice.get("finish_reason", "")
         llm_message = choice["message"]
 
@@ -352,7 +376,7 @@ async def _run_tool_loop(
                 len(content),
                 finish_reason,
             )
-            return content, tool_call_mu_ids
+            return content, tool_call_mu_ids, tokens_in, tokens_out
 
         # Process each tool call in this response
         tool_calls = llm_message["tool_calls"]
@@ -467,4 +491,4 @@ async def _run_tool_loop(
         "returning empty string",
         max_iter,
     )
-    return "", tool_call_mu_ids
+    return "", tool_call_mu_ids, tokens_in, tokens_out

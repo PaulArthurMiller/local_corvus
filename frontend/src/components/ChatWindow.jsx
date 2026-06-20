@@ -1,7 +1,7 @@
 /**
  * ChatWindow — the full chat interface.
  *
- * Manages message history, session ID, and submission state.
+ * Manages message history, session ID, submission state, and token tracking.
  * Each assistant response carries a run_id for feedback submission.
  */
 
@@ -9,13 +9,30 @@ import { useState, useRef, useEffect } from 'react'
 import MessageBubble from './MessageBubble'
 import { sendMessage } from '../api'
 
+const DEFAULT_CONTEXT_WINDOW = 8192
+
 export default function ChatWindow() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [sessionId, setSessionId] = useState(null)
+  const [sessionTokensIn, setSessionTokensIn] = useState(0)
+  const [sessionTokensOut, setSessionTokensOut] = useState(0)
+  const [lastPromptTokens, setLastPromptTokens] = useState(null)
+  const [contextWindowSize, setContextWindowSize] = useState(DEFAULT_CONTEXT_WINDOW)
   const bottomRef = useRef(null)
+
+  // Fetch context window size from config once on mount
+  useEffect(() => {
+    fetch('/admin/config')
+      .then(r => r.ok ? r.json() : null)
+      .then(cfg => {
+        const size = cfg?.model?.context_window_tokens
+        if (size != null) setContextWindowSize(size)
+      })
+      .catch(() => {/* keep default */})
+  }, [])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -35,8 +52,17 @@ export default function ChatWindow() {
 
     try {
       const data = await sendMessage(text, sessionId)
-      console.log(`[ChatWindow] response received run_id=${data.run_id} session_id=${data.session_id}`)
+      console.log(`[ChatWindow] response received run_id=${data.run_id} session_id=${data.session_id} tokens_in=${data.tokens_in} tokens_out=${data.tokens_out}`)
       if (!sessionId) setSessionId(data.session_id)
+
+      if (data.tokens_in != null) {
+        setSessionTokensIn(prev => prev + data.tokens_in)
+        setLastPromptTokens(data.tokens_in)
+      }
+      if (data.tokens_out != null) {
+        setSessionTokensOut(prev => prev + data.tokens_out)
+      }
+
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: data.response,
@@ -61,11 +87,33 @@ export default function ChatWindow() {
     }
   }
 
+  function handleNewSession() {
+    setMessages([])
+    setSessionId(null)
+    setSessionTokensIn(0)
+    setSessionTokensOut(0)
+    setLastPromptTokens(null)
+    setError(null)
+    setInput('')
+    console.log('[ChatWindow] new session started')
+  }
+
+  const contextPct = lastPromptTokens != null
+    ? Math.round(lastPromptTokens / contextWindowSize * 100)
+    : null
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {sessionId && (
-        <div style={{ fontSize: 11, color: '#888', marginBottom: 4, fontFamily: 'monospace' }}>
+        <div style={{ fontSize: 11, color: '#888', marginBottom: 2, fontFamily: 'monospace' }}>
           session: {sessionId}
+        </div>
+      )}
+
+      {lastPromptTokens != null && (
+        <div style={{ fontSize: 11, color: '#888', marginBottom: 6, fontFamily: 'monospace' }}>
+          context: {contextPct}% ({lastPromptTokens.toLocaleString()} / {contextWindowSize.toLocaleString()})
+          {'   '}session: {sessionTokensIn.toLocaleString()} in / {sessionTokensOut.toLocaleString()} out
         </div>
       )}
 
@@ -111,6 +159,23 @@ export default function ChatWindow() {
           }}
           disabled={loading}
         />
+        <button
+          type="button"
+          onClick={handleNewSession}
+          disabled={loading}
+          style={{
+            padding: '0 16px',
+            background: 'transparent',
+            color: '#666',
+            border: '1px solid #ccc',
+            borderRadius: 6,
+            cursor: loading ? 'default' : 'pointer',
+            fontFamily: 'monospace',
+            fontSize: 13,
+          }}
+        >
+          New Session
+        </button>
         <button
           type="submit"
           disabled={loading || !input.trim()}

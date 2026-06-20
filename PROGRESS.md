@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 5 — Chat UI Quality — COMPLETE  
-Next step: Review and merge Milestone 5 PR. All milestones complete — ready for post-learning experiment.
+Current milestone: 6 — Prompt Clarity — COMPLETE  
+Next step: Review and merge Milestone 6 PR.
 
 ## Session log
 
@@ -135,6 +135,16 @@ Next step: Review and merge Milestone 5 PR. All milestones complete — ready fo
   - Branch: milestone-5-chat-ui-quality
   - Note: navigator.clipboard requires secure context (HTTPS or localhost) — safe in development, note for production
 
+- 2026-06-20: /build — Milestone 6 complete
+  - Modified: `backend/core/orchestrator.py` — three changes in run_interaction():
+    1. Step 4: updated prompt_text (prompt MU content) label to match new system message format
+    2. Step 7a: replaced bare `[Context from memory]` tag with explicit natural-language label in system role
+    3. Step 7b: fixed user role message from `prompt_gate.content` (duplicated context) to `input_result.content` (clean user input only)
+    4. Extracted `_build_ollama_messages()` pure helper for testability
+  - Created: `tests/test_core/test_orchestrator.py` (11 tests covering message construction with/without context)
+  - Tests: 11 new tests, 130 total — all passing
+  - Branch: milestone-6-prompt-clarity
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
@@ -142,3 +152,4 @@ Next step: Review and merge Milestone 5 PR. All milestones complete — ready fo
 3. ~~**Tool System** — Universal Tool Interface + File Tool + Analytics + Snapshots~~ ✅ COMPLETE
 4. ~~**Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI~~ ✅ COMPLETE
 5. ~~**Chat UI Quality** — Token counter, copy button, New Session button~~ ✅ COMPLETE
+6. ~~**Prompt Clarity** — Separate memory context from user message in Ollama call~~ ✅ COMPLETE

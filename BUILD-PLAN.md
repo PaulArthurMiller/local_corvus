@@ -589,6 +589,45 @@ Admin UI is built alongside Phase 3 and 4, because it needs run log data to disp
 
 ---
 
+### Milestone 6 — Prompt Clarity: Separate Memory Context from User Message
+
+**Why:** A latent bug in the orchestrator sends retrieved memory context twice to the LLM — once in the `system` role and again embedded inside the `user` role message (because the user role currently uses `prompt_gate.content`, which is the full assembled `prompt_text` including the context block). The LLM therefore sees the user's question buried inside what looks like user-generated text, rather than clearly separated background context. Fixing this removes the duplication and sharpens the signal to the model about what is injected background vs. what the user is actually asking.
+
+**Build:**
+
+1. `core/orchestrator.py` — three targeted changes inside `run_interaction()`:
+   - **Step 4:** Update the `prompt_text` string (stored as the prompt MU) to use natural-language framing instead of bare `[Context from memory]` / `[User message]` markers, keeping it in sync with the actual message sent to Ollama.
+   - **Step 7a:** Improve the `system` role message — replace `[Context from memory]\n{condensed_context}` with an explicit natural-language label that tells the model the block is injected background, not the user's words:
+     ```
+     The following text is retrieved context from your memory store.
+     It is background information to inform your response — it is NOT the user's current message.
+
+     --- Context from memory ---
+     {condensed_context}
+     --- End context from memory ---
+     ```
+   - **Step 7b:** Change the `user` role message from `prompt_gate.content` (which re-includes the full context block) to `input_result.content` (the clean, gated user input only). This eliminates the duplication.
+
+**Tests:**
+- Unit test (new) in `tests/test_core/test_orchestrator.py`: mock `condensed_context` and `input_result`; call `run_interaction()`; assert:
+  - `ollama_messages[0]["role"] == "system"` and `"Context from memory"` is in its content
+  - The final user message role has content equal to the clean user input only
+  - `"Context from memory"` does NOT appear in the user role message
+- Manual: send a chat message that triggers memory retrieval; inspect backend logs; verify context appears once (system role) and user message is clean.
+
+**Done when:**
+- Context appears exactly once in the Ollama message array (system role only)
+- User role message contains only `input_result.content`
+- Prompt MU stored in graph reflects the corrected format
+- New unit test passes
+- Manual smoke test confirms no duplication in logs
+
+**Risks:** None — this is a contained change to one function with no downstream schema changes.
+
+**Estimate:** 1 session
+
+---
+
 ## Open Questions (Flagged — Not Resolved)
 
 These cannot be answered without empirical data. Build Milestones 1-3, run the baseline, then decide. Record each decision and its rationale in PROGRESS.md at the moment it's made.
@@ -763,8 +802,8 @@ These must be followed consistently across all milestones:
 ## Status
 
 ```
-Current milestone: ALL COMPLETE
-Last updated: 2026-06-19
+Current milestone: 6 — Prompt Clarity
+Last updated: 2026-06-20
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -775,4 +814,6 @@ Last updated: 2026-06-19
 
 **Milestone 4:** Complete — branch `milestone-4-learning-admin-ui`, PR merged to main.
 
-**Milestone 5:** Complete — branch `milestone-5-chat-ui-quality`, PR open on GitHub.
+**Milestone 5:** Complete — branch `milestone-5-chat-ui-quality`, PR merged to main.
+
+**Milestone 6:** Not started.

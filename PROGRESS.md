@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 6 — Prompt Clarity — COMPLETE  
-Next step: Review and merge Milestone 6 PR.
+Current milestone: 7 — Multimodal Attachment Support — NOT STARTED  
+Next step: Run the Milestone 7 smoke test (Step 0 in BUILD-PLAN.md) before writing any code. Confirm Gemma 4 E4B accepts the OpenAI-compatible `image_url` content-parts format via Ollama. Record confirmed format here, then /build.
 
 ## Session log
 
@@ -153,3 +153,4 @@ Next step: Review and merge Milestone 6 PR.
 4. ~~**Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI~~ ✅ COMPLETE
 5. ~~**Chat UI Quality** — Token counter, copy button, New Session button~~ ✅ COMPLETE
 6. ~~**Prompt Clarity** — Separate memory context from user message in Ollama call~~ ✅ COMPLETE
+7. **Multimodal Attachment Support** — Image attachments through the UM gate; binary transient only — NOT STARTED

@@ -589,6 +589,105 @@ Admin UI is built alongside Phase 3 and 4, because it needs run log data to disp
 
 ---
 
+### Milestone 7 — Multimodal Attachment Support
+
+**Why this order:** Milestone 6 fixed how clean user input is separated from injected context. Milestone 7 now extends what "user input" can be — text plus images. The gate and orchestrator changes build directly on the corrected message structure from Milestone 6.
+
+**Scope:** Image attachments only (JPEG, PNG, GIF, WEBP). Binary data is transient — never written to SQLite, never indexed for BM25 retrieval, never stored in the audit log as binary. The UM record stores a text description of the attachment. Session history stores text only; images are one-shot per message (design decision: see open questions).
+
+**Step 0: Smoke test Ollama multimodal capability (before writing any code)**
+
+Verify that Gemma 4 E4B accepts the OpenAI-compatible `image_url` content-parts format via Ollama before building anything. This is the riskiest assumption in the milestone.
+
+Run the following Python script directly (not in Docker — run against `localhost:11434` from the host, or adjust host if running inside the container):
+
+```python
+import base64, httpx, pathlib
+
+# Point to any small JPEG you have on disk
+img_bytes = pathlib.Path("test_image.jpg").read_bytes()
+img_b64   = base64.b64encode(img_bytes).decode()
+
+resp = httpx.post(
+    "http://localhost:11434/v1/chat/completions",
+    json={
+        "model": "gemma4:e4b",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image in one sentence."},
+                {"type": "image_url", "url": f"data:image/jpeg;base64,{img_b64}"}
+            ]
+        }],
+        "stream": False,
+    },
+    timeout=120,
+)
+print(resp.status_code)
+print(resp.json()["choices"][0]["message"]["content"])
+```
+
+**Done when smoke test passes:** Ollama returns a coherent one-sentence description of the image. If the format is wrong, adjust the content-parts structure and re-test before proceeding to Step 1. Record the confirmed working format in PROGRESS.md.
+
+---
+
+**Build (after smoke test passes):**
+
+1. `config.yaml` — add attachment limits under `gate:`:
+   ```yaml
+   gate:
+     allowed_attachment_mimetypes:
+       - "image/jpeg"
+       - "image/png"
+       - "image/gif"
+       - "image/webp"
+     max_attachment_size_bytes: 5242880   # 5 MB decoded
+     max_attachments_per_message: 4
+   ```
+
+2. `backend/gate/sanitize.py` — add `sanitize_attachment(filename, mime_type, data_b64, config) -> AttachmentSanitizeResult`. Pure function, no I/O. Checks:
+   - MIME type is in `allowed_attachment_mimetypes`
+   - base64 decodes without error
+   - Decoded byte length ≤ `max_attachment_size_bytes`
+   - Magic bytes of decoded data match claimed MIME type (JPEG: `FF D8 FF`; PNG: `89 50 4E 47`; GIF: `47 49 46 38`; WEBP: bytes 8-11 are `57 45 42 50`)
+   - Returns `AttachmentSanitizeResult(data_bytes, mime_type, filename, size_bytes, flags)`
+
+3. `backend/api/chat.py` — add `AttachmentRequest(filename, mime_type, data_b64)` Pydantic model. Add `attachments: Optional[list[AttachmentRequest]] = None` to `ChatRequest`. Pass sanitized attachments to `run_interaction()`.
+
+4. `backend/core/orchestrator.py` — two targeted changes:
+   - `run_interaction()` Step 1: gate each attachment via `sanitize_attachment()`; build input MU `raw_content` as `{text}\n[Attached: {filename} {mime_type} {size_kb} KB]` for each file; binary data held in a local variable only
+   - `_build_ollama_messages()`: if attachments are present, the final user message `content` becomes a list of parts `[{"type": "text", "text": ...}, {"type": "image_url", "url": "data:{mime};base64,{b64}"}]` instead of a plain string. Session history entry stores text only (images dropped from history — see open questions)
+
+5. `frontend/src/components/ChatWindow.jsx` — add:
+   - Hidden `<input type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple>` triggered by a paperclip button
+   - Attachment state: `const [attachments, setAttachments] = useState([])`
+   - Each attachment in state: `{filename, mime_type, data_b64, preview_url}` (preview_url is an `object URL` for thumbnail display, revoked after send)
+   - Attachment preview strip above the textarea: filename + small thumbnail + remove (×) button per file
+   - Clear attachments on successful send and on New Session
+
+6. `frontend/src/api.js` — `sendMessage(message, sessionId, attachments = [])` — include `attachments` in JSON body as `[{filename, mime_type, data_b64}]` (omit `preview_url` — that's UI-only state)
+
+**Tests:**
+- `test_sanitize.py` (extend existing): `sanitize_attachment` passes a valid JPEG bytes (real or synthetic with correct magic bytes); rejects a MIME type not in allowlist; rejects a file that decodes to bytes larger than the limit; rejects base64 that doesn't decode; rejects bytes whose magic bytes don't match the claimed MIME type.
+- Manual (smoke): attach a JPEG in the Chat UI, send "What do you see?", verify the model describes the image. Inspect backend logs for the attachment flag and the text description in the input MU.
+
+**Done when:**
+- `sanitize_attachment` has full unit test coverage for pass and each failure mode
+- Attaching an image in the Chat UI and sending produces a coherent description from Gemma
+- Input MU `raw_content` contains the text description of the attachment (not binary)
+- Binary attachment data does not appear in `audit.log`, `graph.db`, or any snapshot file
+- All 130 existing tests still pass
+
+**Risks:**
+- ⚠ Smoke test (Step 0) must pass before any code is written. If Ollama's multimodal format for Gemma differs from the OpenAI spec, the `_build_ollama_messages()` change is wrong before it's written.
+- ⚠ `object URL` created by `URL.createObjectURL()` in the frontend must be revoked with `URL.revokeObjectURL()` after send to avoid memory leaks.
+- ? Images in session history — v1 decision: images are dropped from the session history turn after they're sent. The model cannot refer back to "the image I showed you earlier" in a later turn. This is correct for v1 and avoids unbounded RAM growth. Revisit if the research need arises.
+- ? Max attachment size is defined against the decoded byte length. The base64 JSON payload will be ~33% larger. A 5 MB attachment → ~6.7 MB in the request body. This is acceptable for local use; note it in PROGRESS.md.
+
+**Estimate:** 1-2 sessions (smoke test may add a session if format negotiation is needed)
+
+---
+
 ### Milestone 6 — Prompt Clarity: Separate Memory Context from User Message
 
 **Why:** A latent bug in the orchestrator sends retrieved memory context twice to the LLM — once in the `system` role and again embedded inside the `user` role message (because the user role currently uses `prompt_gate.content`, which is the full assembled `prompt_text` including the context block). The LLM therefore sees the user's question buried inside what looks like user-generated text, rather than clearly separated background context. Fixing this removes the duplication and sharpens the signal to the model about what is injected background vs. what the user is actually asking.
@@ -802,8 +901,8 @@ These must be followed consistently across all milestones:
 ## Status
 
 ```
-Current milestone: 6 — Prompt Clarity
-Last updated: 2026-06-20
+Current milestone: 7 — Multimodal Attachment Support
+Last updated: 2026-06-21
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -816,4 +915,6 @@ Last updated: 2026-06-20
 
 **Milestone 5:** Complete — branch `milestone-5-chat-ui-quality`, PR merged to main.
 
-**Milestone 6:** Not started.
+**Milestone 6:** Complete — branch `milestone-6-prompt-clarity`, PR merged to main.
+
+**Milestone 7:** Not started.

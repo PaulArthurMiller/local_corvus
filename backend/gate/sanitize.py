@@ -9,6 +9,7 @@ sanitize_in  — cleans data entering the agent (user input, tool results, LLM r
 sanitize_out — cleans data leaving the agent (tool calls, final responses, memory writes)
 """
 
+import base64
 import os
 import re
 import logging
@@ -45,6 +46,20 @@ _INJECTION_REGEXES: list[re.Pattern] = [
     re.compile(p, re.IGNORECASE) for p in _RAW_PATTERNS
 ]
 
+_ALLOWED_MIMETYPES: list[str] = _GATE_CFG.get(
+    "allowed_attachment_mimetypes",
+    ["image/jpeg", "image/png", "image/gif", "image/webp"],
+)
+_MAX_ATTACHMENT_SIZE: int = _GATE_CFG.get("max_attachment_size_bytes", 5_242_880)
+
+# Magic byte signatures: mime_type -> (expected_bytes, offset)
+_MAGIC_BYTES: dict[str, tuple[bytes, int]] = {
+    "image/jpeg": (bytes([0xFF, 0xD8, 0xFF]), 0),
+    "image/png":  (bytes([0x89, 0x50, 0x4E, 0x47]), 0),
+    "image/gif":  (bytes([0x47, 0x49, 0x46, 0x38]), 0),
+    # WEBP is checked separately: bytes 0-3 == "RIFF" and bytes 8-11 == "WEBP"
+}
+
 
 # ---------------------------------------------------------------------------
 # Result schema
@@ -55,6 +70,17 @@ class SanitizeResult(BaseModel):
     content: str
     flags: list[str]
     blocked: bool = False
+
+
+class AttachmentSanitizeResult(BaseModel):
+    """Result of sanitizing a single image attachment."""
+    data_bytes: bytes
+    mime_type: str
+    filename: str
+    size_bytes: int
+    flags: list[str]
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 # ---------------------------------------------------------------------------
@@ -144,3 +170,98 @@ def sanitize_out(
         logger.debug("sanitize_out [%s]: clean", boundary)
 
     return SanitizeResult(content=content, flags=flags)
+
+
+def sanitize_attachment(
+    filename: str,
+    mime_type: str,
+    data_b64: str,
+    config: Optional[dict] = None,
+) -> AttachmentSanitizeResult:
+    """
+    Sanitize an image attachment at the user_input->agent boundary.
+
+    Pure function, no I/O. Checks: MIME allowlist, base64 decodability,
+    decoded size limit, magic bytes match. Returns decoded bytes on success
+    so callers never re-decode. Returns empty bytes and flags on any failure.
+    """
+    flags: list[str] = []
+    cfg = config or _GATE_CFG
+
+    allowed_mimes: list[str] = cfg.get("allowed_attachment_mimetypes", _ALLOWED_MIMETYPES)
+    max_size: int = cfg.get("max_attachment_size_bytes", _MAX_ATTACHMENT_SIZE)
+
+    # --- MIME type allowlist ---
+    if mime_type not in allowed_mimes:
+        flags.append(f"attachment_mime_rejected:{mime_type}")
+        logger.warning(
+            "sanitize_attachment: rejected MIME '%s' for '%s'", mime_type, filename
+        )
+        return AttachmentSanitizeResult(
+            data_bytes=b"", mime_type=mime_type, filename=filename,
+            size_bytes=0, flags=flags,
+        )
+
+    # --- Base64 decode ---
+    try:
+        data_bytes = base64.b64decode(data_b64, validate=True)
+    except Exception as exc:
+        flags.append(f"attachment_base64_invalid:{exc}")
+        logger.warning(
+            "sanitize_attachment: base64 decode failed for '%s': %s", filename, exc
+        )
+        return AttachmentSanitizeResult(
+            data_bytes=b"", mime_type=mime_type, filename=filename,
+            size_bytes=0, flags=flags,
+        )
+
+    size_bytes = len(data_bytes)
+
+    # --- Size limit ---
+    if size_bytes > max_size:
+        flags.append(f"attachment_size_exceeded:{size_bytes}>{max_size}")
+        logger.warning(
+            "sanitize_attachment: '%s' decoded size %d exceeds limit %d",
+            filename, size_bytes, max_size,
+        )
+        return AttachmentSanitizeResult(
+            data_bytes=b"", mime_type=mime_type, filename=filename,
+            size_bytes=size_bytes, flags=flags,
+        )
+
+    # --- Magic bytes ---
+    if not _check_magic_bytes(data_bytes, mime_type):
+        flags.append(f"attachment_magic_mismatch:{mime_type}")
+        logger.warning(
+            "sanitize_attachment: magic bytes for '%s' don't match claimed MIME '%s'",
+            filename, mime_type,
+        )
+        return AttachmentSanitizeResult(
+            data_bytes=b"", mime_type=mime_type, filename=filename,
+            size_bytes=size_bytes, flags=flags,
+        )
+
+    logger.info(
+        "sanitize_attachment: accepted '%s' mime=%s size=%d bytes",
+        filename, mime_type, size_bytes,
+    )
+    return AttachmentSanitizeResult(
+        data_bytes=data_bytes, mime_type=mime_type, filename=filename,
+        size_bytes=size_bytes, flags=flags,
+    )
+
+
+def _check_magic_bytes(data: bytes, mime_type: str) -> bool:
+    """Return True if the file's leading bytes match the claimed MIME type."""
+    if len(data) < 12:
+        return False
+
+    if mime_type == "image/webp":
+        return data[0:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+    magic_info = _MAGIC_BYTES.get(mime_type)
+    if magic_info is None:
+        return True  # allowlist already guarded; unknown type passes magic check
+
+    expected, offset = magic_info
+    return data[offset: offset + len(expected)] == expected

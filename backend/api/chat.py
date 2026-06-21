@@ -13,7 +13,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from core.orchestrator import run_interaction
+from core.orchestrator import AttachmentInput, run_interaction
 from core.session import create_session, get_session
 from learning.simple_rl import SimpleRL
 from memory.store import store as graph_store
@@ -42,9 +42,16 @@ def _load_weight_update_rate() -> float:
 # ---------------------------------------------------------------------------
 
 
+class AttachmentRequest(BaseModel):
+    filename: str
+    mime_type: str
+    data_b64: str
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    attachments: Optional[list[AttachmentRequest]] = None
 
 
 class ChatResponse(BaseModel):
@@ -90,12 +97,29 @@ async def chat(request: ChatRequest) -> ChatResponse:
         session_id = create_session()
 
     logger.info(
-        "chat: session_id=%s message_len=%d", session_id, len(request.message)
+        "chat: session_id=%s message_len=%d attachments=%d",
+        session_id,
+        len(request.message),
+        len(request.attachments) if request.attachments else 0,
     )
+
+    # Convert API attachment models to orchestrator inputs
+    attachment_inputs = [
+        AttachmentInput(
+            filename=a.filename,
+            mime_type=a.mime_type,
+            data_b64=a.data_b64,
+        )
+        for a in (request.attachments or [])
+    ]
 
     # --- Delegate to orchestrator ---
     try:
-        result = await run_interaction(request.message, session_id)
+        result = await run_interaction(
+            request.message,
+            session_id,
+            attachments=attachment_inputs or None,
+        )
     except Exception as exc:
         logger.error("chat: orchestrator error — %s", exc)
         raise HTTPException(status_code=502, detail=str(exc))

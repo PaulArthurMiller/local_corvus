@@ -6,6 +6,13 @@ model:
 
 gate:
   max_input_length: 4096
+  allowed_attachment_mimetypes:
+    - "image/jpeg"
+    - "image/png"
+    - "image/gif"
+    - "image/webp"
+  max_attachment_size_bytes: 5242880  # 5 MB decoded; base64 payload is ~33% larger
+  max_attachments_per_message: 4
   # Deterministic regex patterns for prompt injection detection.
   # These are evaluated in order; any match raises a flag.
   injection_patterns:

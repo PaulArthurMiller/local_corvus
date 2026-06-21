@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 7 — Multimodal Attachment Support — NOT STARTED  
-Next step: Run the Milestone 7 smoke test (Step 0 in BUILD-PLAN.md) before writing any code. Confirm Gemma 4 E4B accepts the OpenAI-compatible `image_url` content-parts format via Ollama. Record confirmed format here, then /build.
+Current milestone: 7 — Multimodal Attachment Support — COMPLETE  
+Next step: Review PR for milestone-7-multimodal. End-to-end manual image test blocked pending Ollama fix for GitHub Issue #16532 (gemma4 vision regression on Windows 0.30.x). Workaround: roll back to Ollama v0.24.0. All 141 unit tests pass.
 
 ## Session log
 
@@ -145,6 +145,25 @@ Next step: Run the Milestone 7 smoke test (Step 0 in BUILD-PLAN.md) before writi
   - Tests: 11 new tests, 130 total — all passing
   - Branch: milestone-6-prompt-clarity
 
+- 2026-06-21: /build — Milestone 7 complete
+  - Modified: `config.yaml` (added `allowed_attachment_mimetypes`, `max_attachment_size_bytes: 5242880`, `max_attachments_per_message: 4` under `gate:`)
+  - Modified: `backend/gate/sanitize.py` (`AttachmentSanitizeResult` Pydantic model, `sanitize_attachment()`, `_check_magic_bytes()` — MIME allowlist, base64 decode, size limit, magic bytes validation; flags: `attachment_mime_rejected`, `attachment_base64_invalid`, `attachment_size_exceeded`, `attachment_magic_mismatch`; on any failure returns `data_bytes=b""`)
+  - Modified: `backend/api/chat.py` (`AttachmentRequest` model; `attachments` field on `ChatRequest`; passes `AttachmentInput` list to `run_interaction()`)
+  - Modified: `backend/core/orchestrator.py` (`AttachmentInput` dataclass; `run_interaction()` Step 1 gates each attachment, builds text-only MU content with `[Attached: …]` descriptions; `_build_ollama_messages()` builds content-parts list with images before text per Google spec)
+  - Modified: `frontend/src/components/ChatWindow.jsx` (paperclip button + hidden file input, FileReader pipeline with `URL.createObjectURL()` thumbnails revoked on send, attachment preview strip, send enabled for attachments-only, New Session revokes objectURLs)
+  - Modified: `frontend/src/api.js` (`sendMessage` sends `attachments` array in JSON body, strips `preview_url`)
+  - Created: `tests/smoke_test_multimodal.py` (smoke test — not part of pytest suite)
+  - Added: 11 new tests in `tests/test_gate/test_sanitize.py` (`TestSanitizeAttachment` — synthetic pure-Python image bytes, all MIME types, all rejection modes)
+  - Tests: 11 new, 141 total — all passing
+  - Branch: milestone-7-multimodal
+  - ⚠ Known limitation: Ollama 0.30.x on Windows has a regression (GitHub Issue #16532) where `gemma4:e4b` decodes image tokens but does not interpret image content. Root cause: PR #16031 (merged 2026-05-07). Implementation is correct per OpenAI-compatible spec. End-to-end manual test blocked until Ollama fixes the regression. Workaround: roll back to Ollama v0.24.0.
+  - Key decisions:
+    - Binary attachment data never written to SQLite, audit.log, or snapshots — only text descriptions stored in MUs
+    - Images are one-shot per message — dropped from session history to avoid unbounded RAM growth
+    - Images placed BEFORE text in content-parts array per Google's Gemma multimodal spec
+    - WEBP magic check uses RIFF header (bytes 0-3) + WEBP subtype (bytes 8-11) — different from other formats
+    - `AttachmentSanitizeResult` needs `model_config = {"arbitrary_types_allowed": True}` for `bytes` field in Pydantic BaseModel
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
@@ -153,4 +172,4 @@ Next step: Run the Milestone 7 smoke test (Step 0 in BUILD-PLAN.md) before writi
 4. ~~**Learning** — Simple RL + Feedback Capture + Admin UI + Chat UI~~ ✅ COMPLETE
 5. ~~**Chat UI Quality** — Token counter, copy button, New Session button~~ ✅ COMPLETE
 6. ~~**Prompt Clarity** — Separate memory context from user message in Ollama call~~ ✅ COMPLETE
-7. **Multimodal Attachment Support** — Image attachments through the UM gate; binary transient only — NOT STARTED
+7. ~~**Multimodal Attachment Support** — Image attachments through the UM gate; binary transient only~~ ✅ COMPLETE

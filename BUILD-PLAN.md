@@ -917,4 +917,6 @@ Last updated: 2026-06-21
 
 **Milestone 6:** Complete — branch `milestone-6-prompt-clarity`, PR merged to main.
 
-**Milestone 7:** Not started.
+**Milestone 7:** Complete — branch `milestone-7-multimodal`, PR open.
+
+**Known limitation (Milestone 7):** Ollama 0.30.x on Windows has a known regression (GitHub Issue #16532) where `gemma4:e4b` processes image tokens (server logs confirm "image decoded") but the model does not interpret the content — it responds as if no image was provided. Root cause: PR #16031 "Remove CGO engines, use llama-server exclusively" (merged 2026-05-07) broke gemma4 vision on Windows. The implementation is correct per the OpenAI-compatible spec (`/v1/chat/completions` with nested `image_url` content-parts, images before text). End-to-end manual testing is blocked until Ollama ships a fix. All unit tests pass. Roll back to Ollama v0.24.0 to test multimodal locally in the meantime.

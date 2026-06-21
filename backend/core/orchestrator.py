@@ -7,6 +7,7 @@ Ollama (with tool loop) -> analytics -> snapshot -> return.
 Does not implement business logic; routes data between modules.
 """
 
+import base64
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ import yaml
 from analytics.run_log import RunRecord, capture_run
 from core.session import append_session_message, get_session_messages
 from gate.audit import append_audit
-from gate.sanitize import sanitize_in, sanitize_out
+from gate.sanitize import AttachmentSanitizeResult, sanitize_attachment, sanitize_in, sanitize_out
 from gate.um import create_um
 from memory.extractor import extract
 from memory.retrieval import retrieve
@@ -64,6 +65,14 @@ _tool_registry = ToolRegistry(config=_CONFIG)
 
 
 @dataclass
+class AttachmentInput:
+    """Raw attachment data from the API layer, before sanitization."""
+    filename: str
+    mime_type: str
+    data_b64: str
+
+
+@dataclass
 class InteractionResult:
     response: str
     session_id: str
@@ -79,12 +88,16 @@ class InteractionResult:
     tokens_out: Optional[int] = None
 
 
-async def run_interaction(message: str, session_id: str) -> InteractionResult:
+async def run_interaction(
+    message: str,
+    session_id: str,
+    attachments: Optional[list[AttachmentInput]] = None,
+) -> InteractionResult:
     """
     Run the full agent pipeline for one user turn.
 
     Pipeline:
-      sanitize_in -> create input MU -> retrieve -> extract ->
+      sanitize_in -> gate attachments -> create input MU -> retrieve -> extract ->
       build prompt -> create prompt MU + edges -> sanitize_out ->
       Ollama (with tool loop) -> sanitize_in -> create output MU ->
       capture_run -> take_snapshot -> return
@@ -94,12 +107,46 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
     all_flags: list[str] = []
     tool_call_mu_ids: list[str] = []
 
-    # --- Step 1: Gate user input ---
+    # --- Step 1: Gate user input and attachments ---
     input_result = sanitize_in(message, boundary="user_input->agent")
     all_flags.extend(input_result.flags)
 
+    # Gate each attachment; binary held in memory only — never written to DB or log
+    accepted_attachments: list[AttachmentSanitizeResult] = []
+    attachment_descriptions: list[str] = []
+    for att in (attachments or []):
+        att_result = sanitize_attachment(
+            filename=att.filename,
+            mime_type=att.mime_type,
+            data_b64=att.data_b64,
+        )
+        all_flags.extend(att_result.flags)
+        if att_result.flags:
+            attachment_descriptions.append(
+                f"[Rejected: {att.filename} {att.mime_type} — {att_result.flags}]"
+            )
+            logger.warning(
+                "orchestrator: attachment rejected filename=%s flags=%s",
+                att.filename, att_result.flags,
+            )
+        else:
+            size_kb = round(att_result.size_bytes / 1024, 1)
+            accepted_attachments.append(att_result)
+            attachment_descriptions.append(
+                f"[Attached: {att_result.filename} {att_result.mime_type} {size_kb} KB]"
+            )
+            logger.info(
+                "orchestrator: attachment accepted filename=%s mime=%s size=%d bytes",
+                att_result.filename, att_result.mime_type, att_result.size_bytes,
+            )
+
+    # Input MU content includes text descriptions of attachments (never binary)
+    input_mu_content = input_result.content
+    if attachment_descriptions:
+        input_mu_content = input_result.content + "\n" + "\n".join(attachment_descriptions)
+
     input_um = create_um(
-        content=input_result.content,
+        content=input_mu_content,
         source_type="user_input",
         boundary="user_input->agent",
         direction="in",
@@ -199,6 +246,7 @@ async def run_interaction(message: str, session_id: str) -> InteractionResult:
         condensed_context=condensed_context,
         history=get_session_messages(session_id),
         user_content=input_result.content,
+        sanitized_attachments=accepted_attachments or None,
     )
 
     # --- Step 8: Tool loop — call Ollama; dispatch tool calls if present ---
@@ -305,12 +353,17 @@ def _build_ollama_messages(
     condensed_context: Optional[str],
     history: list[dict],
     user_content: str,
+    sanitized_attachments: Optional[list[AttachmentSanitizeResult]] = None,
 ) -> list[dict]:
     """
     Assemble the messages list sent to Ollama for one turn.
 
     Context goes in the system role so the model sees it as injected background,
     not as part of the user's message. User role carries only the clean user input.
+
+    If sanitized_attachments are present, the user message content becomes a
+    list of content-parts (text + image_url). Session history always stores
+    text only — images are one-shot per message and dropped from history.
     """
     messages: list[dict] = []
     if condensed_context:
@@ -326,7 +379,22 @@ def _build_ollama_messages(
             ),
         })
     messages.extend(history)
-    messages.append({"role": "user", "content": user_content})
+
+    if sanitized_attachments:
+        # OpenAI-compatible content-parts format; image comes before text
+        # so the model processes visual context before the question
+        content_parts: list[dict] = []
+        for att in sanitized_attachments:
+            b64 = base64.b64encode(att.data_bytes).decode()
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{att.mime_type};base64,{b64}"},
+            })
+        content_parts.append({"type": "text", "text": user_content})
+        messages.append({"role": "user", "content": content_parts})
+    else:
+        messages.append({"role": "user", "content": user_content})
+
     return messages
 
 

@@ -1,0 +1,52 @@
+version: "v1"
+
+# Phenomenon definitions — each probe_id maps to one of these types.
+phenomenon_map:
+  ranking_improvement:
+    description: "Gold MU rank should decrease over sessions within the primary cluster"
+  cross_cluster_transfer:
+    description: "Bridge MU should surface on adjacent-cluster probes via edge traversal (hop_depth > 0)"
+  process_rule_adherence:
+    description: "Output must satisfy the named rule; measured on output, not retrieved set"
+
+# Probe definitions.
+# Fill in prompt_text and gold_mu_ids after seed fixture generation.
+# probe_id must be unique across all probes.
+# gold_mu_ids: list of mu_id strings that the retrieval engine should surface.
+# is_bridge_probe: true if this probe is designed to trigger cross-cluster transfer.
+# bridge_pair_id: probe_id of the paired probe (if is_bridge_probe is true).
+probes:
+  - probe_id: "p01"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: ""
+    gold_mu_ids: []
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p02"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: ""
+    gold_mu_ids: []
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p03"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: ""
+    gold_mu_ids: []
+    is_bridge_probe: true
+    bridge_pair_id: "p04"
+
+  - probe_id: "p04"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: ""
+    gold_mu_ids: []
+    is_bridge_probe: true
+    bridge_pair_id: "p03"
+
+  - probe_id: "p05"
+    phenomenon_type: "process_rule_adherence"
+    prompt_text: ""
+    gold_mu_ids: []
+    is_bridge_probe: false
+    bridge_pair_id: null

@@ -78,7 +78,9 @@ CREATE TABLE IF NOT EXISTS analytics (
     full_config_snapshot TEXT NOT NULL DEFAULT '{}',
     condition_label TEXT,
     turn_index INTEGER,
-    session_turn_index INTEGER
+    session_turn_index INTEGER,
+    measurement_session_index INTEGER,
+    is_probe_turn INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS feedback_events (
@@ -90,12 +92,47 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     is_probe_turn INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS probes (
+    probe_id TEXT PRIMARY KEY,
+    probe_set_version TEXT NOT NULL,
+    phenomenon_type TEXT NOT NULL,
+    prompt_text TEXT NOT NULL,
+    gold_mu_ids TEXT NOT NULL DEFAULT '[]',
+    is_bridge_probe INTEGER NOT NULL DEFAULT 0,
+    bridge_pair_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS probe_results (
+    result_id TEXT PRIMARY KEY,
+    probe_id TEXT NOT NULL REFERENCES probes(probe_id),
+    run_id TEXT REFERENCES analytics(run_id),
+    measurement_session_index INTEGER NOT NULL,
+    condition_label TEXT NOT NULL,
+    retrieved_mu_ids TEXT NOT NULL DEFAULT '[]',
+    gold_mu_rank INTEGER,
+    retrieval_precision REAL,
+    retrieval_recall REAL,
+    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
+    fixture_version TEXT PRIMARY KEY,
+    manifest_hash TEXT NOT NULL,
+    mu_count INTEGER NOT NULL,
+    type_distribution TEXT NOT NULL DEFAULT '{}',
+    generation_date TEXT NOT NULL,
+    generation_record TEXT NOT NULL DEFAULT '[]'
+);
+
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_mu_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_mu_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics(session_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON analytics(timestamp);
 CREATE INDEX IF NOT EXISTS idx_feedback_events_run ON feedback_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_events_probe ON feedback_events(is_probe_turn);
+CREATE INDEX IF NOT EXISTS idx_probe_results_probe ON probe_results(probe_id);
+CREATE INDEX IF NOT EXISTS idx_probe_results_session ON probe_results(measurement_session_index);
+CREATE INDEX IF NOT EXISTS idx_probe_results_condition ON probe_results(condition_label);
 """
 
 
@@ -122,6 +159,8 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("analytics", "condition_label", "TEXT"),
         ("analytics", "turn_index", "INTEGER"),
         ("analytics", "session_turn_index", "INTEGER"),
+        ("analytics", "measurement_session_index", "INTEGER"),
+        ("analytics", "is_probe_turn", "INTEGER NOT NULL DEFAULT 0"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -374,7 +413,8 @@ class GraphStore:
                     bm25_scores_per_mu, entry_point_mu_ids, candidate_set_before_ranking,
                     traversal_path, hop_depth_per_retrieved_mu, edge_contributions,
                     assembled_prompt_json, config_hash, full_config_snapshot,
-                    condition_label, turn_index, session_turn_index
+                    condition_label, turn_index, session_turn_index,
+                    measurement_session_index, is_probe_turn
                 ) VALUES (
                     :run_id, :session_id, :timestamp, :input_mu_id, :output_mu_id,
                     :tool_calls, :activated_mu_ids, :activated_edge_ids, :prompt_mu_id,
@@ -383,7 +423,8 @@ class GraphStore:
                     :bm25_scores_per_mu, :entry_point_mu_ids, :candidate_set_before_ranking,
                     :traversal_path, :hop_depth_per_retrieved_mu, :edge_contributions,
                     :assembled_prompt_json, :config_hash, :full_config_snapshot,
-                    :condition_label, :turn_index, :session_turn_index
+                    :condition_label, :turn_index, :session_turn_index,
+                    :measurement_session_index, :is_probe_turn
                 )
                 """,
                 {
@@ -415,6 +456,8 @@ class GraphStore:
                     "condition_label": run.get("condition_label"),
                     "turn_index": run.get("turn_index"),
                     "session_turn_index": run.get("session_turn_index"),
+                    "measurement_session_index": run.get("measurement_session_index"),
+                    "is_probe_turn": 1 if run.get("is_probe_turn") else 0,
                 },
             )
             await db.commit()
@@ -619,6 +662,188 @@ class GraphStore:
         finally:
             await db.close()
         return dict(row) if row is not None else None
+
+
+    async def sync_probes(self, probes: list[dict]) -> None:
+        """
+        Upsert probe definitions from YAML into the probes table.
+        Called on app startup to keep the DB in sync with the probe set file.
+        """
+        import json as _json
+        db = await _open_db()
+        try:
+            for probe in probes:
+                await db.execute(
+                    """
+                    INSERT INTO probes
+                        (probe_id, probe_set_version, phenomenon_type, prompt_text,
+                         gold_mu_ids, is_bridge_probe, bridge_pair_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(probe_id) DO UPDATE SET
+                        probe_set_version=excluded.probe_set_version,
+                        phenomenon_type=excluded.phenomenon_type,
+                        prompt_text=excluded.prompt_text,
+                        gold_mu_ids=excluded.gold_mu_ids,
+                        is_bridge_probe=excluded.is_bridge_probe,
+                        bridge_pair_id=excluded.bridge_pair_id
+                    """,
+                    (
+                        probe["probe_id"],
+                        probe["probe_set_version"],
+                        probe["phenomenon_type"],
+                        probe.get("prompt_text", ""),
+                        _json.dumps(probe.get("gold_mu_ids", [])),
+                        1 if probe.get("is_bridge_probe") else 0,
+                        probe.get("bridge_pair_id"),
+                    ),
+                )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info("store: synced %d probes to DB", len(probes))
+
+    async def get_probe(self, probe_id: str) -> Optional[dict]:
+        """Fetch a single probe definition by ID."""
+        import json as _json
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM probes WHERE probe_id = ?", (probe_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        if row is None:
+            return None
+        r = dict(row)
+        r["gold_mu_ids"] = _json.loads(r.get("gold_mu_ids") or "[]")
+        r["is_bridge_probe"] = bool(r.get("is_bridge_probe", 0))
+        return r
+
+    async def insert_probe_result(self, result: dict) -> None:
+        """Insert a probe result into the probe_results table."""
+        import json as _json
+        db = await _open_db()
+        try:
+            await db.execute(
+                """
+                INSERT INTO probe_results
+                    (result_id, probe_id, run_id, measurement_session_index,
+                     condition_label, retrieved_mu_ids, gold_mu_rank,
+                     retrieval_precision, retrieval_recall, bm25_scores_per_mu)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result["result_id"],
+                    result["probe_id"],
+                    result.get("run_id"),
+                    result["measurement_session_index"],
+                    result["condition_label"],
+                    _json.dumps(result.get("retrieved_mu_ids", [])),
+                    result.get("gold_mu_rank"),
+                    result.get("retrieval_precision"),
+                    result.get("retrieval_recall"),
+                    _json.dumps(result.get("bm25_scores_per_mu", {})),
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info(
+            "store: inserted probe_result result_id=%s probe_id=%s",
+            result["result_id"],
+            result["probe_id"],
+        )
+
+    async def query_probe_results(
+        self,
+        probe_id: Optional[str] = None,
+        condition_label: Optional[str] = None,
+        measurement_session_index: Optional[int] = None,
+    ) -> list[dict]:
+        """Query probe results with optional filters."""
+        import json as _json
+        conditions = []
+        params: list = []
+        if probe_id:
+            conditions.append("probe_id = ?")
+            params.append(probe_id)
+        if condition_label:
+            conditions.append("condition_label = ?")
+            params.append(condition_label)
+        if measurement_session_index is not None:
+            conditions.append("measurement_session_index = ?")
+            params.append(measurement_session_index)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM probe_results {where} ORDER BY measurement_session_index ASC"
+
+        db = await _open_db()
+        try:
+            async with db.execute(sql, params) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        result = []
+        for row in rows:
+            r = dict(row)
+            r["retrieved_mu_ids"] = _json.loads(r.get("retrieved_mu_ids") or "[]")
+            r["bm25_scores_per_mu"] = _json.loads(r.get("bm25_scores_per_mu") or "{}")
+            result.append(r)
+        return result
+
+    async def insert_seed_fixture_manifest(self, manifest: dict) -> None:
+        """Insert or replace a seed fixture manifest record."""
+        import json as _json
+        db = await _open_db()
+        try:
+            await db.execute(
+                """
+                INSERT INTO seed_fixture_manifest
+                    (fixture_version, manifest_hash, mu_count,
+                     type_distribution, generation_date, generation_record)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fixture_version) DO UPDATE SET
+                    manifest_hash=excluded.manifest_hash,
+                    mu_count=excluded.mu_count,
+                    type_distribution=excluded.type_distribution,
+                    generation_date=excluded.generation_date,
+                    generation_record=excluded.generation_record
+                """,
+                (
+                    manifest["fixture_version"],
+                    manifest["manifest_hash"],
+                    manifest["mu_count"],
+                    _json.dumps(manifest.get("type_distribution", {})),
+                    manifest["generation_date"],
+                    _json.dumps(manifest.get("generation_record", [])),
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info(
+            "store: inserted seed_fixture_manifest version=%s", manifest["fixture_version"]
+        )
+
+    async def get_seed_fixture_manifest(self, version: str) -> Optional[dict]:
+        """Fetch a seed fixture manifest by version. Returns None if not found."""
+        import json as _json
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM seed_fixture_manifest WHERE fixture_version = ?", (version,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        if row is None:
+            return None
+        r = dict(row)
+        r["type_distribution"] = _json.loads(r.get("type_distribution") or "{}")
+        r["generation_record"] = _json.loads(r.get("generation_record") or "[]")
+        return r
 
 
 # Module-level singleton — imported by other modules

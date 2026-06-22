@@ -6,11 +6,13 @@ import { useState } from 'react'
 import RunLogTable from './components/RunLogTable'
 import LearningCurveChart from './components/LearningCurveChart'
 import MemoryInspector from './components/MemoryInspector'
+import ProbeResults from './components/ProbeResults'
 
 const TABS = [
   { id: 'runs', label: 'Run Log' },
   { id: 'curve', label: 'Learning Curve' },
   { id: 'graph', label: 'Memory Inspector' },
+  { id: 'probes', label: 'Probe Results' },
 ]
 
 export default function App() {
@@ -48,6 +50,7 @@ export default function App() {
         {activeTab === 'runs' && <RunLogTable />}
         {activeTab === 'curve' && <LearningCurveChart />}
         {activeTab === 'graph' && <MemoryInspector />}
+        {activeTab === 'probes' && <ProbeResults />}
       </div>
     </div>
   )

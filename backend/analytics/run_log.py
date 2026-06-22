@@ -60,6 +60,10 @@ class RunRecord(BaseModel):
     turn_index: Optional[int] = None
     session_turn_index: Optional[int] = None
 
+    # Probe / experiment session tracking
+    measurement_session_index: Optional[int] = None
+    is_probe_turn: bool = False
+
 
 async def capture_run(run: RunRecord) -> None:
     """

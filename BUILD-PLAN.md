@@ -898,10 +898,420 @@ These must be followed consistently across all milestones:
 
 ---
 
+### Milestone 8 — Core Instrumentation: Retrieval Decomposition, Turn Indexing, Edge Lifecycle, Feedback-Event Log
+
+**Why this milestone exists:** Seven milestones built the platform. This milestone makes it experimentally legible. Gap analysis against `.agents/INSTRUMENTATION_AUDIT_CHECKLIST.md` found that the current analytics pipeline captures run-level summaries but discards the intermediate quantities needed to reconstruct any individual retrieval from logs alone — a key sign-off requirement. Every gap addressed here is a field you will wish you had when a learning curve does something unexpected.
+
+**What already exists:** `activated_mu_ids`, `activated_edge_ids`, `feedback_signal`, `weight_updates` ({edge_id, old_weight, new_weight}), `hyperparameters_snapshot` (hyperparameters section only), `prompt_mu_id` (prompt MU text), `learning_algo_id`.
+
+**What's missing (all MISSING or PARTIAL in the checklist):** BM25 per-MU scores, K1 entry points, the candidate set before cutoff, structured traversal path with hop depth, edge contributions per candidate, the full assembled Ollama messages array, turn index, session turn index, condition label, full config snapshot, config hash, edge creation metadata (trigger + creating run), enriched weight-update records (source/target MU IDs, feedback-event FK), and a dedicated feedback-event log including an explicit "none" verdict for turns without feedback.
+
+**Build:**
+
+**1. `backend/memory/retrieval.py` — expand `RetrievalResult`**
+
+Add six new fields (all values are already computed inside `retrieve()`; they just aren't returned):
+
+```python
+@dataclass
+class RetrievalResult:
+    mus: list[dict] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+    activated_mu_ids: list[str] = field(default_factory=list)
+    activated_edge_ids: list[str] = field(default_factory=list)
+    # --- NEW ---
+    bm25_scores_per_mu: dict[str, float] = field(default_factory=dict)
+    # Cumulative BM25 score per candidate MU. Sourced from candidate_scores dict.
+
+    entry_point_mu_ids: list[str] = field(default_factory=list)
+    # K1 MU IDs — BM25 funnel entry points before traversal. Distinguishes
+    # "surfaced via lexical match" from "surfaced via edge traversal."
+
+    candidate_set_before_ranking: list[dict] = field(default_factory=list)
+    # All multi-hit (>=2 keyword) candidates before K1 cutoff, each as:
+    # {mu_id, keyword_hit_count, bm25_score, edge_weight_sum}
+
+    traversal_path: list[dict] = field(default_factory=list)
+    # Ordered hops K1→K2, each as:
+    # {source_mu_id, edge_id, target_mu_id, hop_depth}
+    # hop_depth=1 for the current single-hop design; field is future-proof.
+
+    hop_depth_per_retrieved_mu: dict[str, int] = field(default_factory=dict)
+    # {mu_id: depth} — 0 for K1 (lexical entry), 1 for K2 (traversal hop).
+    # Cross-cluster transfer signature: gold MU surfaces at depth > 0.
+
+    edge_contributions: dict[str, float] = field(default_factory=dict)
+    # Total edge weight contribution per candidate MU (sum of connected edge
+    # weights). Separates the edge-learned signal from the BM25 lexical signal
+    # in the K1 composite score.
+```
+
+No logic changes needed inside `retrieve()` — populate these fields from values already computed and include them in the final `RetrievalResult(...)` constructor call.
+
+**2. `backend/analytics/run_log.py` — expand `RunRecord`**
+
+```python
+# Claim 2 — retrieval decomposition
+bm25_scores_per_mu: dict[str, Any] = Field(default_factory=dict)
+entry_point_mu_ids: list[str] = Field(default_factory=list)
+candidate_set_before_ranking: list[dict] = Field(default_factory=list)
+traversal_path: list[dict] = Field(default_factory=list)
+hop_depth_per_retrieved_mu: dict[str, Any] = Field(default_factory=dict)
+edge_contributions: dict[str, Any] = Field(default_factory=dict)
+assembled_prompt_json: list[dict] = Field(default_factory=list)
+# Full Ollama messages array. Image base64 data replaced with
+# "[image: {filename} {size_kb}KB]" — keeps it inspectable without bloat.
+
+# Claim 3 — config traceability
+config_hash: Optional[str] = None          # SHA-256 of full resolved config
+full_config_snapshot: dict[str, Any] = Field(default_factory=dict)
+condition_label: Optional[str] = None      # "learning" | "static-weight" | "random-weight"
+
+# Turn/session indexing
+turn_index: Optional[int] = None           # global sequential across all runs
+session_turn_index: Optional[int] = None   # sequential within this session
+```
+
+**3. `backend/memory/store.py` — schema additions + migration**
+
+a) Update `CREATE TABLE analytics` to include all new columns with defaults.
+
+b) Update `CREATE TABLE edges` to include:
+- `creation_run_id TEXT` — FK to analytics.run_id
+- `creation_trigger TEXT` — "prompt_construction" | "co_activation" | "feedback" | "traversal"
+
+c) Add `CREATE TABLE IF NOT EXISTS feedback_events`:
+```sql
+CREATE TABLE IF NOT EXISTS feedback_events (
+    feedback_event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES analytics(run_id),
+    verdict TEXT NOT NULL,     -- thumbs_up | thumbs_down | none
+    verdict_basis TEXT,        -- checklist_pass | confabulation | rule_violation | user_named | none
+    turn_index INTEGER,
+    is_probe_turn INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_run ON feedback_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_probe ON feedback_events(is_probe_turn);
+```
+
+d) Add `_migrate_db()` function that runs `ALTER TABLE ... ADD COLUMN` for each new column inside a try/except block — idempotent for existing databases that pre-date this milestone.
+
+e) Add new store methods:
+- `get_next_turn_index() -> int` — `COUNT(*) + 1` from analytics
+- `get_session_turn_count(session_id: str) -> int` — COUNT of runs for this session
+- `insert_feedback_event(event: dict) -> None`
+- `get_feedback_events_for_run(run_id: str) -> list[dict]`
+- Update `create_edge()` to accept optional `creation_run_id` and `creation_trigger`
+- Update `insert_run()` to serialize and store all new JSON fields
+
+**4. `backend/core/orchestrator.py` — wire new fields**
+
+a) Before building `RunRecord`, compute:
+- `turn_index = await graph_store.get_next_turn_index()`
+- `session_turn_index = await graph_store.get_session_turn_count(session_id)`
+- `config_hash = hashlib.sha256(json.dumps(_CONFIG, sort_keys=True).encode()).hexdigest()`
+- `condition_label = _CONFIG.get("experiment", {}).get("condition_label")`
+
+b) When calling `graph_store.create_edge()` in Steps 5 and 9, pass:
+- `creation_run_id=run_id`
+- `creation_trigger="prompt_construction"`
+
+c) Build `assembled_prompt_json` by copying `ollama_messages` and replacing any base64 image data in `image_url` content-parts with `"[image: {filename} {size_kb}KB]"`.
+
+d) Pass all new `RetrievalResult` fields through to `RunRecord`.
+
+**5. `backend/api/chat.py` — enrich feedback endpoint**
+
+a) Add optional fields to `FeedbackRequest`:
+```python
+verdict_basis: Optional[str] = None    # naming the rule or issue
+is_probe_turn: bool = False
+```
+
+b) After `update_edge_weight()` calls, create a `FeedbackEvent` record:
+- `verdict = "thumbs_up" if signal == 1 else "thumbs_down"`
+- Call `record_feedback_event()` with `run_id`, `verdict`, `verdict_basis`, `turn_index` (from run record), `is_probe_turn`
+
+c) Enrich each entry in `weight_updates` list with `source_mu_id`, `target_mu_id` (already in the fetched edge record), and `feedback_event_id`.
+
+**6. New: `backend/analytics/feedback_events.py`**
+
+```python
+class FeedbackEvent(BaseModel):
+    feedback_event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str
+    verdict: str           # "thumbs_up" | "thumbs_down" | "none"
+    verdict_basis: Optional[str] = None
+    turn_index: Optional[int] = None
+    is_probe_turn: bool = False
+
+async def record_feedback_event(event: FeedbackEvent) -> None:
+    await graph_store.insert_feedback_event(event.model_dump())
+```
+
+**7. `config.yaml` — add experiment section**
+
+```yaml
+experiment:
+  condition_label: "learning"   # change to "static-weight" or "random-weight" for control runs
+```
+
+**Tests:**
+- `test_retrieval.py` (extend): verify all six new `RetrievalResult` fields are populated; `bm25_scores_per_mu` contains only MUs that matched a keyword; `entry_point_mu_ids` matches K1; `traversal_path` is empty when no K2 traversal occurs; `candidate_set_before_ranking` includes all multi-hit candidates; `hop_depth_per_retrieved_mu` is 0 for K1 and 1 for K2 MUs.
+- `test_run_log.py` (extend): `RunRecord` round-trips all new fields through SQLite; `config_hash` is consistent for same config.
+- `test_store.py` (extend): `create_edge()` stores `creation_run_id` and `creation_trigger`; `get_next_turn_index()` returns 1 for empty DB and increments; `insert_feedback_event()` and `get_feedback_events_for_run()` round-trip correctly.
+- `test_feedback_events.py` (new): `POST /feedback` with `verdict_basis="checklist_pass"` → verify `feedback_event` record created in DB; verify `weight_updates` list includes `source_mu_id`, `target_mu_id`, `feedback_event_id`.
+- **Sign-off check (manual):** Run one interaction, then send feedback. Retrieve the run record from `/admin/runs`. Verify: `entry_point_mu_ids` is a non-empty list; `traversal_path` has `{source_mu_id, edge_id, target_mu_id, hop_depth}` entries; `assembled_prompt_json` shows the system/user/history structure; `config_hash` is a 64-char hex string; `feedback_events` table has exactly one row; that row's `run_id` matches the run; `weight_updates[0]` contains `source_mu_id` and `feedback_event_id`.
+
+**Done when:**
+- All new fields appear in a run record from `/admin/runs`
+- A single run can be walked end-to-end from its record: `traversal_path` + `bm25_scores_per_mu` + `edge_contributions` explain the retrieved set; `assembled_prompt_json` shows the exact context sent to Gemma; `config_hash` + `full_config_snapshot` prove the config state — no re-execution required
+- `feedback_events` table contains one row per `/feedback` call, not per run
+- `edges` table has `creation_run_id` and `creation_trigger` populated for all edges created after this milestone
+- `turn_index` increments monotonically across all runs; `session_turn_index` resets per session
+- Schema migration runs safely against an existing populated `graph.db`
+- All 141 existing tests still pass
+
+**Risks:**
+- ⚠ Schema migration — existing `graph.db` will not have new columns until `_migrate_db()` runs. Must test the migration path with a pre-populated database, not only a fresh one.
+- ⚠ `assembled_prompt_json` — must strip base64 image data before storing (can be several MB). The stripping function must have its own unit test.
+- ? `condition_label` in `config.yaml` must be changed manually between condition runs. Consider an environment variable override as an alternative in Milestone 9.
+
+**Estimate:** 2-3 sessions
+
+---
+
+### Milestone 9 — Experiment Framework: Probe Set, Ground Truth Labels, Seed Fixture, Battery Snapshots
+
+**Why this milestone exists:** Milestone 8 makes individual interactions fully traceable. This milestone builds the experiment-level structure — the fixed probe set that measures learning, the gold labels that define "correct," the seed fixtures that ensure all conditions start identically, and the battery snapshot system that makes each measurement session reproducible. Without this layer, you have rich per-run data with no systematic way to compare across conditions.
+
+The sign-off gate requires: frozen probe-set version, gold MUs per probe, phenomenon tags, bridge-MU flags, seed-fixture version/manifest, and battery-level snapshots. All are built here.
+
+**Design dependency:** The probe prompts, gold MU IDs, and phenomenon assignments are content decisions — they define what you're testing. This milestone builds the engineering scaffold. The actual probe content will be added to `probes/probe_set_v1.yaml` before the experiment runs, using the format defined here.
+
+**Build:**
+
+**1. `probes/probe_set_v1.yaml` — probe set definition file**
+
+```yaml
+version: "v1"
+phenomenon_map:
+  ranking_improvement:
+    description: "Gold MU rank should decrease over sessions within the primary cluster"
+  cross_cluster_transfer:
+    description: "Bridge MU should surface on adjacent-cluster probes via edge traversal (hop_depth > 0)"
+  process_rule_adherence:
+    description: "Output must satisfy the named rule; measured on output, not retrieved set"
+
+probes:
+  - probe_id: "p01"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: ""         # FILL IN before experiment
+    gold_mu_ids: []         # FILL IN after seed fixture generation
+    is_bridge_probe: false
+    bridge_pair_id: null
+  # ... additional entries, one per probe
+```
+
+File ships as a template with empty content fields. The schema is finalized here; content is added by the experimenter after seed fixture generation.
+
+**2. `backend/analytics/probes.py` — probe management module**
+
+```python
+class ProbeDefinition(BaseModel):
+    probe_id: str
+    phenomenon_type: str    # ranking_improvement | cross_cluster_transfer | process_rule_adherence
+    prompt_text: str
+    gold_mu_ids: list[str] = Field(default_factory=list)
+    is_bridge_probe: bool = False
+    bridge_pair_id: Optional[str] = None
+    probe_set_version: str
+
+class ProbeResult(BaseModel):
+    result_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    probe_id: str
+    run_id: Optional[str] = None
+    measurement_session_index: int
+    condition_label: str
+    retrieved_mu_ids: list[str] = Field(default_factory=list)
+    gold_mu_rank: Optional[int] = None    # 1-indexed; None if gold MU absent from retrieved set
+    retrieval_precision: Optional[float] = None
+    retrieval_recall: Optional[float] = None
+    bm25_scores_per_mu: dict[str, float] = Field(default_factory=dict)
+
+def load_probe_set(version: str = "v1") -> list[ProbeDefinition]:
+    """Load and validate probe definitions from probes/probe_set_{version}.yaml."""
+
+async def record_probe_result(result: ProbeResult) -> None:
+    """Write a probe result to the probe_results table."""
+
+async def compute_probe_result(
+    probe: ProbeDefinition,
+    retrieval_result: "RetrievalResult",
+    run_id: str,
+    measurement_session_index: int,
+    condition_label: str,
+) -> ProbeResult:
+    """Compute precision, recall, and gold_mu_rank from a retrieval result."""
+```
+
+**3. `backend/memory/store.py` — three new tables**
+
+```sql
+CREATE TABLE IF NOT EXISTS probes (
+    probe_id TEXT PRIMARY KEY,
+    probe_set_version TEXT NOT NULL,
+    phenomenon_type TEXT NOT NULL,
+    prompt_text TEXT NOT NULL,
+    gold_mu_ids TEXT NOT NULL DEFAULT '[]',    -- JSON list of mu_id strings
+    is_bridge_probe INTEGER NOT NULL DEFAULT 0,
+    bridge_pair_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS probe_results (
+    result_id TEXT PRIMARY KEY,
+    probe_id TEXT NOT NULL REFERENCES probes(probe_id),
+    run_id TEXT REFERENCES analytics(run_id),
+    measurement_session_index INTEGER NOT NULL,
+    condition_label TEXT NOT NULL,
+    retrieved_mu_ids TEXT NOT NULL DEFAULT '[]',
+    gold_mu_rank INTEGER,
+    retrieval_precision REAL,
+    retrieval_recall REAL,
+    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
+    fixture_version TEXT PRIMARY KEY,
+    manifest_hash TEXT NOT NULL,      -- SHA-256 of the fixture JSON file
+    mu_count INTEGER NOT NULL,
+    type_distribution TEXT NOT NULL DEFAULT '{}',    -- JSON: {source_type: count}
+    generation_date TEXT NOT NULL,
+    generation_record TEXT NOT NULL DEFAULT '[]'     -- JSON: per-MU generation details
+);
+
+CREATE INDEX IF NOT EXISTS idx_probe_results_probe ON probe_results(probe_id);
+CREATE INDEX IF NOT EXISTS idx_probe_results_session ON probe_results(measurement_session_index);
+CREATE INDEX IF NOT EXISTS idx_probe_results_condition ON probe_results(condition_label);
+```
+
+New store methods:
+- `sync_probes(probes: list[dict]) -> None` — upsert probe definitions from YAML on app startup
+- `insert_probe_result(result: dict) -> None`
+- `query_probe_results(probe_id=None, condition_label=None, measurement_session_index=None) -> list[dict]`
+- `insert_seed_fixture_manifest(manifest: dict) -> None`
+- `get_seed_fixture_manifest(version: str) -> Optional[dict]`
+
+**4. `backend/analytics/seed_fixture.py` — seed fixture provenance module**
+
+```python
+class SeedFixtureManifest(BaseModel):
+    fixture_version: str
+    manifest_hash: str                     # SHA-256 of the fixture JSON file
+    mu_count: int
+    type_distribution: dict[str, int]      # {source_type: count}
+    generation_date: str
+    generation_record: list[dict]          # [{mu_id, prompt, tool_call, response}] per seed MU
+
+def compute_fixture_hash(fixture_path: Path) -> str:
+    """SHA-256 of the fixture file's raw bytes."""
+
+async def load_and_verify_fixture(version: str) -> SeedFixtureManifest:
+    """Load manifest from DB, recompute hash from file, raise if mismatch."""
+
+async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManifest:
+    """Compute hash, count MUs by type, store manifest in DB."""
+```
+
+Fixture files: `seed_fixtures/seed_v{N}.json.gz` — same gzip-JSON format as graph snapshots.
+
+**5. `backend/memory/snapshot.py` — battery snapshot wrappers**
+
+```python
+async def take_battery_snapshot(
+    battery_index: int,
+    phase: str,            # "pre" | "post"
+    condition_label: str,
+) -> str:
+    """
+    Named snapshot for a measurement battery.
+    Written to /app/memory/snapshots/battery_{index}_{phase}_{condition}_{ts}.json.gz
+    Returns the file path for logging.
+    """
+
+async def take_pre_pruning_snapshot() -> str:
+    """
+    Snapshot immediately before any pruning operation.
+    Written to /app/memory/snapshots/pre_prune_{ts}.json.gz
+    """
+```
+
+**6. `POST /admin/run-probe` endpoint in `backend/api/admin.py`**
+
+```
+POST /admin/run-probe
+Body: {probe_id, measurement_session_index, condition_label}
+```
+
+This endpoint:
+1. Loads the probe definition by `probe_id`
+2. Runs `retrieve()` for the probe's `prompt_text` — read-only; no MU creation, no edges written
+3. Computes `ProbeResult` (precision, recall, gold_mu_rank)
+4. Stores the `ProbeResult` in `probe_results`
+5. Returns the `ProbeResult`
+
+**Invariant enforced by design:** This endpoint MUST NOT call the full `run_interaction()` pipeline. It only calls `retrieve()`. No MU is created. No feedback event is written. Any run_id in a ProbeResult is None unless explicitly associated. The sign-off check verifies: `probe_results` rows have no matching `feedback_events` row.
+
+**7. `backend/analytics/run_log.py` — add probe-related fields**
+
+```python
+measurement_session_index: Optional[int] = None    # which battery session
+is_probe_turn: bool = False                        # true if this run was a probe measurement
+```
+
+These are also added to the `analytics` table schema.
+
+**8. Admin UI `admin/` — Probe Results view**
+
+Add `ProbeResults.jsx` page:
+- Filter controls: `condition_label`, `measurement_session_index` range
+- Table: probe_id | phenomenon_type | gold_mu_rank | retrieval_precision | retrieval_recall
+- Per-phenomenon learning curve: x = measurement_session_index, y = mean gold_mu_rank (one line per phenomenon)
+- Bridge probe toggle filter
+
+Add `/probe-results` route to `admin/src/App.jsx`.
+
+**Tests:**
+- `test_probes.py` (new): `load_probe_set()` parses YAML and returns `ProbeDefinition` list; `compute_probe_result()` correctly computes precision/recall when gold MU is rank 1; returns `gold_mu_rank=None` when gold MU not in retrieved set; `is_bridge_probe` filter works.
+- `test_seed_fixture.py` (new): `compute_fixture_hash()` returns consistent hash for same file; `load_and_verify_fixture()` raises when fixture file has been modified.
+- `test_snapshot.py` (extend): `take_battery_snapshot()` writes file with correct naming convention; `take_pre_pruning_snapshot()` writes to correct path.
+- Manual: `POST /admin/run-probe` → verify `probe_results` row in DB; verify no `feedback_events` row for that run; verify `gold_mu_rank` is correct.
+- Manual: Admin UI Probe Results page shows per-phenomenon learning curves with real data.
+
+**Done when:**
+- `probes/probe_set_v1.yaml` template exists with correct schema (content filled in by user before experiment)
+- `probes`, `probe_results`, and `seed_fixture_manifest` tables exist and are queryable
+- `register_fixture()` stores a verifiable manifest; `load_and_verify_fixture()` detects tampering
+- `POST /admin/run-probe` returns a `ProbeResult` with precision/recall/gold_mu_rank
+- Battery snapshot files written with correct naming via `take_battery_snapshot()`
+- Admin UI Probe Results page renders per-phenomenon learning curves
+- Instrumentation Audit Checklist: all cells fillable; end-to-end replay walkthrough succeeds (feedback event → edge update → weight-as-of-turn → traversal path → retrieved set → gold-MU rank, no re-execution required)
+- All 141+ existing tests still pass
+
+**Risks:**
+- ⚠ Probe content (prompt text, gold MU IDs) cannot be finalized until seed fixtures are generated and loaded into the database. The YAML template ships empty. The experiment cannot begin until the experimenter fills in content.
+- ⚠ `gold_mu_ids` references MU IDs that only exist after seed fixture generation. Fixture generation → probe labeling → experiment start must happen in this sequence.
+- ? `measurement_session_index` is set by the experimenter when calling `/admin/run-probe`. The system does not auto-increment it — the experimenter decides "this is battery session 3." This is correct: measurement sessions are a decision, not an automatic counter.
+- ? `condition_label` should be overridable via environment variable (`CONDITION_LABEL=static-weight`) to avoid config.yaml edits between runs. Add in this milestone alongside the probe infrastructure.
+
+**Estimate:** 2-3 sessions
+
+---
+
 ## Status
 
 ```
-Current milestone: 7 — Multimodal Attachment Support
+Current milestone: 8 — Core Instrumentation
 Last updated: 2026-06-21
 ```
 
@@ -917,6 +1327,10 @@ Last updated: 2026-06-21
 
 **Milestone 6:** Complete — branch `milestone-6-prompt-clarity`, PR merged to main.
 
-**Milestone 7:** Complete — branch `milestone-7-multimodal`, PR open.
+**Milestone 7:** Complete — branch `milestone-7-multimodal`, PR merged to main.
 
 **Known limitation (Milestone 7):** Ollama 0.30.x on Windows has a known regression (GitHub Issue #16532) where `gemma4:e4b` processes image tokens (server logs confirm "image decoded") but the model does not interpret the content — it responds as if no image was provided. Root cause: PR #16031 "Remove CGO engines, use llama-server exclusively" (merged 2026-05-07) broke gemma4 vision on Windows. The implementation is correct per the OpenAI-compatible spec (`/v1/chat/completions` with nested `image_url` content-parts, images before text). End-to-end manual testing is blocked until Ollama ships a fix. All unit tests pass. Roll back to Ollama v0.24.0 to test multimodal locally in the meantime.
+
+**Milestone 8:** Not started — branch pending.
+
+**Milestone 9:** Not started — branch pending.

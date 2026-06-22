@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 7 — Multimodal Attachment Support — COMPLETE  
-Next step: Review PR for milestone-7-multimodal. End-to-end manual image test blocked pending Ollama fix for GitHub Issue #16532 (gemma4 vision regression on Windows 0.30.x). Workaround: roll back to Ollama v0.24.0. All 141 unit tests pass.
+Current milestone: 8 — Core Instrumentation — COMPLETE  
+Next step: Review PR for milestone-8-core-instrumentation. After merge, start Milestone 9 (Experiment Framework). All 169 unit tests pass.
 
 ## Session log
 
@@ -164,6 +164,19 @@ Next step: Review PR for milestone-7-multimodal. End-to-end manual image test bl
     - WEBP magic check uses RIFF header (bytes 0-3) + WEBP subtype (bytes 8-11) — different from other formats
     - `AttachmentSanitizeResult` needs `model_config = {"arbitrary_types_allowed": True}` for `bytes` field in Pydantic BaseModel
 
+- 2026-06-22: /build — Milestone 8 complete
+  - Modified: `backend/memory/retrieval.py` (RetrievalResult gains 6 new fields: bm25_scores_per_mu, entry_point_mu_ids, candidate_set_before_ranking, traversal_path, hop_depth_per_retrieved_mu, edge_contributions — all populated from values already computed in retrieve())
+  - Modified: `backend/analytics/run_log.py` (RunRecord gains retrieval decomposition fields, assembled_prompt_json, config_hash, full_config_snapshot, condition_label, turn_index, session_turn_index)
+  - Created: `backend/analytics/feedback_events.py` (FeedbackEvent model + record_feedback_event(); one DB row per /feedback call)
+  - Modified: `backend/memory/store.py` (edges table: creation_run_id + creation_trigger; analytics table: all new RunRecord columns; feedback_events table added; _migrate_db() for idempotent ALTER TABLE on existing DBs; new methods: get_next_turn_index, get_session_turn_count, insert_feedback_event, get_feedback_events_for_run, get_edge)
+  - Modified: `backend/core/orchestrator.py` (wires new RunRecord fields; passes creation_run_id + creation_trigger to create_edge; adds _scrub_prompt_for_storage() helper)
+  - Modified: `backend/api/chat.py` (FeedbackRequest gains verdict_basis + is_probe_turn; feedback endpoint creates FeedbackEvent; weight_updates enriched with source_mu_id, target_mu_id, feedback_event_id)
+  - Modified: `config.yaml` (adds experiment.condition_label: "learning")
+  - Tests: 28 new tests, 169 total — all passing
+  - Branch: milestone-8-core-instrumentation
+  - PR: (see GitHub)
+  - Key decision: _scrub_prompt_for_storage() strips base64 image data by estimating decoded size from b64 string length (len * 3/4) — avoids re-decoding just for size reporting
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
@@ -173,3 +186,4 @@ Next step: Review PR for milestone-7-multimodal. End-to-end manual image test bl
 5. ~~**Chat UI Quality** — Token counter, copy button, New Session button~~ ✅ COMPLETE
 6. ~~**Prompt Clarity** — Separate memory context from user message in Ollama call~~ ✅ COMPLETE
 7. ~~**Multimodal Attachment Support** — Image attachments through the UM gate; binary transient only~~ ✅ COMPLETE
+8. ~~**Core Instrumentation** — Retrieval decomposition, turn indexing, edge lifecycle, feedback-event log~~ ✅ COMPLETE

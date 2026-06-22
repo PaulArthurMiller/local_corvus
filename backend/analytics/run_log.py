@@ -40,6 +40,26 @@ class RunRecord(BaseModel):
     hyperparameters_snapshot: dict[str, Any] = Field(default_factory=dict)
     algorithm: Optional[str] = None
 
+    # Retrieval decomposition — all values populated from RetrievalResult
+    bm25_scores_per_mu: dict[str, Any] = Field(default_factory=dict)
+    entry_point_mu_ids: list[str] = Field(default_factory=list)
+    candidate_set_before_ranking: list[dict] = Field(default_factory=list)
+    traversal_path: list[dict] = Field(default_factory=list)
+    hop_depth_per_retrieved_mu: dict[str, Any] = Field(default_factory=dict)
+    edge_contributions: dict[str, Any] = Field(default_factory=dict)
+
+    # Full Ollama messages array with base64 image data replaced by placeholder strings
+    assembled_prompt_json: list[dict] = Field(default_factory=list)
+
+    # Config traceability
+    config_hash: Optional[str] = None
+    full_config_snapshot: dict[str, Any] = Field(default_factory=dict)
+    condition_label: Optional[str] = None
+
+    # Turn indexing
+    turn_index: Optional[int] = None
+    session_turn_index: Optional[int] = None
+
 
 async def capture_run(run: RunRecord) -> None:
     """

@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
-from core.orchestrator import _build_ollama_messages
+from core.orchestrator import _build_ollama_messages, _scrub_prompt_for_storage
 
 
 # ---------------------------------------------------------------------------
@@ -158,3 +158,80 @@ class TestBuildOllamaMessagesWithoutContext:
         assert messages[1]["role"] == "assistant"
         assert messages[2]["role"] == "user"
         assert messages[2]["content"] == "second"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 8 — _scrub_prompt_for_storage
+# ---------------------------------------------------------------------------
+
+
+class TestScrubPromptForStorage:
+
+    def test_plain_text_messages_pass_through_unchanged(self):
+        """Messages with no image content-parts are returned as-is."""
+        messages = [
+            {"role": "system", "content": "context here"},
+            {"role": "user", "content": "hello"},
+        ]
+        scrubbed = _scrub_prompt_for_storage(messages)
+        print(f"[test] scrubbed plain messages: {scrubbed}")
+        assert scrubbed[0]["content"] == "context here"
+        assert scrubbed[1]["content"] == "hello"
+
+    def test_base64_image_data_replaced_with_placeholder(self):
+        """base64 data in image_url content-parts is replaced by a readable placeholder."""
+        import base64
+        fake_bytes = b"\xff\xd8\xff" + b"X" * 100  # fake JPEG magic + padding
+        b64 = base64.b64encode(fake_bytes).decode()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    {"type": "text", "text": "What do you see?"},
+                ],
+            }
+        ]
+        scrubbed = _scrub_prompt_for_storage(messages)
+        image_part = scrubbed[0]["content"][0]
+        url = image_part["image_url"]["url"]
+        print(f"[test] scrubbed image url: {url}")
+        assert url.startswith("[image: image/jpeg")
+        assert "KB]" in url
+        assert b64 not in url
+
+    def test_text_parts_in_content_list_pass_through_unchanged(self):
+        """Text content-parts within a list are not modified."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello there"},
+                ],
+            }
+        ]
+        scrubbed = _scrub_prompt_for_storage(messages)
+        text_part = scrubbed[0]["content"][0]
+        print(f"[test] text part: {text_part}")
+        assert text_part["text"] == "hello there"
+
+    def test_original_messages_list_is_not_mutated(self):
+        """The original messages list must not be modified in-place."""
+        import base64
+        fake_bytes = b"\xff\xd8\xff" + b"Y" * 50
+        b64 = base64.b64encode(fake_bytes).decode()
+        original_url = f"data:image/jpeg;base64,{b64}"
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": original_url}},
+                ],
+            }
+        ]
+        _scrub_prompt_for_storage(messages)
+        # The original must still have the full data URI
+        assert messages[0]["content"][0]["image_url"]["url"] == original_url
+
+    def test_empty_messages_list_returns_empty_list(self):
+        assert _scrub_prompt_for_storage([]) == []

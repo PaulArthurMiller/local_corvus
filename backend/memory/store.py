@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS edges (
     weight REAL NOT NULL,
     direction TEXT NOT NULL,
     last_traversed_at TEXT,
-    traversal_count INTEGER DEFAULT 0
+    traversal_count INTEGER DEFAULT 0,
+    creation_run_id TEXT,
+    creation_trigger TEXT
 );
 
 CREATE TABLE IF NOT EXISTS analytics (
@@ -64,14 +66,71 @@ CREATE TABLE IF NOT EXISTS analytics (
     feedback_signal INTEGER,
     weight_updates TEXT NOT NULL DEFAULT '[]',
     hyperparameters_snapshot TEXT NOT NULL DEFAULT '{}',
-    algorithm TEXT
+    algorithm TEXT,
+    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}',
+    entry_point_mu_ids TEXT NOT NULL DEFAULT '[]',
+    candidate_set_before_ranking TEXT NOT NULL DEFAULT '[]',
+    traversal_path TEXT NOT NULL DEFAULT '[]',
+    hop_depth_per_retrieved_mu TEXT NOT NULL DEFAULT '{}',
+    edge_contributions TEXT NOT NULL DEFAULT '{}',
+    assembled_prompt_json TEXT NOT NULL DEFAULT '[]',
+    config_hash TEXT,
+    full_config_snapshot TEXT NOT NULL DEFAULT '{}',
+    condition_label TEXT,
+    turn_index INTEGER,
+    session_turn_index INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    feedback_event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES analytics(run_id),
+    verdict TEXT NOT NULL,
+    verdict_basis TEXT,
+    turn_index INTEGER,
+    is_probe_turn INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_mu_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_mu_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics(session_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON analytics(timestamp);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_run ON feedback_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_probe ON feedback_events(is_probe_turn);
 """
+
+
+async def _migrate_db(db: aiosqlite.Connection) -> None:
+    """
+    Idempotent schema migration — adds columns introduced in Milestone 8
+    to existing databases that pre-date this milestone.
+
+    Each ALTER TABLE is wrapped in try/except so a column that already
+    exists (fresh install) does not cause an error.
+    """
+    migrations = [
+        ("edges", "creation_run_id", "TEXT"),
+        ("edges", "creation_trigger", "TEXT"),
+        ("analytics", "bm25_scores_per_mu", "TEXT NOT NULL DEFAULT '{}'"),
+        ("analytics", "entry_point_mu_ids", "TEXT NOT NULL DEFAULT '[]'"),
+        ("analytics", "candidate_set_before_ranking", "TEXT NOT NULL DEFAULT '[]'"),
+        ("analytics", "traversal_path", "TEXT NOT NULL DEFAULT '[]'"),
+        ("analytics", "hop_depth_per_retrieved_mu", "TEXT NOT NULL DEFAULT '{}'"),
+        ("analytics", "edge_contributions", "TEXT NOT NULL DEFAULT '{}'"),
+        ("analytics", "assembled_prompt_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("analytics", "config_hash", "TEXT"),
+        ("analytics", "full_config_snapshot", "TEXT NOT NULL DEFAULT '{}'"),
+        ("analytics", "condition_label", "TEXT"),
+        ("analytics", "turn_index", "INTEGER"),
+        ("analytics", "session_turn_index", "INTEGER"),
+    ]
+    for table, column, col_type in migrations:
+        try:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            await db.commit()
+            logger.info("store: migrated %s.%s", table, column)
+        except Exception:
+            # Column already exists — this is the expected case on fresh installs
+            pass
 
 
 async def _open_db() -> aiosqlite.Connection:
@@ -87,6 +146,7 @@ async def _open_db() -> aiosqlite.Connection:
     db.row_factory = aiosqlite.Row
     await db.executescript(_INIT_SQL)
     await db.commit()
+    await _migrate_db(db)
     return db
 
 
@@ -160,12 +220,15 @@ class GraphStore:
         weight: float,
         direction: str = "forward",
         edge_id: Optional[str] = None,
+        creation_run_id: Optional[str] = None,
+        creation_trigger: Optional[str] = None,
     ) -> dict:
         """
         Insert a directed edge between two MUs.
 
         direction: "forward" | "bidirectional"
         weight: initial weight from config initial_edge_weight
+        creation_trigger: "prompt_construction" | "co_activation" | "feedback" | "traversal"
         """
         eid = edge_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -174,20 +237,23 @@ class GraphStore:
             await db.execute(
                 """
                 INSERT INTO edges
-                    (edge_id, source_mu_id, target_mu_id, created_at, weight, direction)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (edge_id, source_mu_id, target_mu_id, created_at, weight, direction,
+                     creation_run_id, creation_trigger)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (eid, source_mu_id, target_mu_id, now, weight, direction),
+                (eid, source_mu_id, target_mu_id, now, weight, direction,
+                 creation_run_id, creation_trigger),
             )
             await db.commit()
         finally:
             await db.close()
         logger.info(
-            "store: created edge edge_id=%s %s→%s weight=%.3f",
+            "store: created edge edge_id=%s %s→%s weight=%.3f trigger=%s",
             eid,
             source_mu_id,
             target_mu_id,
             weight,
+            creation_trigger,
         )
         return {
             "edge_id": eid,
@@ -198,6 +264,8 @@ class GraphStore:
             "direction": direction,
             "last_traversed_at": None,
             "traversal_count": 0,
+            "creation_run_id": creation_run_id,
+            "creation_trigger": creation_trigger,
         }
 
     async def get_edges_for_mu(self, mu_id: str) -> list[dict]:
@@ -302,12 +370,20 @@ class GraphStore:
                     run_id, session_id, timestamp, input_mu_id, output_mu_id,
                     tool_calls, activated_mu_ids, activated_edge_ids, prompt_mu_id,
                     tokens_in, tokens_out, latency_ms, feedback_signal,
-                    weight_updates, hyperparameters_snapshot, algorithm
+                    weight_updates, hyperparameters_snapshot, algorithm,
+                    bm25_scores_per_mu, entry_point_mu_ids, candidate_set_before_ranking,
+                    traversal_path, hop_depth_per_retrieved_mu, edge_contributions,
+                    assembled_prompt_json, config_hash, full_config_snapshot,
+                    condition_label, turn_index, session_turn_index
                 ) VALUES (
                     :run_id, :session_id, :timestamp, :input_mu_id, :output_mu_id,
                     :tool_calls, :activated_mu_ids, :activated_edge_ids, :prompt_mu_id,
                     :tokens_in, :tokens_out, :latency_ms, :feedback_signal,
-                    :weight_updates, :hyperparameters_snapshot, :algorithm
+                    :weight_updates, :hyperparameters_snapshot, :algorithm,
+                    :bm25_scores_per_mu, :entry_point_mu_ids, :candidate_set_before_ranking,
+                    :traversal_path, :hop_depth_per_retrieved_mu, :edge_contributions,
+                    :assembled_prompt_json, :config_hash, :full_config_snapshot,
+                    :condition_label, :turn_index, :session_turn_index
                 )
                 """,
                 {
@@ -327,6 +403,18 @@ class GraphStore:
                     "weight_updates": json.dumps(run.get("weight_updates", [])),
                     "hyperparameters_snapshot": json.dumps(run.get("hyperparameters_snapshot", {})),
                     "algorithm": run.get("algorithm"),
+                    "bm25_scores_per_mu": json.dumps(run.get("bm25_scores_per_mu", {})),
+                    "entry_point_mu_ids": json.dumps(run.get("entry_point_mu_ids", [])),
+                    "candidate_set_before_ranking": json.dumps(run.get("candidate_set_before_ranking", [])),
+                    "traversal_path": json.dumps(run.get("traversal_path", [])),
+                    "hop_depth_per_retrieved_mu": json.dumps(run.get("hop_depth_per_retrieved_mu", {})),
+                    "edge_contributions": json.dumps(run.get("edge_contributions", {})),
+                    "assembled_prompt_json": json.dumps(run.get("assembled_prompt_json", [])),
+                    "config_hash": run.get("config_hash"),
+                    "full_config_snapshot": json.dumps(run.get("full_config_snapshot", {})),
+                    "condition_label": run.get("condition_label"),
+                    "turn_index": run.get("turn_index"),
+                    "session_turn_index": run.get("session_turn_index"),
                 },
             )
             await db.commit()
@@ -376,6 +464,9 @@ class GraphStore:
         json_fields = {
             "tool_calls", "activated_mu_ids", "activated_edge_ids",
             "weight_updates", "hyperparameters_snapshot",
+            "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
+            "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
+            "assembled_prompt_json", "full_config_snapshot",
         }
         result = []
         for row in rows:
@@ -439,6 +530,9 @@ class GraphStore:
         json_fields = {
             "tool_calls", "activated_mu_ids", "activated_edge_ids",
             "weight_updates", "hyperparameters_snapshot",
+            "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
+            "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
+            "assembled_prompt_json", "full_config_snapshot",
         }
         for field in json_fields:
             if r.get(field):
@@ -447,6 +541,84 @@ class GraphStore:
                 except (ValueError, TypeError):
                     pass
         return r
+
+
+    async def get_next_turn_index(self) -> int:
+        """Return global sequential turn index: COUNT(*) + 1 from analytics."""
+        db = await _open_db()
+        try:
+            async with db.execute("SELECT COUNT(*) FROM analytics") as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        count = row[0] if row else 0
+        return count + 1
+
+    async def get_session_turn_count(self, session_id: str) -> int:
+        """Return how many runs exist for this session (the next session_turn_index)."""
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT COUNT(*) FROM analytics WHERE session_id = ?", (session_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        return row[0] if row else 0
+
+    async def insert_feedback_event(self, event: dict) -> None:
+        """Insert a feedback event record into the feedback_events table."""
+        db = await _open_db()
+        try:
+            await db.execute(
+                """
+                INSERT INTO feedback_events
+                    (feedback_event_id, run_id, verdict, verdict_basis,
+                     turn_index, is_probe_turn)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["feedback_event_id"],
+                    event["run_id"],
+                    event["verdict"],
+                    event.get("verdict_basis"),
+                    event.get("turn_index"),
+                    1 if event.get("is_probe_turn") else 0,
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info(
+            "store: inserted feedback_event id=%s run_id=%s verdict=%s",
+            event["feedback_event_id"],
+            event["run_id"],
+            event["verdict"],
+        )
+
+    async def get_feedback_events_for_run(self, run_id: str) -> list[dict]:
+        """Fetch all feedback events for a given run_id."""
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM feedback_events WHERE run_id = ?", (run_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
+
+    async def get_edge(self, edge_id: str) -> Optional[dict]:
+        """Fetch a single edge by ID. Returns None if not found."""
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM edges WHERE edge_id = ?", (edge_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        return dict(row) if row is not None else None
 
 
 # Module-level singleton — imported by other modules

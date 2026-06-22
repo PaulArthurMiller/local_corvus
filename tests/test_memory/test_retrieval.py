@@ -255,3 +255,112 @@ class TestTraversalFunnel:
             print(f"[test] result MUs (level1_k=2, level2_k=0): {len(result.mus)}")
             # With level2_k=0 there's no K2; total MUs <= level1_k
             assert len(result.mus) <= 2
+
+
+class TestRetrievalResultNewFields:
+    """Milestone 8 — verify all six new RetrievalResult fields are populated."""
+
+    def test_bm25_scores_per_mu_contains_only_keyword_matched_mus(self):
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config()))
+            print(f"[test] bm25_scores_per_mu keys: {list(result.bm25_scores_per_mu.keys())}")
+            # Every mu_id in bm25_scores_per_mu must have had at least one keyword hit
+            for mu_id in result.bm25_scores_per_mu:
+                assert mu_id in ids, "bm25_scores_per_mu contains unknown mu_id"
+            # All values must be positive floats (BM25 scores > 0 for matches)
+            for score in result.bm25_scores_per_mu.values():
+                assert score > 0.0, "bm25 score must be positive"
+
+    def test_entry_point_mu_ids_matches_k1(self):
+        """entry_point_mu_ids must equal the K1 set (MUs from lexical retrieval)."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config()))
+            print(f"[test] entry_point_mu_ids: {result.entry_point_mu_ids}")
+            print(f"[test] activated_mu_ids: {result.activated_mu_ids}")
+            # entry_point_mu_ids should be a subset of activated_mu_ids (K1 ⊆ K1+K2)
+            for mu_id in result.entry_point_mu_ids:
+                assert mu_id in result.activated_mu_ids, \
+                    "K1 MU not found in activated_mu_ids"
+
+    def test_traversal_path_empty_when_no_k2_traversal(self):
+        """traversal_path is empty when level2_k=0 (no K2 traversal possible)."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            cfg = _minimal_config(level2_k=0)
+            result = run(retrieve("elephant mammal Africa", s, cfg))
+            print(f"[test] traversal_path (level2_k=0): {result.traversal_path}")
+            assert result.traversal_path == []
+
+    def test_traversal_path_has_correct_structure_when_k2_occurs(self):
+        """traversal_path entries have {source_mu_id, edge_id, target_mu_id, hop_depth}."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            # Connect a K1-eligible MU to a separate MU so K2 traversal occurs
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[9], weight=0.9))
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config(level2_k=2)))
+            print(f"[test] traversal_path: {result.traversal_path}")
+            for hop in result.traversal_path:
+                assert "source_mu_id" in hop
+                assert "edge_id" in hop
+                assert "target_mu_id" in hop
+                assert "hop_depth" in hop
+                assert hop["hop_depth"] == 1
+
+    def test_candidate_set_before_ranking_includes_all_multi_hit_candidates(self):
+        """candidate_set_before_ranking includes ALL multi-hit candidates, not just K1."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            # Use level1_k=1 so only 1 MU reaches K1, but multi-hit set is larger
+            cfg = _minimal_config(level1_k=1)
+            result = run(retrieve("elephant mammal Africa savannah", s, cfg))
+            print(f"[test] candidate_set_before_ranking count: {len(result.candidate_set_before_ranking)}")
+            print(f"[test] K1 count: {len(result.entry_point_mu_ids)}")
+            # candidate_set must be >= K1 (it's the full set before cutoff)
+            assert len(result.candidate_set_before_ranking) >= len(result.entry_point_mu_ids)
+            # Each candidate has the required keys
+            for candidate in result.candidate_set_before_ranking:
+                assert "mu_id" in candidate
+                assert "keyword_hit_count" in candidate
+                assert "bm25_score" in candidate
+                assert "edge_weight_sum" in candidate
+                assert candidate["keyword_hit_count"] >= 2
+
+    def test_hop_depth_per_retrieved_mu_is_0_for_k1_and_1_for_k2(self):
+        """K1 MUs get depth 0; K2 MUs (reached via traversal) get depth 1."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[9], weight=0.9))
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config(level2_k=2)))
+            print(f"[test] hop_depth_per_retrieved_mu: {result.hop_depth_per_retrieved_mu}")
+            k1_set = set(result.entry_point_mu_ids)
+            for mu_id, depth in result.hop_depth_per_retrieved_mu.items():
+                if mu_id in k1_set:
+                    assert depth == 0, f"K1 MU {mu_id} should have depth 0"
+                else:
+                    assert depth == 1, f"K2 MU {mu_id} should have depth 1"
+
+    def test_edge_contributions_populated_for_multi_hit_candidates(self):
+        """edge_contributions has an entry for each multi-hit candidate MU."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[1], weight=0.8))
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config()))
+            print(f"[test] edge_contributions: {result.edge_contributions}")
+            # Each candidate in candidate_set_before_ranking should have a matching key
+            for candidate in result.candidate_set_before_ranking:
+                mid = candidate["mu_id"]
+                assert mid in result.edge_contributions, \
+                    f"mu_id {mid} missing from edge_contributions"
+
+    def test_empty_store_new_fields_are_empty(self):
+        """All new fields return empty collections for an empty store."""
+        with TempDBStore() as s:
+            result = run(retrieve("elephant trunk", s, _minimal_config()))
+            assert result.bm25_scores_per_mu == {}
+            assert result.entry_point_mu_ids == []
+            assert result.candidate_set_before_ranking == []
+            assert result.traversal_path == []
+            assert result.hop_depth_per_retrieved_mu == {}
+            assert result.edge_contributions == {}

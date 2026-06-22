@@ -13,6 +13,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from analytics.feedback_events import FeedbackEvent, record_feedback_event
 from core.orchestrator import AttachmentInput, run_interaction
 from core.session import create_session, get_session
 from learning.simple_rl import SimpleRL
@@ -148,6 +149,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
 class FeedbackRequest(BaseModel):
     run_id: str
     signal: int  # +1 or -1
+    verdict_basis: Optional[str] = None  # e.g. "checklist_pass", "confabulation"
+    is_probe_turn: bool = False
 
 
 class FeedbackResponse(BaseModel):
@@ -214,18 +217,36 @@ async def feedback(request: FeedbackRequest) -> FeedbackResponse:
         feedback=request.signal,
     )
 
-    # Write new weights to graph store and build weight_updates record
+    # Build a feedback event before writing weights (need its ID for weight_updates)
+    verdict = "thumbs_up" if request.signal == 1 else "thumbs_down"
+    feedback_event = FeedbackEvent(
+        run_id=request.run_id,
+        verdict=verdict,
+        verdict_basis=request.verdict_basis,
+        turn_index=run.get("turn_index"),
+        is_probe_turn=request.is_probe_turn,
+    )
+
+    # Build an edge lookup for source/target enrichment
+    edge_by_id = {e["edge_id"]: e for e in activated_edges}
+
+    # Write new weights to graph store and build enriched weight_updates record
     weight_updates: list[dict] = []
     for edge_id, new_weight in updates:
-        old_weight = next(
-            (e["weight"] for e in activated_edges if e["edge_id"] == edge_id), None
-        )
+        edge = edge_by_id.get(edge_id, {})
+        old_weight = edge.get("weight")
         await graph_store.update_edge_weight(edge_id, new_weight)
         weight_updates.append({
             "edge_id": edge_id,
             "old_weight": old_weight,
             "new_weight": new_weight,
+            "source_mu_id": edge.get("source_mu_id"),
+            "target_mu_id": edge.get("target_mu_id"),
+            "feedback_event_id": feedback_event.feedback_event_id,
         })
+
+    # Persist feedback event
+    await record_feedback_event(feedback_event)
 
     # Persist feedback signal + weight updates back to the run record
     await graph_store.update_run_feedback(
@@ -235,10 +256,11 @@ async def feedback(request: FeedbackRequest) -> FeedbackResponse:
     )
 
     logger.info(
-        "feedback: complete run_id=%s signal=%+d edges_updated=%d",
+        "feedback: complete run_id=%s signal=%+d edges_updated=%d event_id=%s",
         request.run_id,
         request.signal,
         len(weight_updates),
+        feedback_event.feedback_event_id,
     )
 
     return FeedbackResponse(

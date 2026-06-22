@@ -177,3 +177,73 @@ def test_update_run_feedback_sets_signal_and_weight_updates():
         assert fetched["feedback_signal"] == 1
         assert isinstance(fetched["weight_updates"], list)
         assert fetched["weight_updates"][0]["new_weight"] == 0.6
+
+
+# ---------------------------------------------------------------------------
+# Milestone 8 — new RunRecord fields round-trip through SQLite
+# ---------------------------------------------------------------------------
+
+
+def _make_full_run(session_id=None) -> RunRecord:
+    """RunRecord with all Milestone 8 fields populated."""
+    return RunRecord(
+        session_id=session_id or str(uuid.uuid4()),
+        input_mu_id=str(uuid.uuid4()),
+        output_mu_id=str(uuid.uuid4()),
+        prompt_mu_id=str(uuid.uuid4()),
+        latency_ms=200,
+        hyperparameters_snapshot={"initial_edge_weight": 0.5},
+        algorithm="simple_rl",
+        bm25_scores_per_mu={"mu-abc": 1.23, "mu-def": 0.45},
+        entry_point_mu_ids=["mu-abc"],
+        candidate_set_before_ranking=[
+            {"mu_id": "mu-abc", "keyword_hit_count": 2, "bm25_score": 1.23, "edge_weight_sum": 0.9},
+        ],
+        traversal_path=[
+            {"source_mu_id": "mu-abc", "edge_id": "e-1", "target_mu_id": "mu-xyz", "hop_depth": 1},
+        ],
+        hop_depth_per_retrieved_mu={"mu-abc": 0, "mu-xyz": 1},
+        edge_contributions={"mu-abc": 0.9},
+        assembled_prompt_json=[{"role": "system", "content": "context"}, {"role": "user", "content": "hello"}],
+        config_hash="a" * 64,
+        full_config_snapshot={"model": {"name": "gemma4:e4b"}},
+        condition_label="learning",
+        turn_index=1,
+        session_turn_index=0,
+    )
+
+
+def test_new_fields_round_trip_through_sqlite():
+    """All Milestone 8 RunRecord fields persist and decode correctly."""
+    with TempDBStore() as store:
+        rec = _make_full_run()
+        run(capture_run(rec))
+        fetched = run(store.get_run(rec.run_id))
+
+        print(f"[test] fetched run keys: {list(fetched.keys())}")
+        assert fetched["bm25_scores_per_mu"] == {"mu-abc": 1.23, "mu-def": 0.45}
+        assert fetched["entry_point_mu_ids"] == ["mu-abc"]
+        assert len(fetched["candidate_set_before_ranking"]) == 1
+        assert fetched["candidate_set_before_ranking"][0]["keyword_hit_count"] == 2
+        assert fetched["traversal_path"][0]["hop_depth"] == 1
+        assert fetched["hop_depth_per_retrieved_mu"] == {"mu-abc": 0, "mu-xyz": 1}
+        assert fetched["edge_contributions"] == {"mu-abc": 0.9}
+        assert len(fetched["assembled_prompt_json"]) == 2
+        assert fetched["config_hash"] == "a" * 64
+        assert fetched["full_config_snapshot"] == {"model": {"name": "gemma4:e4b"}}
+        assert fetched["condition_label"] == "learning"
+        assert fetched["turn_index"] == 1
+        assert fetched["session_turn_index"] == 0
+
+
+def test_config_hash_is_consistent_for_same_config():
+    """The same config dict always produces the same config_hash."""
+    import hashlib
+    import json
+
+    cfg = {"model": {"name": "gemma4:e4b"}, "hyperparameters": {"initial_edge_weight": 0.5}}
+    hash1 = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
+    hash2 = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
+    print(f"[test] hash: {hash1}")
+    assert hash1 == hash2
+    assert len(hash1) == 64  # SHA-256 hex digest is 64 chars

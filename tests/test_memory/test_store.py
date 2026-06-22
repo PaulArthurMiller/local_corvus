@@ -218,3 +218,156 @@ class TestUpdateMuActivation:
             row = run(s.get_mu(mid))
             print(f"[test] activation_count after 2: {row['activation_count']}")
             assert row["activation_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Milestone 8 — new store methods
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCreationMetadata:
+
+    def test_create_edge_stores_creation_run_id_and_trigger(self):
+        """Edges created with Milestone 8 fields persist creation_run_id and creation_trigger."""
+        with TempDBStore() as s:
+            mu1 = str(uuid.uuid4())
+            mu2 = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+            run(s.create_mu(mu_id=mu2, source_type="agent_output", raw_content="b"))
+
+            run_id = str(uuid.uuid4())
+            edge = run(s.create_edge(
+                source_mu_id=mu1,
+                target_mu_id=mu2,
+                weight=0.5,
+                creation_run_id=run_id,
+                creation_trigger="prompt_construction",
+            ))
+            print(f"[test] created edge with metadata: {edge}")
+            assert edge["creation_run_id"] == run_id
+            assert edge["creation_trigger"] == "prompt_construction"
+
+    def test_create_edge_without_metadata_stores_none(self):
+        """Edges created without Milestone 8 fields store None for those columns."""
+        with TempDBStore() as s:
+            mu1 = str(uuid.uuid4())
+            mu2 = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+            run(s.create_mu(mu_id=mu2, source_type="agent_output", raw_content="b"))
+
+            edge = run(s.create_edge(source_mu_id=mu1, target_mu_id=mu2, weight=0.5))
+            print(f"[test] edge without metadata: {edge}")
+            assert edge["creation_run_id"] is None
+            assert edge["creation_trigger"] is None
+
+
+class TestTurnIndexMethods:
+
+    def test_get_next_turn_index_returns_1_for_empty_db(self):
+        """First turn index is 1 when analytics table is empty."""
+        with TempDBStore() as s:
+            idx = run(s.get_next_turn_index())
+            print(f"[test] turn index for empty DB: {idx}")
+            assert idx == 1
+
+    def test_get_next_turn_index_increments_with_each_run(self):
+        """turn index increments monotonically as runs are inserted."""
+        import json
+        import aiosqlite
+        with TempDBStore() as s:
+            # Insert a minimal row directly to avoid RunRecord dependency
+            async def insert_minimal_run(run_id):
+                import memory.store as sm
+                db = await sm._open_db()
+                try:
+                    await db.execute(
+                        "INSERT INTO analytics (run_id, session_id, timestamp) VALUES (?, ?, ?)",
+                        (run_id, "sess-1", "2026-01-01T00:00:00Z"),
+                    )
+                    await db.commit()
+                finally:
+                    await db.close()
+
+            idx1 = run(s.get_next_turn_index())
+            assert idx1 == 1
+            run(insert_minimal_run(str(uuid.uuid4())))
+            idx2 = run(s.get_next_turn_index())
+            print(f"[test] turn indices: {idx1}, {idx2}")
+            assert idx2 == 2
+
+    def test_get_session_turn_count_returns_0_for_unknown_session(self):
+        """session_turn_count for an unknown session returns 0."""
+        with TempDBStore() as s:
+            count = run(s.get_session_turn_count("no-such-session"))
+            print(f"[test] unknown session count: {count}")
+            assert count == 0
+
+
+class TestFeedbackEvents:
+
+    def _make_run_and_insert(self, s, run_id, session_id="sess-1"):
+        """Insert a minimal analytics row so feedback_event FK is valid."""
+        async def _insert():
+            import memory.store as sm
+            db = await sm._open_db()
+            try:
+                await db.execute(
+                    "INSERT INTO analytics (run_id, session_id, timestamp) VALUES (?, ?, ?)",
+                    (run_id, session_id, "2026-01-01T00:00:00Z"),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+        run(_insert())
+
+    def test_insert_and_get_feedback_event_round_trips(self):
+        """insert_feedback_event and get_feedback_events_for_run round-trip correctly."""
+        with TempDBStore() as s:
+            run_id = str(uuid.uuid4())
+            self._make_run_and_insert(s, run_id)
+
+            event = {
+                "feedback_event_id": str(uuid.uuid4()),
+                "run_id": run_id,
+                "verdict": "thumbs_up",
+                "verdict_basis": "checklist_pass",
+                "turn_index": 3,
+                "is_probe_turn": False,
+            }
+            run(s.insert_feedback_event(event))
+
+            fetched = run(s.get_feedback_events_for_run(run_id))
+            print(f"[test] fetched feedback events: {fetched}")
+            assert len(fetched) == 1
+            assert fetched[0]["verdict"] == "thumbs_up"
+            assert fetched[0]["verdict_basis"] == "checklist_pass"
+            assert fetched[0]["turn_index"] == 3
+            assert fetched[0]["is_probe_turn"] == 0  # SQLite stores bool as int
+
+    def test_get_feedback_events_for_run_returns_empty_for_unknown_run(self):
+        """get_feedback_events_for_run returns [] for a run_id with no events."""
+        with TempDBStore() as s:
+            fetched = run(s.get_feedback_events_for_run("no-such-run"))
+            print(f"[test] empty feedback events: {fetched}")
+            assert fetched == []
+
+    def test_multiple_feedback_events_for_same_run_all_returned(self):
+        """Multiple events for the same run_id are all returned."""
+        with TempDBStore() as s:
+            run_id = str(uuid.uuid4())
+            self._make_run_and_insert(s, run_id)
+
+            for verdict in ("thumbs_up", "thumbs_down"):
+                event = {
+                    "feedback_event_id": str(uuid.uuid4()),
+                    "run_id": run_id,
+                    "verdict": verdict,
+                    "verdict_basis": None,
+                    "turn_index": None,
+                    "is_probe_turn": False,
+                }
+                run(s.insert_feedback_event(event))
+
+            fetched = run(s.get_feedback_events_for_run(run_id))
+            print(f"[test] two events: {[e['verdict'] for e in fetched]}")
+            assert len(fetched) == 2

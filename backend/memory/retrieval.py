@@ -52,6 +52,28 @@ class RetrievalResult:
     activated_mu_ids: list[str] = field(default_factory=list)
     activated_edge_ids: list[str] = field(default_factory=list)
 
+    # Cumulative BM25 score per candidate MU that matched at least one keyword
+    bm25_scores_per_mu: dict[str, float] = field(default_factory=dict)
+
+    # K1 MU IDs — BM25 funnel entry points before traversal.
+    # Distinguishes "surfaced via lexical match" from "surfaced via edge traversal."
+    entry_point_mu_ids: list[str] = field(default_factory=list)
+
+    # All multi-hit (>=2 keyword) candidates before K1 cutoff.
+    # Each entry: {mu_id, keyword_hit_count, bm25_score, edge_weight_sum}
+    candidate_set_before_ranking: list[dict] = field(default_factory=list)
+
+    # Ordered hops K1→K2. Each entry: {source_mu_id, edge_id, target_mu_id, hop_depth}
+    # hop_depth=1 for the current single-hop design; field is future-proof.
+    traversal_path: list[dict] = field(default_factory=list)
+
+    # {mu_id: depth} — 0 for K1 (lexical entry), 1 for K2 (traversal hop).
+    hop_depth_per_retrieved_mu: dict[str, int] = field(default_factory=dict)
+
+    # Total edge weight contribution per candidate MU (sum of connected edge weights).
+    # Separates edge-learned signal from BM25 lexical signal in the K1 composite score.
+    edge_contributions: dict[str, float] = field(default_factory=dict)
+
 
 async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     """
@@ -132,6 +154,17 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     sorted_candidates = sorted(multi_hit, key=_k1_score, reverse=True)
     k1_ids = sorted_candidates[:level1_k]
 
+    # Build candidate_set_before_ranking: all multi-hit candidates before K1 cutoff
+    candidate_set_before_ranking = [
+        {
+            "mu_id": mid,
+            "keyword_hit_count": len(candidate_hits[mid]),
+            "bm25_score": candidate_scores.get(mid, 0.0),
+            "edge_weight_sum": edge_weight_sum.get(mid, 0.0),
+        }
+        for mid in sorted_candidates
+    ]
+
     logger.info(
         "retrieve: K1=%d MUs selected (from %d multi-hit candidates)",
         len(k1_ids),
@@ -141,6 +174,7 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     # --- Stage 3: K2 — follow outgoing edges from K1 ---
     k2_scores: dict[str, float] = {}
     traversed_edge_ids: list[str] = []
+    traversal_path: list[dict] = []
     k1_set = set(k1_ids)
 
     for mu_id in k1_ids:
@@ -152,6 +186,12 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
                 k2_scores.get(target, 0.0) + edge["weight"] * dir_multiplier
             )
             traversed_edge_ids.append(edge["edge_id"])
+            traversal_path.append({
+                "source_mu_id": mu_id,
+                "edge_id": edge["edge_id"],
+                "target_mu_id": target,
+                "hop_depth": 1,
+            })
 
     sorted_k2 = sorted(k2_scores.items(), key=lambda x: x[1], reverse=True)
     k2_ids = [mu_id for mu_id, _ in sorted_k2[:level2_k]]
@@ -159,6 +199,14 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     logger.info("retrieve: K2=%d MUs selected", len(k2_ids))
 
     activated_mu_ids = k1_ids + k2_ids
+
+    # Build hop_depth_per_retrieved_mu: 0 for K1, 1 for K2
+    hop_depth_per_retrieved_mu: dict[str, int] = {}
+    for mid in k1_ids:
+        hop_depth_per_retrieved_mu[mid] = 0
+    for mid in k2_ids:
+        hop_depth_per_retrieved_mu[mid] = 1
+
     mu_by_id = {m["mu_id"]: m for m in all_mus}
     retrieved_mus = [mu_by_id[mid] for mid in activated_mu_ids if mid in mu_by_id]
 
@@ -175,4 +223,10 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
         keywords=keywords,
         activated_mu_ids=activated_mu_ids,
         activated_edge_ids=traversed_edge_ids,
+        bm25_scores_per_mu=dict(candidate_scores),
+        entry_point_mu_ids=list(k1_ids),
+        candidate_set_before_ranking=candidate_set_before_ranking,
+        traversal_path=traversal_path,
+        hop_depth_per_retrieved_mu=hop_depth_per_retrieved_mu,
+        edge_contributions={mid: edge_weight_sum.get(mid, 0.0) for mid in multi_hit},
     )

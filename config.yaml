@@ -67,3 +67,6 @@ tools:
       module: "tools.file_tool"
       class: "FileTool"
       operation: "write"
+
+experiment:
+  condition_label: "learning"  # change to "static-weight" or "random-weight" for control runs

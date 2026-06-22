@@ -8,6 +8,7 @@ Does not implement business logic; routes data between modules.
 """
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -60,8 +61,46 @@ MODEL_NAME: str = _MODEL_CFG.get("name", "gemma4:e4b")
 OLLAMA_TIMEOUT: float = float(_MODEL_CFG.get("timeout_seconds", 60))
 INITIAL_EDGE_WEIGHT: float = float(_HP.get("initial_edge_weight", 0.5))
 
+# Compute once at module load — stable hash of the full resolved config
+_CONFIG_HASH: str = hashlib.sha256(
+    json.dumps(_CONFIG, sort_keys=True).encode()
+).hexdigest()
+
 # Singleton registry — initialized once when the module loads.
 _tool_registry = ToolRegistry(config=_CONFIG)
+
+
+def _scrub_prompt_for_storage(messages: list[dict]) -> list[dict]:
+    """
+    Return a copy of the Ollama messages array with base64 image data replaced
+    by a human-readable placeholder. Keeps the prompt inspectable without bloating
+    the analytics table with MB of binary data.
+    """
+    scrubbed = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_parts = []
+            for part in content:
+                if part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    # Extract mime type and approximate size from data URI
+                    if url.startswith("data:"):
+                        header, _, b64 = url.partition(",")
+                        mime = header.replace("data:", "").replace(";base64", "")
+                        size_kb = round(len(b64) * 3 / 4 / 1024, 1)
+                        new_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"[image: {mime} {size_kb}KB]"},
+                        })
+                    else:
+                        new_parts.append(part)
+                else:
+                    new_parts.append(part)
+            scrubbed.append({**msg, "content": new_parts})
+        else:
+            scrubbed.append(msg)
+    return scrubbed
 
 
 @dataclass
@@ -206,6 +245,10 @@ async def run_interaction(
     else:
         prompt_text = input_result.content
 
+    # --- Step 4b: Compute turn indices before creating edges ---
+    turn_index = await graph_store.get_next_turn_index()
+    session_turn_index = await graph_store.get_session_turn_count(session_id)
+
     # --- Step 5: Create prompt MU + edges to contributing MUs ---
     prompt_um = create_um(
         content=prompt_text,
@@ -227,6 +270,8 @@ async def run_interaction(
         target_mu_id=input_um.mu_id,
         weight=INITIAL_EDGE_WEIGHT,
         direction="forward",
+        creation_run_id=run_id,
+        creation_trigger="prompt_construction",
     )
     # Edges: prompt -> each retrieved contributing MU
     for mu_id in retrieval.activated_mu_ids:
@@ -235,6 +280,8 @@ async def run_interaction(
             target_mu_id=mu_id,
             weight=INITIAL_EDGE_WEIGHT,
             direction="forward",
+            creation_run_id=run_id,
+            creation_trigger="prompt_construction",
         )
 
     # --- Step 6: Gate prompt before Ollama ---
@@ -287,6 +334,8 @@ async def run_interaction(
         target_mu_id=output_um.mu_id,
         weight=INITIAL_EDGE_WEIGHT,
         direction="forward",
+        creation_run_id=run_id,
+        creation_trigger="prompt_construction",
     )
 
     append_audit(output_um)
@@ -313,6 +362,8 @@ async def run_interaction(
     )
 
     # --- Step 11: Capture analytics run record ---
+    assembled_prompt_json = _scrub_prompt_for_storage(ollama_messages)
+
     run_record = RunRecord(
         run_id=run_id,
         session_id=session_id,
@@ -327,6 +378,18 @@ async def run_interaction(
         latency_ms=latency_ms,
         hyperparameters_snapshot=_HP,
         algorithm=str(_HP.get("algorithm", "simple_rl")),
+        bm25_scores_per_mu=retrieval.bm25_scores_per_mu,
+        entry_point_mu_ids=retrieval.entry_point_mu_ids,
+        candidate_set_before_ranking=retrieval.candidate_set_before_ranking,
+        traversal_path=retrieval.traversal_path,
+        hop_depth_per_retrieved_mu=retrieval.hop_depth_per_retrieved_mu,
+        edge_contributions=retrieval.edge_contributions,
+        assembled_prompt_json=assembled_prompt_json,
+        config_hash=_CONFIG_HASH,
+        full_config_snapshot=_CONFIG,
+        condition_label=_CONFIG.get("experiment", {}).get("condition_label"),
+        turn_index=turn_index,
+        session_turn_index=session_turn_index,
     )
     await capture_run(run_record)
 

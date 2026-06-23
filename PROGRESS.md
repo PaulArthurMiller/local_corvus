@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 8 — Core Instrumentation — COMPLETE  
-Next step: Review PR for milestone-8-core-instrumentation. After merge, start Milestone 9 (Experiment Framework). All 169 unit tests pass.
+Current milestone: 9 — Experiment Framework — COMPLETE  
+Next step: Review PR for milestone-9-experiment-framework. Fill in probe content (prompt_text, gold_mu_ids) in probes/probe_set_v1.yaml after generating seed fixtures. All 193 unit tests pass.
 
 ## Session log
 
@@ -164,6 +164,28 @@ Next step: Review PR for milestone-8-core-instrumentation. After merge, start Mi
     - WEBP magic check uses RIFF header (bytes 0-3) + WEBP subtype (bytes 8-11) — different from other formats
     - `AttachmentSanitizeResult` needs `model_config = {"arbitrary_types_allowed": True}` for `bytes` field in Pydantic BaseModel
 
+- 2026-06-22: /build — Milestone 9 complete
+  - Created: `probes/probe_set_v1.yaml` (template: 5 probes — 3 phenomena, 2 bridge pairs)
+  - Created: `backend/analytics/probes.py` (ProbeDefinition, ProbeResult, load_probe_set, compute_probe_result, record_probe_result)
+  - Created: `backend/analytics/seed_fixture.py` (SeedFixtureManifest, compute_fixture_hash, register_fixture, load_and_verify_fixture)
+  - Modified: `backend/memory/store.py` (3 new tables: probes, probe_results, seed_fixture_manifest; new methods: sync_probes, get_probe, insert_probe_result, query_probe_results, insert_seed_fixture_manifest, get_seed_fixture_manifest; migration for measurement_session_index + is_probe_turn)
+  - Modified: `backend/memory/snapshot.py` (take_battery_snapshot, take_pre_pruning_snapshot)
+  - Modified: `backend/analytics/run_log.py` (measurement_session_index + is_probe_turn added to RunRecord)
+  - Modified: `backend/core/orchestrator.py` (CONDITION_LABEL env var overrides config.yaml condition_label)
+  - Modified: `backend/api/admin.py` (POST /admin/run-probe, GET /admin/probe-results)
+  - Modified: `backend/main.py` (startup probe sync)
+  - Created: `admin/src/components/ProbeResults.jsx` (filter controls, per-phenomenon rank table, learning curves, bridge probe toggle)
+  - Modified: `admin/src/App.jsx` (Probe Results tab)
+  - Modified: `docker-compose.yml` (probes + seed_fixtures mounts, CONDITION_LABEL passthrough)
+  - Added: 24 new tests (test_probes.py, test_seed_fixture.py, test_snapshot.py)
+  - Tests: 24 new, 193 total — all passing
+  - Branch: milestone-9-experiment-framework
+  - Key decisions:
+    - Probe content (prompt_text, gold_mu_ids) ships as template — filled in by experimenter after seed fixture generation
+    - POST /admin/run-probe is strictly read-only: only calls retrieve(), no MU creation, no feedback events, run_id always None
+    - CONDITION_LABEL env var takes priority over config.yaml (empty string falls through to config)
+    - seed_fixtures directory mounted as Docker volume so fixtures are accessible without rebuilding the image
+
 - 2026-06-22: /build — Milestone 8 complete
   - Modified: `backend/memory/retrieval.py` (RetrievalResult gains 6 new fields: bm25_scores_per_mu, entry_point_mu_ids, candidate_set_before_ranking, traversal_path, hop_depth_per_retrieved_mu, edge_contributions — all populated from values already computed in retrieve())
   - Modified: `backend/analytics/run_log.py` (RunRecord gains retrieval decomposition fields, assembled_prompt_json, config_hash, full_config_snapshot, condition_label, turn_index, session_turn_index)
@@ -187,3 +209,4 @@ Next step: Review PR for milestone-8-core-instrumentation. After merge, start Mi
 6. ~~**Prompt Clarity** — Separate memory context from user message in Ollama call~~ ✅ COMPLETE
 7. ~~**Multimodal Attachment Support** — Image attachments through the UM gate; binary transient only~~ ✅ COMPLETE
 8. ~~**Core Instrumentation** — Retrieval decomposition, turn indexing, edge lifecycle, feedback-event log~~ ✅ COMPLETE
+9. ~~**Experiment Framework** — Probe set, ground truth labels, seed fixture, battery snapshots~~ ✅ COMPLETE

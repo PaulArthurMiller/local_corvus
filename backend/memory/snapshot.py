@@ -53,3 +53,86 @@ async def take_snapshot() -> str:
         filename,
     )
     return str(filepath)
+
+
+async def take_battery_snapshot(
+    battery_index: int,
+    phase: str,
+    condition_label: str,
+) -> str:
+    """
+    Named snapshot for a measurement battery.
+
+    phase: "pre" | "post"
+    Written to: /app/data/snapshots/battery_{index}_{phase}_{condition}_{ts}.json.gz
+    Returns the file path for logging.
+    """
+    _SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    mus = await graph_store.get_all_mus()
+    edges = await graph_store.get_all_edges()
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    filename = f"battery_{battery_index}_{phase}_{condition_label}_{timestamp}.json.gz"
+    filepath = _SNAPSHOTS_DIR / filename
+
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "snapshot_type": "battery",
+        "battery_index": battery_index,
+        "phase": phase,
+        "condition_label": condition_label,
+        "mu_count": len(mus),
+        "edge_count": len(edges),
+        "memory_units": mus,
+        "edges": edges,
+    }
+
+    with gzip.open(filepath, "wt", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    logger.info(
+        "snapshot: battery snapshot battery=%d phase=%s condition=%s -> %s",
+        battery_index,
+        phase,
+        condition_label,
+        filename,
+    )
+    return str(filepath)
+
+
+async def take_pre_pruning_snapshot() -> str:
+    """
+    Snapshot immediately before any pruning operation.
+
+    Written to: /app/data/snapshots/pre_prune_{ts}.json.gz
+    Returns the file path for logging.
+    """
+    _SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    mus = await graph_store.get_all_mus()
+    edges = await graph_store.get_all_edges()
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    filename = f"pre_prune_{timestamp}.json.gz"
+    filepath = _SNAPSHOTS_DIR / filename
+
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "snapshot_type": "pre_prune",
+        "mu_count": len(mus),
+        "edge_count": len(edges),
+        "memory_units": mus,
+        "edges": edges,
+    }
+
+    with gzip.open(filepath, "wt", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    logger.info(
+        "snapshot: pre-pruning snapshot -> %s (%d MUs %d edges)",
+        filename,
+        len(mus),
+        len(edges),
+    )
+    return str(filepath)

@@ -387,7 +387,7 @@ async def run_interaction(
         assembled_prompt_json=assembled_prompt_json,
         config_hash=_CONFIG_HASH,
         full_config_snapshot=_CONFIG,
-        condition_label=_CONFIG.get("experiment", {}).get("condition_label"),
+        condition_label=os.getenv("CONDITION_LABEL") or _CONFIG.get("experiment", {}).get("condition_label"),
         turn_index=turn_index,
         session_turn_index=session_turn_index,
     )

@@ -36,20 +36,20 @@ _CONFIG_PATH = os.getenv(
 
 @router.get("/runs")
 async def get_runs(
-    session_id: Optional[str] = Query(default=None, description="Filter by session ID"),
+    series_id: Optional[str] = Query(default=None, description="Filter by series ID"),
     limit: int = Query(default=100, ge=1, le=1000, description="Max rows to return"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
 ):
     """
     Return paginated run records from the analytics table.
 
-    Optionally filter by session_id. Results ordered by timestamp DESC.
+    Optionally filter by series_id. Results ordered by timestamp DESC.
     """
     logger.info(
-        "admin/runs: query session_id=%s limit=%d offset=%d", session_id, limit, offset
+        "admin/runs: query series_id=%s limit=%d offset=%d", series_id, limit, offset
     )
     try:
-        runs = await query_runs(session_id=session_id, limit=limit, offset=offset)
+        runs = await query_runs(series_id=series_id, limit=limit, offset=offset)
     except Exception as exc:
         logger.error("admin/runs: query failed — %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))

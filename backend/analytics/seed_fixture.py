@@ -7,6 +7,11 @@ The manifest stored in the DB lets you verify that the fixture file hasn't
 been replaced or tampered with between experiment conditions.
 
 Fixture files live in seed_fixtures/seed_{version}.json.gz at the project root.
+
+When a fixture is registered, each MU is stamped with:
+  series_id   = "seed:{fixture_version}"
+  experiment_id = resolved from EXPERIMENT_ID env var (same as orchestrator)
+  cluster_id  = from per-MU metadata in the fixture file (if present)
 """
 
 import gzip
@@ -30,6 +35,11 @@ _SEED_FIXTURES_PATH = Path(os.getenv(
 ))
 
 
+def _resolve_experiment_id() -> str:
+    """Read EXPERIMENT_ID from env, falling back to empty string."""
+    return os.getenv("EXPERIMENT_ID", "").strip()
+
+
 class SeedFixtureManifest(BaseModel):
     fixture_version: str
     manifest_hash: str                     # SHA-256 of the fixture file's raw bytes
@@ -50,17 +60,24 @@ def compute_fixture_hash(fixture_path: Path) -> str:
 
 async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManifest:
     """
-    Compute hash and type distribution from a fixture file, then store
-    the manifest in the DB.
+    Compute hash and type distribution from a fixture file, store the manifest
+    in the DB, and insert each MU into memory_units with proper stamps.
 
     The fixture file must be in gzip-compressed JSON format matching
     the graph snapshot schema: {memory_units: [...], edges: [...], ...}
+
+    Each MU is stamped:
+      series_id   = "seed:{version}"
+      experiment_id = EXPERIMENT_ID from env
+      cluster_id  = from per-MU "cluster_id" field if present
     """
     fixture_path = Path(fixture_path)
     if not fixture_path.exists():
         raise FileNotFoundError(f"Fixture file not found: {fixture_path}")
 
     manifest_hash = compute_fixture_hash(fixture_path)
+    experiment_id = _resolve_experiment_id() or None
+    series_id = f"seed:{version}"
 
     with gzip.open(fixture_path, "rt", encoding="utf-8") as f:
         data = json.load(f)
@@ -72,11 +89,32 @@ async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManif
     generation_record: list[dict] = []
     for mu in memory_units:
         source_type = mu.get("source_type", "unknown")
+        cluster_id = mu.get("cluster_id") or None
         type_distribution[source_type] = type_distribution.get(source_type, 0) + 1
         generation_record.append({
             "mu_id": mu.get("mu_id", ""),
             "source_type": source_type,
+            "cluster_id": cluster_id,
         })
+
+        # Insert MU into the graph store with seed stamps
+        mu_id = mu.get("mu_id")
+        if mu_id:
+            try:
+                await graph_store.create_mu(
+                    mu_id=mu_id,
+                    source_type=source_type,
+                    raw_content=mu.get("raw_content", ""),
+                    created_at=mu.get("created_at"),
+                    series_id=series_id,
+                    experiment_id=experiment_id,
+                    cluster_id=cluster_id,
+                )
+            except Exception as exc:
+                # MU already exists (idempotent re-registration) — skip
+                logger.debug(
+                    "seed_fixture: MU mu_id=%s already in DB (skipping): %s", mu_id, exc
+                )
 
     manifest = SeedFixtureManifest(
         fixture_version=version,
@@ -89,10 +127,11 @@ async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManif
 
     await graph_store.insert_seed_fixture_manifest(manifest.model_dump())
     logger.info(
-        "seed_fixture: registered version=%s hash=%s mu_count=%d",
+        "seed_fixture: registered version=%s hash=%s mu_count=%d series_id=%s",
         version,
         manifest_hash[:16],
         mu_count,
+        series_id,
     )
     return manifest
 

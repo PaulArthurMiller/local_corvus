@@ -281,12 +281,50 @@ class TestSessionContextFlag:
 
     def test_use_session_context_field_defaults_false_in_run_record(self):
         """RunRecord.use_session_context defaults to False."""
-        record = RunRecord(session_id="test-session")
+        record = RunRecord(series_id="test-session")
         print(f"[test] use_session_context: {record.use_session_context}")
         assert record.model_dump()["use_session_context"] is False
 
     def test_use_session_context_field_can_be_set_true_in_run_record(self):
         """RunRecord.use_session_context can be set to True."""
-        record = RunRecord(session_id="test-session", use_session_context=True)
+        record = RunRecord(series_id="test-session", use_session_context=True)
         print(f"[test] use_session_context: {record.use_session_context}")
         assert record.model_dump()["use_session_context"] is True
+
+
+# ---------------------------------------------------------------------------
+# Milestone 12 — EXPERIMENT_ID constant and RunRecord fields
+# ---------------------------------------------------------------------------
+
+
+class TestMilestone12Orchestrator:
+
+    def test_experiment_id_module_constant_is_non_empty_string(self):
+        """EXPERIMENT_ID is resolved at import time and is a non-empty string."""
+        from core.orchestrator import EXPERIMENT_ID
+        print(f"[test] EXPERIMENT_ID={EXPERIMENT_ID!r}")
+        assert isinstance(EXPERIMENT_ID, str)
+        assert len(EXPERIMENT_ID) > 0
+
+    def test_run_record_series_id_field_exists_and_accepts_value(self):
+        """RunRecord has a series_id field that stores the provided value."""
+        import uuid
+        sid = str(uuid.uuid4())
+        record = RunRecord(series_id=sid)
+        print(f"[test] series_id={record.series_id!r}")
+        assert record.series_id == sid
+
+    def test_run_record_experiment_id_field_exists_and_accepts_value(self):
+        """RunRecord has an experiment_id field that stores the provided value."""
+        import uuid
+        record = RunRecord(series_id=str(uuid.uuid4()), experiment_id="learning-2026-06-26")
+        print(f"[test] experiment_id={record.experiment_id!r}")
+        assert record.experiment_id == "learning-2026-06-26"
+
+    def test_run_record_experiment_id_matches_module_constant(self):
+        """A RunRecord built with the module EXPERIMENT_ID constant stores it correctly."""
+        import uuid
+        from core.orchestrator import EXPERIMENT_ID
+        record = RunRecord(series_id=str(uuid.uuid4()), experiment_id=EXPERIMENT_ID)
+        print(f"[test] record.experiment_id={record.experiment_id!r}")
+        assert record.experiment_id == EXPERIMENT_ID

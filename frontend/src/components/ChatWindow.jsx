@@ -18,7 +18,7 @@ export default function ChatWindow() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [sessionId, setSessionId] = useState(null)
+  const [seriesId, setSeriesId] = useState(null)
   const [sessionTokensIn, setSessionTokensIn] = useState(0)
   const [sessionTokensOut, setSessionTokensOut] = useState(0)
   const [lastPromptTokens, setLastPromptTokens] = useState(null)
@@ -89,14 +89,14 @@ export default function ChatWindow() {
     setMessages(prev => [...prev, { role: 'user', content: text || '[image]' }])
     setLoading(true)
 
-    console.log(`[ChatWindow] sending message session_id=${sessionId} len=${text.length} attachments=${pendingAttachments.length}`)
+    console.log(`[ChatWindow] sending message series_id=${seriesId} len=${text.length} attachments=${pendingAttachments.length}`)
 
     try {
-      const data = await sendMessage(text, sessionId, pendingAttachments)
+      const data = await sendMessage(text, seriesId, pendingAttachments)
       // Revoke object URLs now that the send succeeded
       pendingAttachments.forEach(att => URL.revokeObjectURL(att.preview_url))
-      console.log(`[ChatWindow] response received run_id=${data.run_id} session_id=${data.session_id} tokens_in=${data.tokens_in} tokens_out=${data.tokens_out}`)
-      if (!sessionId) setSessionId(data.session_id)
+      console.log(`[ChatWindow] response received run_id=${data.run_id} series_id=${data.series_id} tokens_in=${data.tokens_in} tokens_out=${data.tokens_out}`)
+      if (!seriesId) setSeriesId(data.series_id)
 
       if (data.tokens_in != null) {
         setSessionTokensIn(prev => prev + data.tokens_in)
@@ -135,13 +135,13 @@ export default function ChatWindow() {
     attachments.forEach(att => URL.revokeObjectURL(att.preview_url))
     setAttachments([])
     setMessages([])
-    setSessionId(null)
+    setSeriesId(null)
     setSessionTokensIn(0)
     setSessionTokensOut(0)
     setLastPromptTokens(null)
     setError(null)
     setInput('')
-    console.log('[ChatWindow] new session started')
+    console.log('[ChatWindow] new series started')
   }
 
   const contextPct = lastPromptTokens != null
@@ -150,9 +150,9 @@ export default function ChatWindow() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {sessionId && (
+      {seriesId && (
         <div style={{ fontSize: 11, color: '#888', marginBottom: 2, fontFamily: 'monospace' }}>
-          session: {sessionId}
+          series: {seriesId}
         </div>
       )}
 
@@ -282,7 +282,7 @@ export default function ChatWindow() {
             fontSize: 13,
           }}
         >
-          New Session
+          New Series
         </button>
         <button
           type="submit"

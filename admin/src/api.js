@@ -17,8 +17,8 @@ async function get(path, params = {}) {
   return res.json()
 }
 
-export async function fetchRuns({ sessionId, limit = 100, offset = 0 } = {}) {
-  return get('/admin/runs', { session_id: sessionId, limit, offset })
+export async function fetchRuns({ seriesId, limit = 100, offset = 0 } = {}) {
+  return get('/admin/runs', { series_id: seriesId, limit, offset })
 }
 
 export async function fetchGraph() {

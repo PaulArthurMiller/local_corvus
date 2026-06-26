@@ -4,7 +4,7 @@ Tests for analytics/run_log.py and the analytics table in memory/store.py
 Covers:
   - capture_run persists a RunRecord to the analytics table
   - query_runs returns the inserted record
-  - query_runs filters correctly by session_id
+  - query_runs filters correctly by series_id
   - update_run_feedback updates feedback_signal and weight_updates
   - get_run fetches a single record by ID
 """
@@ -54,9 +54,9 @@ class TempDBStore:
         self._tmpdir.cleanup()
 
 
-def _make_run(session_id=None) -> RunRecord:
+def _make_run(series_id=None) -> RunRecord:
     return RunRecord(
-        session_id=session_id or str(uuid.uuid4()),
+        series_id=series_id or str(uuid.uuid4()),
         input_mu_id=str(uuid.uuid4()),
         output_mu_id=str(uuid.uuid4()),
         prompt_mu_id=str(uuid.uuid4()),
@@ -84,13 +84,13 @@ def test_capture_run_persists_record():
         print(f"rows after capture: {rows}")
         assert len(rows) == 1
         assert rows[0]["run_id"] == rec.run_id
-        assert rows[0]["session_id"] == rec.session_id
+        assert rows[0]["series_id"] == rec.series_id
         assert rows[0]["latency_ms"] == 123
         assert rows[0]["algorithm"] == "simple_rl"
 
 
 def test_query_runs_returns_all_runs_when_no_filter():
-    """query_runs returns all records when session_id is not specified."""
+    """query_runs returns all records when series_id is not specified."""
     with TempDBStore():
         for _ in range(3):
             run(capture_run(_make_run()))
@@ -99,17 +99,17 @@ def test_query_runs_returns_all_runs_when_no_filter():
         assert len(rows) == 3
 
 
-def test_query_runs_filters_by_session_id():
-    """query_runs returns only records matching the given session_id."""
+def test_query_runs_filters_by_series_id():
+    """query_runs returns only records matching the given series_id."""
     session_a = str(uuid.uuid4())
     session_b = str(uuid.uuid4())
     with TempDBStore():
-        run(capture_run(_make_run(session_id=session_a)))
-        run(capture_run(_make_run(session_id=session_a)))
-        run(capture_run(_make_run(session_id=session_b)))
+        run(capture_run(_make_run(series_id=session_a)))
+        run(capture_run(_make_run(series_id=session_a)))
+        run(capture_run(_make_run(series_id=session_b)))
 
-        rows_a = run(query_runs(session_id=session_a, limit=100))
-        rows_b = run(query_runs(session_id=session_b, limit=100))
+        rows_a = run(query_runs(series_id=session_a, limit=100))
+        rows_b = run(query_runs(series_id=session_b, limit=100))
         print(f"session_a rows: {len(rows_a)}, session_b rows: {len(rows_b)}")
         assert len(rows_a) == 2
         assert len(rows_b) == 1
@@ -135,7 +135,7 @@ def test_captured_run_hyperparameters_snapshot_matches():
     with TempDBStore():
         hp = {"initial_edge_weight": 0.5, "weight_update_rate": 0.1}
         rec = RunRecord(
-            session_id=str(uuid.uuid4()),
+            series_id=str(uuid.uuid4()),
             hyperparameters_snapshot=hp,
         )
         run(capture_run(rec))
@@ -184,10 +184,10 @@ def test_update_run_feedback_sets_signal_and_weight_updates():
 # ---------------------------------------------------------------------------
 
 
-def _make_full_run(session_id=None) -> RunRecord:
+def _make_full_run(series_id=None) -> RunRecord:
     """RunRecord with all Milestone 8 fields populated."""
     return RunRecord(
-        session_id=session_id or str(uuid.uuid4()),
+        series_id=series_id or str(uuid.uuid4()),
         input_mu_id=str(uuid.uuid4()),
         output_mu_id=str(uuid.uuid4()),
         prompt_mu_id=str(uuid.uuid4()),
@@ -247,3 +247,42 @@ def test_config_hash_is_consistent_for_same_config():
     print(f"[test] hash: {hash1}")
     assert hash1 == hash2
     assert len(hash1) == 64  # SHA-256 hex digest is 64 chars
+
+
+# ---------------------------------------------------------------------------
+# Milestone 12 — series_id and experiment_id on RunRecord
+# ---------------------------------------------------------------------------
+
+
+def test_run_record_series_id_is_populated():
+    """RunRecord.series_id is set from the constructor argument."""
+    sid = str(uuid.uuid4())
+    record = RunRecord(series_id=sid)
+    print(f"[test] series_id: {record.series_id}")
+    assert record.series_id == sid
+    assert record.model_dump()["series_id"] == sid
+
+
+def test_run_record_experiment_id_can_be_set():
+    """RunRecord.experiment_id accepts a non-None value and round-trips."""
+    record = RunRecord(series_id=str(uuid.uuid4()), experiment_id="learning-2026-06-26")
+    print(f"[test] experiment_id: {record.experiment_id}")
+    assert record.experiment_id == "learning-2026-06-26"
+    assert record.model_dump()["experiment_id"] == "learning-2026-06-26"
+
+
+def test_run_record_experiment_id_defaults_to_none():
+    """RunRecord.experiment_id is None when not supplied."""
+    record = RunRecord(series_id=str(uuid.uuid4()))
+    print(f"[test] default experiment_id: {record.experiment_id!r}")
+    assert record.experiment_id is None
+
+
+def test_capture_run_persists_experiment_id():
+    """capture_run stores experiment_id and query_runs returns it."""
+    with TempDBStore():
+        rec = RunRecord(series_id=str(uuid.uuid4()), experiment_id="exp-m12-test")
+        run(capture_run(rec))
+        rows = run(query_runs())
+        print(f"[test] experiment_id from db: {rows[0].get('experiment_id')}")
+        assert rows[0]["experiment_id"] == "exp-m12-test"

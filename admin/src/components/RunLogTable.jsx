@@ -1,7 +1,7 @@
 /**
  * RunLogTable — paginated, filterable table of run records from /admin/runs.
  *
- * Columns: timestamp, session_id (truncated), latency_ms, feedback_signal,
+ * Columns: timestamp, series_id (truncated), latency_ms, feedback_signal,
  * tool_calls count, activated_mu count, activated_edge count.
  * Clicking a row expands it to show the full run_id and weight_updates.
  */
@@ -16,7 +16,7 @@ export default function RunLogTable() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [offset, setOffset] = useState(0)
-  const [sessionFilter, setSessionFilter] = useState('')
+  const [seriesFilter, setSeriesFilter] = useState('')
   const [expandedRunId, setExpandedRunId] = useState(null)
 
   const load = useCallback(async () => {
@@ -24,7 +24,7 @@ export default function RunLogTable() {
     setError(null)
     try {
       const data = await fetchRuns({
-        sessionId: sessionFilter || undefined,
+        seriesId: seriesFilter || undefined,
         limit: PAGE_SIZE,
         offset,
       })
@@ -34,7 +34,7 @@ export default function RunLogTable() {
     } finally {
       setLoading(false)
     }
-  }, [sessionFilter, offset])
+  }, [seriesFilter, offset])
 
   useEffect(() => { load() }, [load])
 
@@ -52,9 +52,9 @@ export default function RunLogTable() {
     <div style={{ fontFamily: 'monospace', fontSize: 13 }}>
       <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
         <input
-          placeholder="Filter by session ID…"
-          value={sessionFilter}
-          onChange={e => { setSessionFilter(e.target.value); setOffset(0) }}
+          placeholder="Filter by series ID…"
+          value={seriesFilter}
+          onChange={e => { setSeriesFilter(e.target.value); setOffset(0) }}
           style={{ padding: '4px 8px', width: 320, fontFamily: 'monospace' }}
         />
         <button onClick={load} style={{ padding: '4px 10px' }}>Refresh</button>
@@ -68,7 +68,7 @@ export default function RunLogTable() {
           <table style={{ borderCollapse: 'collapse', width: '100%' }}>
             <thead>
               <tr style={{ background: '#f0f0f0' }}>
-                {['Timestamp', 'Session', 'Latency ms', 'Feedback', 'Tools', 'Act. MUs', 'Act. Edges', 'Failure'].map(h => (
+                {['Timestamp', 'Series', 'Latency ms', 'Feedback', 'Tools', 'Act. MUs', 'Act. Edges', 'Failure'].map(h => (
                   <th key={h} style={{ border: '1px solid #ccc', padding: '4px 8px', textAlign: 'left' }}>{h}</th>
                 ))}
               </tr>
@@ -82,7 +82,7 @@ export default function RunLogTable() {
                     style={{ cursor: 'pointer', background: expandedRunId === run.run_id ? '#e8f0fe' : 'white' }}
                   >
                     <td style={tdStyle}>{run.timestamp?.slice(0, 19).replace('T', ' ')}</td>
-                    <td style={tdStyle}>{run.session_id?.slice(0, 8)}…</td>
+                    <td style={tdStyle}>{run.series_id?.slice(0, 8)}…</td>
                     <td style={tdStyle}>{run.latency_ms ?? '—'}</td>
                     <td style={tdStyle}>{feedbackLabel(run.feedback_signal)}</td>
                     <td style={tdStyle}>{(run.tool_calls || []).length}</td>
@@ -96,6 +96,8 @@ export default function RunLogTable() {
                     <tr key={`${run.run_id}-detail`}>
                       <td colSpan={8} style={{ padding: '8px 12px', background: '#f8f8f8', border: '1px solid #ccc' }}>
                         <strong>run_id:</strong> {run.run_id}<br />
+                        <strong>series_id:</strong> {run.series_id}<br />
+                        <strong>experiment_id:</strong> {run.experiment_id || '—'}<br />
                         <strong>input_mu_id:</strong> {run.input_mu_id}<br />
                         <strong>output_mu_id:</strong> {run.output_mu_id}<br />
                         <strong>algorithm:</strong> {run.algorithm}<br />

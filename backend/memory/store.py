@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS analytics (
     session_turn_index INTEGER,
     measurement_session_index INTEGER,
     is_probe_turn INTEGER NOT NULL DEFAULT 0,
-    use_session_context INTEGER NOT NULL DEFAULT 0
+    use_session_context INTEGER NOT NULL DEFAULT 0,
+    failure_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS feedback_events (
@@ -163,6 +164,7 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("analytics", "measurement_session_index", "INTEGER"),
         ("analytics", "is_probe_turn", "INTEGER NOT NULL DEFAULT 0"),
         ("analytics", "use_session_context", "INTEGER NOT NULL DEFAULT 0"),
+        ("analytics", "failure_reason", "TEXT"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -416,7 +418,8 @@ class GraphStore:
                     traversal_path, hop_depth_per_retrieved_mu, edge_contributions,
                     assembled_prompt_json, config_hash, full_config_snapshot,
                     condition_label, turn_index, session_turn_index,
-                    measurement_session_index, is_probe_turn, use_session_context
+                    measurement_session_index, is_probe_turn, use_session_context,
+                    failure_reason
                 ) VALUES (
                     :run_id, :session_id, :timestamp, :input_mu_id, :output_mu_id,
                     :tool_calls, :activated_mu_ids, :activated_edge_ids, :prompt_mu_id,
@@ -426,7 +429,8 @@ class GraphStore:
                     :traversal_path, :hop_depth_per_retrieved_mu, :edge_contributions,
                     :assembled_prompt_json, :config_hash, :full_config_snapshot,
                     :condition_label, :turn_index, :session_turn_index,
-                    :measurement_session_index, :is_probe_turn, :use_session_context
+                    :measurement_session_index, :is_probe_turn, :use_session_context,
+                    :failure_reason
                 )
                 """,
                 {
@@ -461,6 +465,7 @@ class GraphStore:
                     "measurement_session_index": run.get("measurement_session_index"),
                     "is_probe_turn": 1 if run.get("is_probe_turn") else 0,
                     "use_session_context": 1 if run.get("use_session_context") else 0,
+                    "failure_reason": run.get("failure_reason"),
                 },
             )
             await db.commit()

@@ -8,8 +8,9 @@
 import { useState } from 'react'
 import FeedbackButtons from './FeedbackButtons'
 
-export default function MessageBubble({ role, content, runId }) {
+export default function MessageBubble({ role, content, runId, failureReason }) {
   const isUser = role === 'user'
+  const isFailed = !isUser && Boolean(failureReason)
   const [copied, setCopied] = useState(false)
 
   function handleCopy() {
@@ -28,12 +29,14 @@ export default function MessageBubble({ role, content, runId }) {
     }}>
       <div style={{
         maxWidth: '72%',
-        background: isUser ? '#6366f1' : '#f0f0f0',
-        color: isUser ? '#fff' : '#111',
+        background: isUser ? '#6366f1' : isFailed ? '#fff8e6' : '#f0f0f0',
+        color: isUser ? '#fff' : isFailed ? '#7c4a00' : '#111',
+        border: isFailed ? '1px solid #f0a500' : 'none',
         padding: '10px 14px',
         borderRadius: isUser ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
         fontFamily: 'monospace',
         fontSize: 14,
+        fontStyle: isFailed ? 'italic' : 'normal',
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
         lineHeight: 1.5,

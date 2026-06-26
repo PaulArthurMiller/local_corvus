@@ -74,6 +74,27 @@ USE_SESSION_CONTEXT: bool = (
 )
 logger.info("orchestrator: USE_SESSION_CONTEXT=%s", USE_SESSION_CONTEXT)
 
+# --- Failure detection constants ---
+# finish_reason value Ollama returns when the model exhausted its token budget
+_OLLAMA_FINISH_REASON_LENGTH: str = "length"
+
+FAILURE_REASON_TOKEN_LIMIT: str = "token_limit_exhausted"
+FAILURE_REASON_EMPTY_OUTPUT: str = "empty_output"
+
+_MU_SOURCE_TYPE_FAILED_TOKEN_LIMIT: str = "agent_output_failed_token_limit"
+_MU_SOURCE_TYPE_FAILED_EMPTY_OUTPUT: str = "agent_output_failed_empty_output"
+
+FAILURE_UI_MESSAGES: dict[str, str] = {
+    FAILURE_REASON_TOKEN_LIMIT: (
+        "[The model hit its completion-token limit before producing any output. "
+        "Response is empty. This turn has been flagged for review.]"
+    ),
+    FAILURE_REASON_EMPTY_OUTPUT: (
+        "[The model returned an empty response unexpectedly "
+        "(finish_reason was not 'length'). This turn has been flagged for review.]"
+    ),
+}
+
 # Singleton registry — initialized once when the module loads.
 _tool_registry = ToolRegistry(config=_CONFIG)
 
@@ -133,6 +154,7 @@ class InteractionResult:
     flags: list[str] = field(default_factory=list)
     tokens_in: Optional[int] = None
     tokens_out: Optional[int] = None
+    failure_reason: Optional[str] = None
 
 
 async def run_interaction(
@@ -312,12 +334,22 @@ async def run_interaction(
 
     # --- Step 8: Tool loop — call Ollama; dispatch tool calls if present ---
     tool_schemas = _tool_registry.get_all_schemas()
-    llm_content, tool_call_mu_ids, tokens_in, tokens_out = await _run_tool_loop(
+    llm_content, tool_call_mu_ids, tokens_in, tokens_out, llm_failure_reason = await _run_tool_loop(
         messages=ollama_messages,
         session_id=session_id,
         tool_schemas=tool_schemas,
         all_flags=all_flags,
     )
+
+    # Substitute UI message for failure cases before any downstream processing.
+    # History, gate, and MU creation all receive the substituted message so the
+    # audit trail reflects exactly what the user saw.
+    if llm_failure_reason is not None:
+        llm_content = FAILURE_UI_MESSAGES[llm_failure_reason]
+        logger.warning(
+            "orchestrator: failure detected reason=%s — substituting UI message into response",
+            llm_failure_reason,
+        )
 
     # Append clean turn to session history (without memory context injection)
     append_session_message(session_id, {"role": "user", "content": input_result.content})
@@ -327,9 +359,16 @@ async def run_interaction(
     output_result = sanitize_in(llm_content, boundary="llm->agent")
     all_flags.extend(output_result.flags)
 
+    # Source type encodes the failure cause so the MU is queryable by failure mode
+    output_source_type = (
+        _MU_SOURCE_TYPE_FAILED_TOKEN_LIMIT if llm_failure_reason == FAILURE_REASON_TOKEN_LIMIT
+        else _MU_SOURCE_TYPE_FAILED_EMPTY_OUTPUT if llm_failure_reason == FAILURE_REASON_EMPTY_OUTPUT
+        else "agent_output"
+    )
+
     output_um = create_um(
         content=output_result.content,
-        source_type="agent_output",
+        source_type=output_source_type,
         boundary="llm->agent",
         direction="in",
         session_id=session_id,
@@ -405,6 +444,7 @@ async def run_interaction(
         turn_index=turn_index,
         session_turn_index=session_turn_index,
         use_session_context=USE_SESSION_CONTEXT,
+        failure_reason=llm_failure_reason,
     )
     await capture_run(run_record)
 
@@ -424,6 +464,7 @@ async def run_interaction(
         flags=all_flags,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        failure_reason=llm_failure_reason,
     )
 
 
@@ -481,12 +522,14 @@ async def _run_tool_loop(
     session_id: str,
     tool_schemas: list[dict],
     all_flags: list[str],
-) -> tuple[str, list[str], Optional[int], Optional[int]]:
+) -> tuple[str, list[str], Optional[int], Optional[int], Optional[str]]:
     """
     Call Ollama with registered tools, dispatch any tool calls, and repeat
     until Ollama returns a text response or max_iterations is reached.
 
-    Returns (final_text_response, list_of_tool_call_mu_ids, tokens_in, tokens_out).
+    Returns (final_text_response, list_of_tool_call_mu_ids, tokens_in, tokens_out, failure_reason).
+    failure_reason is None for normal completions; set to a FAILURE_REASON_* constant when
+    the model returned empty content.
     tokens_in = prompt_tokens from the final Ollama call (best proxy for context window usage).
     tokens_out = sum of completion_tokens across all iterations.
     """
@@ -547,12 +590,29 @@ async def _run_tool_loop(
         # No tool calls — Ollama returned a final text response
         if finish_reason != "tool_calls" or not llm_message.get("tool_calls"):
             content = llm_message.get("content") or ""
-            logger.info(
-                "orchestrator: Ollama final response len=%d finish_reason=%s",
-                len(content),
-                finish_reason,
-            )
-            return content, tool_call_mu_ids, tokens_in, tokens_out
+            # Detect empty-response failure conditions
+            if content.strip() == "":
+                if (finish_reason or "") == _OLLAMA_FINISH_REASON_LENGTH:
+                    loop_failure_reason: Optional[str] = FAILURE_REASON_TOKEN_LIMIT
+                    logger.warning(
+                        "orchestrator: empty response finish_reason=length — %s",
+                        FAILURE_REASON_TOKEN_LIMIT,
+                    )
+                else:
+                    loop_failure_reason = FAILURE_REASON_EMPTY_OUTPUT
+                    logger.warning(
+                        "orchestrator: empty response finish_reason=%s — %s",
+                        finish_reason,
+                        FAILURE_REASON_EMPTY_OUTPUT,
+                    )
+            else:
+                loop_failure_reason = None
+                logger.info(
+                    "orchestrator: Ollama final response len=%d finish_reason=%s",
+                    len(content),
+                    finish_reason,
+                )
+            return content, tool_call_mu_ids, tokens_in, tokens_out, loop_failure_reason
 
         # Process each tool call in this response
         tool_calls = llm_message["tool_calls"]
@@ -661,10 +721,11 @@ async def _run_tool_loop(
         iteration += 1
 
     # If we exit the while loop without returning, the loop hit max iterations
-    # without a final text response. Return whatever we have.
+    # without a final text response.
     logger.warning(
         "orchestrator: tool loop hit max_iterations=%d without text response; "
-        "returning empty string",
+        "returning empty string with failure_reason=%s",
         max_iter,
+        FAILURE_REASON_EMPTY_OUTPUT,
     )
-    return "", tool_call_mu_ids, tokens_in, tokens_out
+    return "", tool_call_mu_ids, tokens_in, tokens_out, FAILURE_REASON_EMPTY_OUTPUT

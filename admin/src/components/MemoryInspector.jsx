@@ -116,6 +116,9 @@ export default function MemoryInspector() {
                     <tr key={`${mu.mu_id}-detail`}>
                       <td colSpan={5} style={{ padding: '10px 14px', background: '#f8f8f8', border: '1px solid #ccc' }}>
                         <strong>mu_id:</strong> {mu.mu_id}<br />
+                        <strong>series_id:</strong> {mu.series_id || '—'}<br />
+                        <strong>experiment_id:</strong> {mu.experiment_id || '—'}<br />
+                        <strong>cluster_id:</strong> {mu.cluster_id || '—'}<br />
                         <strong>source_type:</strong> {mu.source_type}<br />
                         <strong>created_at:</strong> {mu.created_at}<br />
                         <strong>last_activated_at:</strong> {mu.last_activated_at || '—'}<br />

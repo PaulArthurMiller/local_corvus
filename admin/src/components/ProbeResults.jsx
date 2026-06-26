@@ -109,7 +109,7 @@ export default function ProbeResults() {
           style={{ fontFamily: 'monospace', fontSize: 12, padding: '4px 8px', width: 140 }}
         />
         <input
-          placeholder="session index"
+          placeholder="meas. session idx"
           value={filterSession}
           onChange={e => setFilterSession(e.target.value)}
           type="number"

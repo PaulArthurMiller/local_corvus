@@ -50,7 +50,7 @@ def _insert_minimal_run(run_id: str) -> None:
         db = await sm._open_db()
         try:
             await db.execute(
-                "INSERT INTO analytics (run_id, session_id, timestamp) VALUES (?, ?, ?)",
+                "INSERT INTO analytics (run_id, series_id, timestamp) VALUES (?, ?, ?)",
                 (run_id, "sess-1", "2026-01-01T00:00:00Z"),
             )
             await db.commit()

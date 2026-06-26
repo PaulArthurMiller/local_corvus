@@ -1531,10 +1531,569 @@ New file `tests/test_core/test_failure_detection.py`:
 
 ---
 
+### Milestone 12 — Series ID on MUs + Experiment ID + Terminology Rename (Prerequisite Gate)
+
+**Why this milestone exists:** The Series and Experiment Reports scope every analysis by `series_id` and `experiment_id`. Neither field exists on `memory_units` today — `session_id` is tracked only in the `analytics` table, and `experiment_id` is absent from the data layer entirely. Without `series_id` on MUs, §5.3 (intra-series vs. cross-series retrieval rate) and §5.4 (cross-series edges) are impossible to compute: the only way to determine which series a retrieved MU belongs to would be a multi-step join through `analytics.activated_mu_ids` — not a query, a re-derivation.
+
+This milestone also executes the project-wide terminology rename: `session` → `series`. Per the spec: "Reserving 'session' for a future iteration that actually carries context forward keeps the vocabulary honest about current behavior." This is a rename only — no behavior change.
+
+**Confirmed field audit (§3 of report spec):**
+- `source_type` and `created_at` on MUs: ✅ exist
+- `finish_reason=length` empty-failure tag on agent_output MUs: ✅ Milestone 11 (`source_type = "agent_output_failed_token_limit"`)
+- Per-edge-creation records with trigger + creating run: ✅ Milestone 8 (`edges.creation_run_id`, `edges.creation_trigger`)
+- Per-edge-update records with old/new weight and feedback FK: ✅ Milestone 8 (`analytics.weight_updates` with `feedback_event_id`)
+- Feedback-event log with FK: ✅ Milestone 8 (`feedback_events` table)
+- Traversal-chain records: ✅ Milestone 8 (`traversal_path`, `entry_point_mu_ids`, `hop_depth_per_retrieved_mu`)
+- Per-probe ground-truth labels with phenomenon tags and bridge-MU flags: ✅ Milestone 9 (`probes` table)
+- Seed-fixture provenance: ✅ Milestone 9 (`seed_fixture_manifest` table)
+- `series_id` on MUs: ❌ **MISSING** — this milestone closes the gap
+- `experiment_id` anywhere: ❌ **MISSING** — this milestone closes the gap
+
+**Build:**
+
+**1. `config.yaml` — extend experiment section**
+```yaml
+experiment:
+  experiment_id: ""              # set by experimenter at experiment start
+  condition_label: "learning"
+  use_session_context: false
+```
+If `experiment_id` is empty at startup, generate one as `{condition_label}-{YYYY-MM-DD}` and log it clearly at WARNING level (experimenter should set it explicitly for reproducibility).
+
+**2. `backend/memory/store.py` — schema additions + migration**
+
+a) `memory_units` table: add three columns:
+```sql
+series_id TEXT,      -- NULL for seed-fixture MUs (which get "seed:{fixture_version}")
+experiment_id TEXT,  -- NULL for pre-M12 MUs
+cluster_id TEXT      -- "cluster_a" | "cluster_b" | "bridge" | NULL; set at seed time; NULL for conversational MUs
+```
+`cluster_id` is added here because the §6.1 bridge-MU / cross-cluster analysis (Milestone 15) requires cluster membership on MUs. Adding it now while the schema is already being modified avoids a second migration.
+
+b) `analytics` table: rename `session_id` → `series_id`, add `experiment_id`:
+```python
+# In _migrate_db() — requires SQLite >= 3.25 (released 2018-09-15):
+("analytics", "RENAME COLUMN session_id TO series_id"),
+("analytics", "ADD COLUMN experiment_id TEXT"),
+("memory_units", "ADD COLUMN series_id TEXT"),
+("memory_units", "ADD COLUMN experiment_id TEXT"),
+("memory_units", "ADD COLUMN cluster_id TEXT"),
+```
+If `RENAME COLUMN` fails (SQLite < 3.25), fall back to table-recreation. Verify the SQLite version in the Docker image at the start of this milestone — run `python -c "import sqlite3; print(sqlite3.sqlite_version)"` in the container.
+
+c) Update `create_mu()`:
+```python
+async def create_mu(
+    mu_id: str,
+    source_type: str,
+    raw_content: str,
+    series_id: Optional[str] = None,
+    experiment_id: Optional[str] = None,
+    cluster_id: Optional[str] = None,
+) -> None:
+```
+
+d) Update `insert_run()` to use `series_id` (renamed) and include `experiment_id`.
+
+e) Rename `get_session_turn_count()` → `get_series_turn_count()`.
+
+f) Update all other store methods that reference `session_id` (query filters, INSERT params).
+
+**3. `gate/um.py`**
+Add `series_id: Optional[str] = None` and `experiment_id: Optional[str] = None` to `UniversalMessage`. Update `create_um()` signature.
+
+**4. `core/orchestrator.py`**
+- Resolve `EXPERIMENT_ID` at module load: `os.getenv("EXPERIMENT_ID", "")` → config `experiment.experiment_id` → auto-generated default. Log at startup.
+- Pass `series_id=session_id, experiment_id=EXPERIMENT_ID` to all `create_um()` calls.
+- Add `experiment_id=EXPERIMENT_ID` to `RunRecord`.
+- Rename all internal `session_id` variables to `series_id`.
+
+**5. `analytics/run_log.py`**
+- Rename `session_id` → `series_id` in `RunRecord`.
+- Add `experiment_id: Optional[str] = None`.
+
+**6. `api/chat.py` and `api/admin.py`**
+- Rename `session_id` → `series_id` in all request/response models and query parameters.
+
+**7. Seed-fixture MUs**
+When `register_fixture()` / `load_and_verify_fixture()` loads seed MUs into `memory_units`, stamp:
+- `series_id = f"seed:{fixture_version}"`
+- `experiment_id = EXPERIMENT_ID`
+- `cluster_id` from the fixture generation record's per-MU metadata (if present; otherwise NULL)
+
+**8. Admin UI** — rename "Session" → "Series" everywhere: RunLogTable column headers, ProbeResults filter labels, MemoryInspector labels.
+
+**9. `docker-compose.yml`** — add `EXPERIMENT_ID` env var passthrough alongside the existing `CONDITION_LABEL` and `USE_SESSION_CONTEXT` passthroughs.
+
+**Tests:**
+- `test_store.py` (extend): `create_mu()` stores `series_id`, `experiment_id`, and `cluster_id`; all three round-trip from SQLite correctly; `get_series_turn_count()` returns correct count per series_id.
+- `test_store.py` (migration): run `_migrate_db()` against a pre-populated DB that has `session_id` in `analytics` and no `series_id`/`experiment_id`/`cluster_id` in `memory_units`; verify migration completes without data loss and existing values are preserved.
+- `test_orchestrator.py` (extend): `RunRecord.series_id` is populated from the current session; `RunRecord.experiment_id` matches the resolved `EXPERIMENT_ID`; newly created MU has `series_id` set.
+- `test_um.py` (extend): `create_um()` with `series_id` includes it in the returned `UniversalMessage`.
+
+**Done when:**
+- Every MU created after M12 has `series_id` and `experiment_id` populated in `memory_units`
+- `SELECT DISTINCT series_id FROM memory_units WHERE series_id IS NOT NULL` returns one row per series from that point forward
+- `analytics` table has `series_id` column (renamed from `session_id`) and `experiment_id`
+- `EXPERIMENT_ID` is logged at container startup
+- Admin UI shows "Series" not "Session" throughout
+- Schema migration runs safely against an existing populated `graph.db`
+- All 218 existing tests still pass
+
+**Risks:**
+- ⚠ `ALTER TABLE ... RENAME COLUMN` requires SQLite ≥ 3.25. Check before writing migration code — the Docker image may use an older SQLite. If < 3.25, use table-recreation pattern (create new table, copy data, drop old, rename).
+- ⚠ `EXPERIMENT_ID` is a module-level constant resolved at import time — requires a container restart to pick up a new value. Log it clearly at INFO level on every interaction (not just startup) so the run record is auditable without checking container logs.
+- ? Seed-fixture MUs already in `memory_units` before M12 will have `series_id = NULL`. These pre-M12 MUs are not part of any formal experiment run, so NULL is correct — flag them as "pre-experiment" in the report if they surface in a retrieval.
+
+**Estimate:** 1-2 sessions
+
+---
+
+### Milestone 13 — Series Report Generator (§5)
+
+**Why this milestone exists:** The instrumentation now captures every intermediate quantity needed to answer the per-series diagnostic questions. Without a generator that reads that data and renders a fixed, human-readable document, every series review requires a manual join across four tables and raw log inspection. The Series Report is the interface between the data layer and the researcher.
+
+**What it builds:**
+
+**New files:**
+- `backend/analytics/reports/__init__.py`
+- `backend/analytics/reports/series_report.py` — the generator
+- `backend/analytics/reports/markdown_renderer.py` — JSON dict → Markdown template
+
+**New DB table in `store.py`:**
+```sql
+CREATE TABLE IF NOT EXISTS generated_reports (
+    report_id TEXT PRIMARY KEY,
+    report_type TEXT NOT NULL,      -- "series" | "experiment"
+    experiment_id TEXT NOT NULL,
+    series_id TEXT,                 -- NULL for experiment-level reports
+    generated_at TEXT NOT NULL,
+    json_path TEXT NOT NULL,
+    md_path TEXT NOT NULL
+);
+```
+
+**New admin endpoints in `api/admin.py`:**
+- `POST /admin/reports/generate-series` — `{experiment_id, series_id}` → generates report, stores paths in `generated_reports`, returns `report_id`
+- `GET /admin/reports` — list all reports (filterable by `report_type`, `experiment_id`)
+- `GET /admin/reports/{report_id}` — return the report JSON
+- `GET /admin/reports/{report_id}/markdown` — return the `.md` file as plain text
+
+**Output files** go to `/app/memory/reports/` (new subdirectory, created on first generation):
+```
+series_report_{experiment_id}_{series_id}_{timestamp}.json
+series_report_{experiment_id}_{series_id}_{timestamp}.md
+```
+
+**Section implementations:**
+
+**§5.1 — Failure summary**
+- Failed turns: `SELECT run_id, turn_index, failure_reason FROM analytics WHERE series_id = :sid AND failure_reason IS NOT NULL ORDER BY turn_index`
+- Ghost-MU check: for each MU in `memory_units WHERE source_type LIKE 'agent_output_failed%' AND series_id = :sid`, check if that `mu_id` appears in `activated_mu_ids` of any later run (by `turn_index`) in the same series. Flag any match as a ghost-MU incident. This confirms the failure mode flagged during design (failed MU being retrieved back into context) isn't recurring.
+
+**§5.2 — Retrieval trace digest**
+For each run in the series, join `analytics.traversal_path`, `analytics.entry_point_mu_ids`, `analytics.bm25_scores_per_mu`, `analytics.turn_index`. Render as a per-turn table row: `[turn N] terms:{keywords} → entry:{mu_ids} → hops:{traversal_path} → retrieved:{final_set_count} MUs`. Not raw JSON — a readable trace with MU IDs truncated to 8 chars for legibility.
+
+**§5.3 — Intra-series vs. cross-series retrieval rate**
+For each run in the series, for each `mu_id` in `analytics.activated_mu_ids`, join to `memory_units.series_id`. Classify:
+- `intra_series`: `memory_units.series_id == :current_series`
+- `seed_fixture`: `memory_units.series_id LIKE 'seed:%'`
+- `cross_series`: any other non-NULL series_id
+- `unknown`: `series_id IS NULL` (pre-M12 MUs)
+
+Series-level rate: `intra_count / total_retrieved`. Per-turn breakdown in the JSON. Requires M12 (`series_id` on MUs).
+
+**§5.4 — Cross-series edges**
+```sql
+SELECT e.edge_id, e.weight,
+       s.series_id AS source_series, s.mu_id AS source_mu,
+       t.series_id AS target_series, t.mu_id AS target_mu
+FROM edges e
+JOIN memory_units s ON e.source_mu_id = s.mu_id
+JOIN memory_units t ON e.target_mu_id = t.mu_id
+WHERE (s.series_id = :sid OR t.series_id = :sid)
+  AND (s.series_id != t.series_id OR s.series_id IS NULL OR t.series_id IS NULL)
+```
+Include the other series_id and edge weight for each result.
+
+**§5.5 — Edge weight deltas (series-scoped)**
+For each `edge_id` that appears in any run's `activated_edge_ids` within this series:
+- Start weight: `old_weight` from the first `weight_updates` entry (by `turn_index`) in this series for this edge; if never updated in this series, use `edges.weight` (no delta).
+- End weight: `new_weight` from the last `weight_updates` entry; if never updated, use `edges.weight`.
+- Delta: end - start.
+
+Sort by `abs(delta)` descending. Flag: any edge with `delta == 0.0` that was traversed > 5 times in this series (high-traversal, zero-reinforcement — worth noting).
+
+**§5.6 — Probe integrity check**
+```sql
+SELECT COUNT(*) FROM feedback_events fe
+JOIN analytics a ON fe.run_id = a.run_id
+WHERE a.series_id = :sid AND fe.is_probe_turn = 1
+```
+If count > 0: HARD FAIL — list each offending `feedback_event_id`, `run_id`, `turn_index`. If count == 0: PASS. This is not a soft warning; per the spec, any violation is a data-integrity flag.
+
+**§5.7 — Mode-3 trigger count**
+```sql
+SELECT mu_id, raw_content, created_at FROM memory_units
+WHERE source_type = 'system' AND series_id = :sid
+ORDER BY created_at
+```
+Count = number of Mode-3 summarization MUs. Anomaly check: flag any system MU where `len(raw_content) < 100` (suspiciously short for a summarization output — possible truncation). Threshold is configurable via `config.yaml` (add `reporting.mode3_min_expected_length: 100`).
+
+**§5.8 — num_ctx pressure**
+```sql
+SELECT turn_index, tokens_in, json_array_length(activated_mu_ids) as retrieved_count
+FROM analytics WHERE series_id = :sid ORDER BY turn_index
+```
+Flag any turn where `tokens_in > 0.8 * context_window_tokens` (config: `model.context_window_tokens`). For flagged turns, note whether `retrieved_count` is above the series mean — if yes, attribute to retrieval-volume growth (the regression check tied to the ceiling discussion).
+
+**Tests:**
+- `test_series_report.py` (new):
+  - §5.1: ghost-MU check correctly identifies a failed MU `mu_id` appearing in a later turn's `activated_mu_ids`; a clean series produces ghost_mu_count=0.
+  - §5.3: correctly classifies intra-series, seed, cross-series, and unknown MUs; rate computation matches manual calculation.
+  - §5.5: start/end weight correctly derived from `weight_updates` first/last entries; zero-delta edges with high traversal count are flagged.
+  - §5.6: probe integrity check returns HARD FAIL when a fabricated `feedback_events` row has `is_probe_turn=1`; PASS on clean data.
+  - §5.7: mode-3 anomaly flag fires when a system MU has `len(raw_content) < 100`.
+  - §5.8: pressure flag fires when `tokens_in > 0.8 * context_window_tokens`; retrieval-volume attribution correct.
+- `test_markdown_renderer.py` (new): all 8 sections render to non-empty Markdown; each section header is present; JSON round-trips correctly from the renderer input.
+- Manual: `POST /admin/reports/generate-series` produces `.json` and `.md` files in `/app/memory/reports/`; `GET /admin/reports` lists the new report; `GET /admin/reports/{id}/markdown` returns the file content.
+
+**Done when:**
+- `POST /admin/reports/generate-series` produces both files for a completed series
+- All 8 §5 sections have real data from a completed series (not mocked)
+- Ghost-MU check runs correctly against real data
+- Probe integrity check passes (verified by confirming `feedback_events.is_probe_turn` is never 1 on probe runs)
+- Report files written to `/app/memory/reports/` and queryable via `GET /admin/reports`
+- All 218+ existing tests still pass
+
+**Risks:**
+- ⚠ Requires M12 complete first — §5.3 and §5.4 will produce all-NULL `series_id` results if M12 hasn't run.
+- ⚠ Verify `source_type = 'system'` is the correct type for Mode-3 summarization MUs before building §5.7 — check `memory/extractor.py` at build time.
+- ? §5.5 start/end weight: if an edge was created and its first traversal produced an update, `old_weight` in the first `weight_updates` entry equals `initial_edge_weight`. But if the edge was created in an earlier series and only traversed (no update) in this series, the "start weight" is the inherited weight from the prior series — note this in the report output so the researcher knows the delta is series-scoped, not edge-lifetime-scoped.
+- ? `activated_mu_ids` in `analytics` is stored as a JSON array — use `json_each()` in SQLite to unnest it for joins. Verify this SQLite feature is available in the Docker image.
+
+**Estimate:** 2-3 sessions
+
+---
+
+### Milestone 14 — Experiment Report: Non-Learning Rollup + Integrity Checks (§5 aggregation + §6.3 + §6.4)
+
+**Why this order:** Before building the learning measures (§6.1, the hardest analytical section), build the structural skeleton of the Experiment Report — §5 rolled up across all series in the experiment, plus the data-integrity checks that must pass before any learning comparison is valid. This milestone produces a complete, usable report even without the learning-measures module; it also validates the aggregation plumbing before adding the state-transition and bridge-MU logic.
+
+**What it builds:**
+
+New file: `backend/analytics/reports/experiment_report.py`
+
+New admin endpoint: `POST /admin/reports/generate-experiment` — `{experiment_id}` → generates experiment report, stores in `generated_reports`, returns `report_id`. The output embeds all §5 series data, §6.3 integrity checks, and §6.4 caveat text. §6.1 (learning measures) and §6.2 (control shadow) are added as empty/placeholder keys in the JSON structure so the schema is stable before Milestones 15 and 16 fill them in.
+
+**Output files:**
+```
+experiment_report_{experiment_id}.json
+experiment_report_{experiment_id}.md
+```
+
+**§5 aggregation across series:**
+For each §5 section, aggregate across all series where `analytics.experiment_id = :eid`:
+- §5.1: total failure count; per-series breakdown; list of ghost-MU incidents across the experiment.
+- §5.3: mean intra-series retrieval rate ± range across series; if any series is far from the mean, flag it.
+- §5.5: aggregate edge weight change ledger — total edges touched, count increased / decreased / unchanged, mean |delta|.
+- §5.6: aggregate probe integrity — any failure in any series is a hard flag for the whole experiment.
+- §5.7: total Mode-3 trigger count; flag if later series trigger Mode-3 more often than earlier ones (retrieval growth leading to summarization pressure).
+- §5.8: turn count above num_ctx threshold per series; flag if the count is growing (increasing context pressure = expected, but worth surfacing).
+
+Series reports are generated independently via M13 — this milestone reads from `generated_reports` to find existing series reports and either reads their JSON or re-queries the DB directly. Prefer re-querying (so the experiment report is always current, not dependent on a prior series report generation run).
+
+**§6.3 — Data-integrity / confound checks:**
+
+**Seed-fixture provenance check:**
+- Read `seed_fixture_manifest` for the fixture version used in this experiment.
+- If multiple experiments exist, verify their `manifest_hash` values match (same starting graph).
+- Query: for each series in this experiment, check if any MU with `series_id LIKE 'seed:%'` has a `series_id` that doesn't match the registered fixture version → flag as provenance mismatch.
+
+**Graph-wipe verification:**
+- For this experiment, check that no `memory_units` row with a different `experiment_id` (not NULL, not `seed:*`) existed before the earliest run in this experiment.
+- Query: `SELECT COUNT(*) FROM memory_units WHERE experiment_id IS NOT NULL AND experiment_id != :eid AND experiment_id NOT LIKE 'seed:%' AND created_at < (SELECT MIN(timestamp) FROM analytics WHERE experiment_id = :eid)`. If count > 0: flag as possible incomplete wipe.
+
+**Probe-replay-index normalization check:**
+- Verify `measurement_session_index` values in `probe_results` for this experiment are contiguous (no gaps: 1, 2, 3, ... not 1, 3, 5).
+- If gaps exist, list them — report a gap as a missing measurement session (no data for that session index, which will appear as a gap in the learning curves).
+- Report probe learning curves with x-axis as `measurement_session_index` (not wall-clock time or `turn_index`).
+
+**§6.4 — Statistical caveat (rendered text in template):**
+Hard-coded in the Markdown template — not a computed field. The text is:
+```markdown
+## §6.4 Statistical Note
+
+At ~100+ prompts total per experiment, this report states raw counts and simple
+deltas without implying statistical significance the sample size cannot support.
+All reported differences are directional signals for hypothesis generation, not
+confirmed effects.
+```
+
+**JSON structure (keys present but empty/null for §6.1 and §6.2 until later milestones):**
+```json
+{
+  "experiment_id": "...",
+  "condition_label": "...",
+  "generated_at": "...",
+  "series_summary": { ... },       // §5 aggregated
+  "integrity_checks": { ... },    // §6.3
+  "learning_measures": null,      // filled by Milestone 15
+  "control_shadow": null          // filled by Milestone 16
+}
+```
+
+**Tests:**
+- `test_experiment_report.py` (new):
+  - §5 aggregation: total failure count is sum of per-series counts; mean intra-series rate is correct for synthetic multi-series data.
+  - §6.3 seed-fixture provenance: check passes when experiment has one fixture version; fails when a fabricated MU has a mismatched `series_id`.
+  - §6.3 graph-wipe: check passes on clean data; fires when a fabricated pre-experiment MU from a different experiment_id is present.
+  - §6.3 probe-replay-index normalization: correctly identifies a gap in session indices (1, 2, 4 → gap at 3).
+  - §6.4 statistical caveat text appears verbatim in Markdown output.
+  - JSON output has `learning_measures: null` and `control_shadow: null` placeholder keys.
+
+**Done when:**
+- `POST /admin/reports/generate-experiment` produces valid JSON + Markdown for an experiment with at least 2 completed series
+- All three §6.3 integrity checks correctly pass on clean data and fire on fabricated violations
+- §6.4 statistical caveat text present in every generated experiment report Markdown
+- `learning_measures` and `control_shadow` keys present in JSON as null (ready for M15/M16)
+- All 218+ existing tests still pass
+
+**Risks:**
+- ⚠ Requires M12 (for `experiment_id` in `analytics` and `memory_units`) and M13 (for the series-level section structure to borrow from).
+- ⚠ Graph-wipe verification relies on `memory_units.experiment_id` being populated — MUs created before M12 will have `experiment_id = NULL`, which may generate false positives. Treat `NULL` experiment_id as "pre-experiment / unattributed" and exclude from the wipe check.
+- ? The §5 aggregation re-queries the DB directly rather than reading series report JSON files. This is intentional (always current) but means the aggregation SQL must handle cases where series reports haven't been generated yet — which is the normal case for a mid-experiment rollup.
+
+**Estimate:** 2-3 sessions
+
+---
+
+### Milestone 15 — Experiment Report: Learning Measures (§6.1)
+
+**Why its own milestone:** The learning measures section is the analytical core of the whole reporting system. State-transition detection, bridge-MU rank trajectory, and saturation checks require non-trivial logic that doesn't share code paths with any other section. The spec explicitly calls this out as the most logic-heavy piece. Isolating it means Milestone 14 can be validated (and used) while this section is still being built.
+
+**What it builds:**
+
+Extends `experiment_report.py` with the §6.1 section generator. Adds to `POST /admin/reports/generate-experiment` so it now populates the `learning_measures` key in the JSON.
+
+**§6.1 — Learning measures:**
+
+**Probe outcome summary — state transitions:**
+
+For each probe in `probes`, across all `probe_results` for this experiment ordered by `measurement_session_index`:
+
+1. Classify each result as:
+   - `pass`: `gold_mu_rank IS NOT NULL AND gold_mu_rank <= pass_rank_threshold` (add `reporting.pass_rank_threshold: 3` to `config.yaml` — a gold MU in the top 3 retrieved MUs counts as a pass)
+   - `fail`: `gold_mu_rank IS NULL OR gold_mu_rank > pass_rank_threshold`
+   - `negative_flagged`: explicit override (requires adding `outcome_override: Optional[str]` to `probe_results` table — see open items)
+
+2. Compute state sequence: `[fail, fail, pass, pass, pass]`
+
+3. Identify transitions:
+   - `fail_to_pass`: session N is fail, session N+1 is pass → learning event
+   - `pass_to_fail`: session N is pass, session N+1 is fail → regression event
+   - `flat_fail`: all sessions are fail → no learning detected for this probe
+   - `flat_pass`: all sessions are pass → probe may not be discriminative (learned from fixtures, not from the experiment)
+
+4. Aggregate by `phenomenon_type` (across all probes with that tag). Roll up for the whole experiment.
+
+**MUs pulled by probe prompts, segmented by outcome:**
+For each `probe_result`, group by classified outcome (pass / fail). List `retrieved_mu_ids`, `source_type`, and `series_id` for each retrieved MU. The data structure enables the "what was retrieved when it worked vs. when it didn't" comparison directly from the JSON.
+
+**Edge weight delta ledger:**
+```sql
+-- All weight_updates across this experiment, enriched with edge endpoints
+SELECT wu.edge_id, wu.old_weight, wu.new_weight,
+       wu.new_weight - wu.old_weight AS delta,
+       wu.feedback_event_id,
+       e.source_mu_id, e.target_mu_id,
+       s.cluster_id AS source_cluster, t.cluster_id AS target_cluster
+FROM analytics a,
+     json_each(a.weight_updates) AS wu_raw,
+     -- parse the JSON weight_updates array
+     edges e ON e.edge_id = wu_raw.value->>'edge_id'
+JOIN memory_units s ON e.source_mu_id = s.mu_id
+JOIN memory_units t ON e.target_mu_id = t.mu_id
+WHERE a.experiment_id = :eid
+```
+
+(Note: the exact SQLite JSON unnesting syntax will depend on the version — use `json_each()` with the correct path.)
+
+- Count: increased, decreased, unchanged.
+- Magnitude: min, max, mean |delta|.
+- **Orphan update check:** count entries where `feedback_event_id IS NULL` — should be 0 in the learned condition (every weight update traces to a feedback event). Report the count explicitly; a non-zero count is a process violation, not a result.
+- **Within-cluster vs. cross-cluster segmentation:** using `source_cluster` and `target_cluster` from the join. Cross-cluster = `source_cluster != target_cluster AND source_cluster IS NOT NULL AND target_cluster IS NOT NULL`. Report cross-cluster deltas in their own subsection — this is the more diagnostic signal.
+
+**Cross-series MUs underlying probe results:**
+For each `probe_result` in this experiment: for each `mu_id` in `retrieved_mu_ids`, report its `series_id` and `cluster_id`. The output is a per-probe, per-session table showing which series contributed to each retrieval — directly answers whether cross-series MUs appear in probe retrievals.
+
+**Bridge-MU / cross-cluster transfer subsection:**
+
+For each probe where `is_bridge_probe = true`:
+1. Collect `gold_mu_rank` across all `measurement_session_index` values → the rank trajectory. Lower ranks at later indices = bridge MU surfacing more reliably = possible transfer signal.
+2. For each rank improvement (session N rank > session N+1 rank): identify which reinforcement events preceded that improvement.
+   - A "reinforcement event" = a `feedback_events` row with `verdict = 'thumbs_up'` in any series belonging to this experiment.
+   - "Cluster-A-only reinforcement" = all reinforcement events in the window between session N and N+1 have `run_id` that maps to series where the touched MUs have `cluster_id = 'cluster_a'`.
+3. If a bridge-MU rank improvement on a cluster-B probe follows cluster-A-only reinforcement: flag as a **cross-cluster transfer candidate** — the strongest available evidence for genuine learning.
+4. Report explicitly, with the reinforcement event IDs and session indices, so the researcher can inspect the raw data.
+
+**Saturation / runaway-reinforcement check:**
+For each edge in this experiment:
+1. Collect its weight update sequence chronologically.
+2. Flag as **saturation risk** if: `edges.weight > saturation_threshold` (add `reporting.saturation_threshold: 0.9` to `config.yaml`).
+3. Flag as **runaway reinforcement** if: any three consecutive deltas are each larger than the previous (accelerating, not diminishing). The concern: unbounded positive feedback on a small dataset.
+4. Report flagged edges with their current weight and delta sequence.
+
+**Tests:**
+- `test_learning_measures.py` (new):
+  - State-transition detection: `[fail, fail, pass, pass]` → 1 fail_to_pass, 0 pass_to_fail; `[pass, fail, pass]` → 1 fail_to_pass, 1 pass_to_fail; `[fail, fail, fail]` → flat_fail.
+  - Probe aggregation by phenomenon_type: correct counts per type for multi-probe synthetic data.
+  - Orphan update count: 0 for data with all `feedback_event_id` populated; N for fabricated orphans.
+  - Cross-cluster edge segmentation: correctly separates within-cluster from cross-cluster edges using `cluster_id`.
+  - Saturation check: fires at weight > 0.9; does not fire at 0.85.
+  - Runaway-reinforcement: fires for deltas [0.05, 0.07, 0.10]; does not fire for [0.10, 0.07, 0.05] (diminishing).
+  - Bridge-MU rank trajectory: correctly identified rank improvement in the right session window.
+
+**Done when:**
+- `POST /admin/reports/generate-experiment` now populates the `learning_measures` key in the JSON (not null)
+- State-transition analysis produces correct output for all transition types (verified against synthetic test data)
+- Orphan update count is 0 for clean test data
+- Bridge-MU rank trajectory renders correctly for the bridge probes in `probes` table
+- Saturation and runaway-reinforcement checks fire correctly on fabricated cases
+- All 218+ existing tests still pass
+
+**Risks:**
+- ⚠ SQLite JSON unnesting syntax for `weight_updates` (stored as a JSON array in `analytics`): `json_each()` is available in SQLite 3.38+ (2022). For older SQLite, a Python-side post-processing approach is needed (load the JSON in Python, unnest in memory, then query edges). Verify during build and choose the appropriate approach.
+- ⚠ `negative_flagged` probe outcome state: the spec defines a tri-state (pass / fail / negative-flagged). Adding `outcome_override TEXT` to `probe_results` requires a DB migration. If not added, `negative_flagged` probes can't be excluded from averages — which the spec warns can mask regressions. Decide at the start of M15: add the column (recommended) or document the limitation.
+- ⚠ Bridge-MU cross-cluster transfer detection requires `cluster_id` on MUs (added in M12) and that seed MUs were actually tagged with `cluster_id` during fixture generation. If `cluster_id` is NULL on most MUs, this analysis degrades gracefully to "cluster_id unknown" — report that rather than silently omitting the section.
+- ? `pass_rank_threshold` default of 3: if the typical retrieved set size is small (e.g., K2 = 1 by default config), a gold MU at rank 1 or 2 is the only realistic pass. Verify the threshold is appropriate for the actual K1/K2 config values before finalizing.
+
+**Estimate:** 3-4 sessions
+
+---
+
+### Milestone 16 — Experiment Report: Control Shadow + Admin UI Integration (§6.2 + Reports Dashboard)
+
+**Why last:** The control shadow requires running §6.1 analysis against two additional experiments (static-weight and random-weight conditions). Those experiments don't exist until after the learned condition has been run and the report system (M13-M15) has been validated. The admin dashboard integration waits until both report types are complete so the UI can present them coherently.
+
+**What it builds:**
+
+**§6.2 — Control shadow:**
+
+The control shadow is a sub-structure embedded in the learned-condition experiment report — not a separate file. Per the spec: "the comparison can't drift out of sync with the primary results."
+
+Extends `POST /admin/reports/generate-experiment` with an optional body parameter:
+```json
+{
+  "experiment_id": "exp-2026-07-01-learned",
+  "control_experiment_ids": {
+    "static_weight": "exp-2026-07-10-static",
+    "random_weight": "exp-2026-07-10-random"
+  }
+}
+```
+
+When `control_experiment_ids` is provided:
+1. Run the full §6.1 learning-measures analysis for each control experiment.
+2. Run control-specific sanity checks:
+   - **Static control — `zero_weight_changes`:** `SELECT COUNT(*) FROM analytics WHERE experiment_id = :static_eid AND json_array_length(weight_updates) > 0`. Must be 0. A non-zero count is a bug (static control should have no weight changes), not a result.
+   - **Random control — `weights_rerandomized`:** verify that edge weight variance across runs is not near-zero (which would indicate weights were accidentally frozen). If the standard deviation of sampled edge weights across series is < `reporting.random_control_variance_floor: 0.05`, flag as possibly static.
+   - **Both controls — `zero_feedback_edge_correlation`:** for each feedback event in the control experiment, verify `weight_updates` for that run is empty. Count violations — should be 0 (feedback is causally inert in both controls by design).
+3. Compute comparative deltas for each learning measure: `learned_value - control_value`:
+   - Final probe pass-rate: learned vs. static, learned vs. random
+   - Bridge-MU rank at final measurement session: learned vs. controls
+   - Mean edge weight delta magnitude: learned vs. controls
+   - Mean gold_mu_rank at final session: learned vs. controls
+4. Embed in `experiment_report_{experiment_id}.json` under `control_shadow` key:
+```json
+{
+  "control_shadow": {
+    "static_weight": {
+      "experiment_id": "...",
+      "learning_measures": { ... },
+      "sanity_checks": {
+        "zero_weight_changes": true,
+        "zero_feedback_edge_correlation": 0
+      },
+      "comparative_deltas": {
+        "probe_pass_rate_delta": 0.32,
+        "bridge_mu_rank_delta": -2.7,
+        "edge_weight_delta_magnitude": 0.18
+      }
+    },
+    "random_weight": { ... }
+  }
+}
+```
+
+**Admin UI — Reports Dashboard:**
+
+New files:
+- `admin/src/pages/Reports.jsx` — reports page
+- `admin/src/components/ReportsList.jsx` — filterable list with view/download
+- `admin/src/components/ExperimentComparison.jsx` — side-by-side comparison table when control shadow is present
+- `admin/src/components/ReportViewer.jsx` — renders Markdown content as HTML (use `react-markdown` package)
+
+Add `Reports` tab to `admin/src/App.jsx` (alongside Runs, Graph, Config, Probe Results).
+
+Reports page layout:
+```
+┌──────────────────────────────────────────────────────────┐
+│  Filter: experiment_id ▾  type ▾     [Generate New...]   │
+├──────────────────────────────────────────────────────────┤
+│  📄 experiment_report_learned-2026-07-01  [View][↓JSON]  │
+│  📄 series_report_learned_series-1        [View][↓JSON]  │
+│  📄 series_report_learned_series-2        [View][↓JSON]  │
+└──────────────────────────────────────────────────────────┘
+
+(when experiment report has control_shadow — comparison table auto-renders)
+
+┌──────────────────────────────────────────────────────────┐
+│  Condition Comparison                                     │
+│  Measure                   Learned   Static   Random     │
+│  ──────────────────────── ───────── ──────── ─────────   │
+│  Final probe pass rate      73%       41%      38%       │
+│  Bridge-MU rank (final)      2.1       4.8      5.1      │
+│  Edge Δ magnitude (mean)    0.18      0.00     0.02      │
+│  Orphan updates               0         0        0       │
+└──────────────────────────────────────────────────────────┘
+```
+
+The "Generate New..." button opens a small form: select `experiment_id`, optional `control_experiment_ids`. Calls `POST /admin/reports/generate-series` or `POST /admin/reports/generate-experiment` depending on report type selected.
+
+**New backend dependency:** add `react-markdown` to `admin/package.json` for in-browser Markdown rendering.
+
+**Tests:**
+- `test_control_shadow.py` (new):
+  - Static-control `zero_weight_changes` check passes on clean data; fails when a fabricated `weight_updates` entry is present for a static-control run.
+  - Random-control `weights_rerandomized` check fails on fabricated near-zero variance data; passes when variance > floor.
+  - `zero_feedback_edge_correlation` check: fires when a fabricated feedback event for a control run has non-empty `weight_updates`; passes on clean data.
+  - Comparative delta computation: correct values for synthetic learned/control pairs.
+- Manual (Admin UI): generate an experiment report with control shadow IDs → Reports page shows the comparison table with correct values; "View" button renders the Markdown in the browser; "↓JSON" downloads the raw JSON.
+
+**Done when:**
+- `POST /admin/reports/generate-experiment` with `control_experiment_ids` produces a report with embedded `control_shadow` (not null)
+- All three sanity checks run correctly and fire on fabricated violations
+- Comparative deltas appear in JSON and Markdown for all learning measures
+- Admin UI Reports page lists all generated reports with view/download
+- Comparison table auto-renders when a control shadow is present in the selected experiment report
+- Markdown files render correctly in the browser (headers, tables, code blocks)
+- All 218+ existing tests still pass
+
+**Risks:**
+- ⚠ The control shadow can only be fully tested with real control-condition experiment data. Build M16 against synthetic test data; the real validation happens after the three-condition experiment run.
+- ⚠ `react-markdown` must handle tables (GFM extension) — the report Markdown uses `|`-delimited tables throughout. Verify this renders correctly; if not, use `remark-gfm` plugin alongside `react-markdown`.
+- ? If probe set versions differ between the learned condition and a control (should never happen), the comparison table displays incomparable numbers. Add a probe-set-version match check to the control shadow pre-computation — if versions differ, refuse to generate the comparison and return an error with the mismatch.
+- ? `Generate New...` form in the Reports page: keep it minimal (text inputs for experiment IDs). Don't add autocomplete or dropdowns that require a new `/admin/experiments` endpoint — that's out of scope for this milestone.
+
+**Estimate:** 2-3 sessions
+
+---
+
 ## Status
 
 ```
-Current milestone: 11 — Empty-Response Failure Detection — COMPLETE
+Current milestone: 12 — Series ID Prerequisite Gate — COMPLETE
 Last updated: 2026-06-26
 ```
 
@@ -1561,3 +2120,5 @@ Last updated: 2026-06-26
 **Milestone 10:** Complete — branch `milestone-10-session-context-flag`, PR pending merge.
 
 **Milestone 11:** Complete — branch `milestone-11-empty-response-detection`, PR pending merge.
+
+**Milestone 12:** Complete — branch `milestone-12-series-id-prerequisite-gate`, PR pending merge.

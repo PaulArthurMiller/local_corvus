@@ -281,7 +281,7 @@ class TestTurnIndexMethods:
                 db = await sm._open_db()
                 try:
                     await db.execute(
-                        "INSERT INTO analytics (run_id, session_id, timestamp) VALUES (?, ?, ?)",
+                        "INSERT INTO analytics (run_id, series_id, timestamp) VALUES (?, ?, ?)",
                         (run_id, "sess-1", "2026-01-01T00:00:00Z"),
                     )
                     await db.commit()
@@ -295,25 +295,25 @@ class TestTurnIndexMethods:
             print(f"[test] turn indices: {idx1}, {idx2}")
             assert idx2 == 2
 
-    def test_get_session_turn_count_returns_0_for_unknown_session(self):
-        """session_turn_count for an unknown session returns 0."""
+    def test_get_series_turn_count_returns_0_for_unknown_series(self):
+        """series_turn_count for an unknown series returns 0."""
         with TempDBStore() as s:
-            count = run(s.get_session_turn_count("no-such-session"))
+            count = run(s.get_series_turn_count("no-such-session"))
             print(f"[test] unknown session count: {count}")
             assert count == 0
 
 
 class TestFeedbackEvents:
 
-    def _make_run_and_insert(self, s, run_id, session_id="sess-1"):
+    def _make_run_and_insert(self, s, run_id, series_id="sess-1"):
         """Insert a minimal analytics row so feedback_event FK is valid."""
         async def _insert():
             import memory.store as sm
             db = await sm._open_db()
             try:
                 await db.execute(
-                    "INSERT INTO analytics (run_id, session_id, timestamp) VALUES (?, ?, ?)",
-                    (run_id, session_id, "2026-01-01T00:00:00Z"),
+                    "INSERT INTO analytics (run_id, series_id, timestamp) VALUES (?, ?, ?)",
+                    (run_id, series_id, "2026-01-01T00:00:00Z"),
                 )
                 await db.commit()
             finally:
@@ -387,7 +387,7 @@ class TestUseSessionContextField:
             from analytics.run_log import RunRecord
             record = RunRecord(
                 run_id=run_id,
-                session_id="sess-m10",
+                series_id="sess-m10",
                 use_session_context=use_session_context,
             )
             await s.insert_run(record.model_dump())
@@ -414,3 +414,122 @@ class TestUseSessionContextField:
             print(f"[test] use_session_context (True): {fetched['use_session_context']}")
             assert fetched is not None
             assert fetched["use_session_context"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Milestone 12 — series_id, experiment_id, cluster_id on memory_units
+# ---------------------------------------------------------------------------
+
+
+class TestMilestone12MuFields:
+
+    def test_create_mu_stores_series_id(self):
+        """create_mu() with series_id round-trips through SQLite."""
+        with TempDBStore() as s:
+            mid = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mid, source_type="user_input", raw_content="x",
+                            series_id="series-abc"))
+            row = run(s.get_mu(mid))
+            print(f"[test] series_id: {row['series_id']}")
+            assert row["series_id"] == "series-abc"
+
+    def test_create_mu_stores_experiment_id(self):
+        """create_mu() with experiment_id round-trips through SQLite."""
+        with TempDBStore() as s:
+            mid = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mid, source_type="agent_output", raw_content="y",
+                            experiment_id="exp-2026-06-26"))
+            row = run(s.get_mu(mid))
+            print(f"[test] experiment_id: {row['experiment_id']}")
+            assert row["experiment_id"] == "exp-2026-06-26"
+
+    def test_create_mu_stores_cluster_id(self):
+        """create_mu() with cluster_id round-trips through SQLite."""
+        with TempDBStore() as s:
+            mid = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mid, source_type="prompt", raw_content="z",
+                            cluster_id="cluster-42"))
+            row = run(s.get_mu(mid))
+            print(f"[test] cluster_id: {row['cluster_id']}")
+            assert row["cluster_id"] == "cluster-42"
+
+    def test_create_mu_all_three_null_by_default(self):
+        """series_id, experiment_id, cluster_id default to None when not supplied."""
+        with TempDBStore() as s:
+            mid = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mid, source_type="system", raw_content="w"))
+            row = run(s.get_mu(mid))
+            print(f"[test] defaults: {row['series_id']} {row['experiment_id']} {row['cluster_id']}")
+            assert row["series_id"] is None
+            assert row["experiment_id"] is None
+            assert row["cluster_id"] is None
+
+    def test_get_series_turn_count_returns_correct_count(self):
+        """get_series_turn_count() counts runs matching the given series_id."""
+        from analytics.run_log import RunRecord, capture_run
+        import analytics.run_log as rl_module
+
+        with TempDBStore() as s:
+            # Patch the run_log singleton so capture_run uses our temp store
+            with mock.patch.object(rl_module, "graph_store", s):
+                sid_a = str(uuid.uuid4())
+                sid_b = str(uuid.uuid4())
+                r1 = RunRecord(series_id=sid_a)
+                r2 = RunRecord(series_id=sid_a)
+                r3 = RunRecord(series_id=sid_b)
+                run(capture_run(r1))
+                run(capture_run(r2))
+                run(capture_run(r3))
+
+            count_a = run(s.get_series_turn_count(sid_a))
+            count_b = run(s.get_series_turn_count(sid_b))
+            count_unknown = run(s.get_series_turn_count("no-such-series"))
+            print(f"[test] count_a={count_a} count_b={count_b} count_unknown={count_unknown}")
+            assert count_a == 2
+            assert count_b == 1
+            assert count_unknown == 0
+
+    def test_migration_renames_session_id_to_series_id(self):
+        """_migrate_db() renames analytics.session_id → series_id and preserves data."""
+        import aiosqlite
+        import tempfile
+        from memory.store import _migrate_db
+
+        async def _run_migration_test():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "old_schema.db"
+                db = await aiosqlite.connect(str(db_path))
+                db.row_factory = aiosqlite.Row
+                # Create OLD analytics schema with session_id (pre-M12)
+                await db.executescript("""
+                    CREATE TABLE analytics (
+                        run_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        timestamp TEXT NOT NULL
+                    );
+                    CREATE TABLE memory_units (
+                        mu_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        source_type TEXT NOT NULL,
+                        raw_content TEXT NOT NULL
+                    );
+                """)
+                await db.commit()
+                # Insert a row under the OLD column name
+                await db.execute(
+                    "INSERT INTO analytics (run_id, session_id, timestamp) VALUES (?, ?, ?)",
+                    ("run-1", "series-old-value", "2026-01-01T00:00:00Z"),
+                )
+                await db.commit()
+                # Run migration
+                await _migrate_db(db)
+                # Verify: old data accessible via new column name
+                async with db.execute("SELECT series_id FROM analytics WHERE run_id=?", ("run-1",)) as cur:
+                    row = await cur.fetchone()
+                await db.close()
+                return row
+
+        row = asyncio.get_event_loop().run_until_complete(_run_migration_test())
+        print(f"[test] migrated series_id: {row['series_id']}")
+        assert row is not None
+        assert row["series_id"] == "series-old-value"

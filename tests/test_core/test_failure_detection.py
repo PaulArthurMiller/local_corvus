@@ -70,7 +70,7 @@ async def _call_tool_loop(content: str, finish_reason):
     with _patch_httpx(resp):
         return await _run_tool_loop(
             messages=[{"role": "user", "content": "hello"}],
-            session_id="test-session",
+            series_id="test-session",
             tool_schemas=[],
             all_flags=[],
         )
@@ -189,28 +189,28 @@ class TestMuSourceTypeConstants:
 class TestRunRecordFailureReason:
 
     def test_failure_reason_defaults_to_none(self):
-        record = RunRecord(session_id="test-session")
+        record = RunRecord(series_id="test-session")
         print(f"[test] failure_reason: {record.failure_reason!r}")
         assert record.failure_reason is None
 
     def test_failure_reason_can_be_set_to_token_limit(self):
-        record = RunRecord(session_id="test-session", failure_reason=FAILURE_REASON_TOKEN_LIMIT)
+        record = RunRecord(series_id="test-session", failure_reason=FAILURE_REASON_TOKEN_LIMIT)
         print(f"[test] failure_reason: {record.failure_reason!r}")
         assert record.failure_reason == FAILURE_REASON_TOKEN_LIMIT
 
     def test_failure_reason_can_be_set_to_empty_output(self):
-        record = RunRecord(session_id="test-session", failure_reason=FAILURE_REASON_EMPTY_OUTPUT)
+        record = RunRecord(series_id="test-session", failure_reason=FAILURE_REASON_EMPTY_OUTPUT)
         print(f"[test] failure_reason: {record.failure_reason!r}")
         assert record.failure_reason == FAILURE_REASON_EMPTY_OUTPUT
 
     def test_failure_reason_appears_in_model_dump(self):
-        record = RunRecord(session_id="test-session", failure_reason=FAILURE_REASON_TOKEN_LIMIT)
+        record = RunRecord(series_id="test-session", failure_reason=FAILURE_REASON_TOKEN_LIMIT)
         dumped = record.model_dump()
         print(f"[test] model_dump failure_reason: {dumped.get('failure_reason')!r}")
         assert dumped["failure_reason"] == FAILURE_REASON_TOKEN_LIMIT
 
     def test_normal_turn_failure_reason_is_none_in_model_dump(self):
-        record = RunRecord(session_id="test-session")
+        record = RunRecord(series_id="test-session")
         dumped = record.model_dump()
         print(f"[test] model_dump failure_reason: {dumped.get('failure_reason')!r}")
         assert dumped["failure_reason"] is None

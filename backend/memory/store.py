@@ -34,7 +34,10 @@ CREATE TABLE IF NOT EXISTS memory_units (
     last_activated_at TEXT,
     activation_count INTEGER DEFAULT 0,
     reference_count INTEGER DEFAULT 0,
-    pruning_flag INTEGER DEFAULT 0
+    pruning_flag INTEGER DEFAULT 0,
+    series_id TEXT,
+    experiment_id TEXT,
+    cluster_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -52,7 +55,8 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE TABLE IF NOT EXISTS analytics (
     run_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
+    series_id TEXT NOT NULL,
+    experiment_id TEXT,
     timestamp TEXT NOT NULL,
     input_mu_id TEXT,
     output_mu_id TEXT,
@@ -128,7 +132,7 @@ CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
 
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_mu_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_mu_id);
-CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics(session_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_series ON analytics(series_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON analytics(timestamp);
 CREATE INDEX IF NOT EXISTS idx_feedback_events_run ON feedback_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_events_probe ON feedback_events(is_probe_turn);
@@ -140,13 +144,14 @@ CREATE INDEX IF NOT EXISTS idx_probe_results_condition ON probe_results(conditio
 
 async def _migrate_db(db: aiosqlite.Connection) -> None:
     """
-    Idempotent schema migration — adds columns introduced in Milestone 8
-    to existing databases that pre-date this milestone.
+    Idempotent schema migration — adds or renames columns for all milestones.
 
     Each ALTER TABLE is wrapped in try/except so a column that already
     exists (fresh install) does not cause an error.
+    SQLite >= 3.25 is required for RENAME COLUMN (released 2018-09-15).
     """
-    migrations = [
+    # --- M8: add retrieval decomposition + new analytics columns ---
+    add_column_migrations = [
         ("edges", "creation_run_id", "TEXT"),
         ("edges", "creation_trigger", "TEXT"),
         ("analytics", "bm25_scores_per_mu", "TEXT NOT NULL DEFAULT '{}'"),
@@ -165,15 +170,35 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("analytics", "is_probe_turn", "INTEGER NOT NULL DEFAULT 0"),
         ("analytics", "use_session_context", "INTEGER NOT NULL DEFAULT 0"),
         ("analytics", "failure_reason", "TEXT"),
+        # M12: new columns
+        ("analytics", "experiment_id", "TEXT"),
+        ("memory_units", "series_id", "TEXT"),
+        ("memory_units", "experiment_id", "TEXT"),
+        ("memory_units", "cluster_id", "TEXT"),
     ]
-    for table, column, col_type in migrations:
+    for table, column, col_type in add_column_migrations:
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
             await db.commit()
             logger.info("store: migrated %s.%s", table, column)
         except Exception:
-            # Column already exists — this is the expected case on fresh installs
+            # Column already exists — expected on fresh installs
             pass
+
+    # --- M12: rename analytics.session_id → series_id (SQLite >= 3.25) ---
+    try:
+        await db.execute("ALTER TABLE analytics RENAME COLUMN session_id TO series_id")
+        await db.commit()
+        # Recreate the index under the new name (old index updated in-place by SQLite,
+        # but the name would remain idx_analytics_session — add the new one too)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analytics_series ON analytics(series_id)"
+        )
+        await db.commit()
+        logger.info("store: migrated analytics.session_id → series_id")
+    except Exception:
+        # Column already renamed (fresh install uses series_id directly)
+        pass
 
 
 async def _open_db() -> aiosqlite.Connection:
@@ -214,6 +239,9 @@ class GraphStore:
         source_type: str,
         raw_content: str,
         created_at: Optional[str] = None,
+        series_id: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+        cluster_id: Optional[str] = None,
     ) -> dict:
         """Insert a new memory unit. Returns the inserted row as a dict."""
         now = created_at or datetime.now(timezone.utc).isoformat()
@@ -222,16 +250,18 @@ class GraphStore:
             await db.execute(
                 """
                 INSERT INTO memory_units
-                    (mu_id, created_at, source_type, raw_content)
-                VALUES (?, ?, ?, ?)
+                    (mu_id, created_at, source_type, raw_content,
+                     series_id, experiment_id, cluster_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (mu_id, now, source_type, raw_content),
+                (mu_id, now, source_type, raw_content, series_id, experiment_id, cluster_id),
             )
             await db.commit()
         finally:
             await db.close()
         logger.info(
-            "store: created MU mu_id=%s source_type=%s", mu_id, source_type
+            "store: created MU mu_id=%s source_type=%s series_id=%s",
+            mu_id, source_type, series_id,
         )
         return {
             "mu_id": mu_id,
@@ -242,6 +272,9 @@ class GraphStore:
             "activation_count": 0,
             "reference_count": 0,
             "pruning_flag": 0,
+            "series_id": series_id,
+            "experiment_id": experiment_id,
+            "cluster_id": cluster_id,
         }
 
     async def get_mu(self, mu_id: str) -> Optional[dict]:
@@ -410,7 +443,7 @@ class GraphStore:
             await db.execute(
                 """
                 INSERT INTO analytics (
-                    run_id, session_id, timestamp, input_mu_id, output_mu_id,
+                    run_id, series_id, experiment_id, timestamp, input_mu_id, output_mu_id,
                     tool_calls, activated_mu_ids, activated_edge_ids, prompt_mu_id,
                     tokens_in, tokens_out, latency_ms, feedback_signal,
                     weight_updates, hyperparameters_snapshot, algorithm,
@@ -421,7 +454,7 @@ class GraphStore:
                     measurement_session_index, is_probe_turn, use_session_context,
                     failure_reason
                 ) VALUES (
-                    :run_id, :session_id, :timestamp, :input_mu_id, :output_mu_id,
+                    :run_id, :series_id, :experiment_id, :timestamp, :input_mu_id, :output_mu_id,
                     :tool_calls, :activated_mu_ids, :activated_edge_ids, :prompt_mu_id,
                     :tokens_in, :tokens_out, :latency_ms, :feedback_signal,
                     :weight_updates, :hyperparameters_snapshot, :algorithm,
@@ -435,7 +468,8 @@ class GraphStore:
                 """,
                 {
                     "run_id": run["run_id"],
-                    "session_id": run["session_id"],
+                    "series_id": run["series_id"],
+                    "experiment_id": run.get("experiment_id"),
                     "timestamp": run["timestamp"],
                     "input_mu_id": run.get("input_mu_id"),
                     "output_mu_id": run.get("output_mu_id"),
@@ -471,32 +505,35 @@ class GraphStore:
             await db.commit()
         finally:
             await db.close()
-        logger.info("store: inserted run run_id=%s session_id=%s", run["run_id"], run["session_id"])
+        logger.info(
+            "store: inserted run run_id=%s series_id=%s experiment_id=%s",
+            run["run_id"], run["series_id"], run.get("experiment_id"),
+        )
 
     async def query_runs(
         self,
-        session_id: Optional[str] = None,
+        series_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
         """
         Query run records from the analytics table.
 
-        Optionally filter by session_id. Returns rows ordered by timestamp DESC.
+        Optionally filter by series_id. Returns rows ordered by timestamp DESC.
         JSON string fields are decoded back to Python objects.
         """
         import json
         db = await _open_db()
         try:
-            if session_id:
+            if series_id:
                 async with db.execute(
                     """
                     SELECT * FROM analytics
-                    WHERE session_id = ?
+                    WHERE series_id = ?
                     ORDER BY timestamp DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (session_id, limit, offset),
+                    (series_id, limit, offset),
                 ) as cursor:
                     rows = await cursor.fetchall()
             else:
@@ -605,12 +642,12 @@ class GraphStore:
         count = row[0] if row else 0
         return count + 1
 
-    async def get_session_turn_count(self, session_id: str) -> int:
-        """Return how many runs exist for this session (the next session_turn_index)."""
+    async def get_series_turn_count(self, series_id: str) -> int:
+        """Return how many runs exist for this series (the next session_turn_index)."""
         db = await _open_db()
         try:
             async with db.execute(
-                "SELECT COUNT(*) FROM analytics WHERE session_id = ?", (session_id,)
+                "SELECT COUNT(*) FROM analytics WHERE series_id = ?", (series_id,)
             ) as cursor:
                 row = await cursor.fetchone()
         finally:

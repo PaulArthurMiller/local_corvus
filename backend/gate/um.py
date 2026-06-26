@@ -32,7 +32,8 @@ class UniversalMessage(BaseModel):
     raw_content: str
     boundary: str
     direction: Direction
-    session_id: str
+    series_id: str
+    experiment_id: Optional[str] = None
     channel_id: Optional[str] = None
     # Free-string flags raised by sanitize_in / sanitize_out
     flags: list[str] = Field(default_factory=list)
@@ -43,7 +44,8 @@ def create_um(
     source_type: SourceType,
     boundary: str,
     direction: Direction,
-    session_id: str,
+    series_id: str,
+    experiment_id: Optional[str] = None,
     channel_id: Optional[str] = None,
     flags: Optional[list[str]] = None,
 ) -> UniversalMessage:
@@ -53,7 +55,8 @@ def create_um(
         raw_content=content,
         boundary=boundary,
         direction=direction,
-        session_id=session_id,
+        series_id=series_id,
+        experiment_id=experiment_id,
         channel_id=channel_id,
         flags=flags or [],
     )

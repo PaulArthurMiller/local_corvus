@@ -74,6 +74,30 @@ USE_SESSION_CONTEXT: bool = (
 )
 logger.info("orchestrator: USE_SESSION_CONTEXT=%s", USE_SESSION_CONTEXT)
 
+# Experiment ID — identifies this experiment run for series/MU attribution.
+# Resolved from env → config → auto-generated default. Logged at WARNING if auto-generated
+# so the researcher knows to set it explicitly before an experiment run.
+def _resolve_experiment_id() -> str:
+    env_val = os.getenv("EXPERIMENT_ID", "").strip()
+    if env_val:
+        return env_val
+    cfg_val = str(_CONFIG.get("experiment", {}).get("experiment_id", "")).strip()
+    if cfg_val:
+        return cfg_val
+    from datetime import date
+    condition = _CONFIG.get("experiment", {}).get("condition_label", "unknown")
+    auto_id = f"{condition}-{date.today().isoformat()}"
+    logger.warning(
+        "orchestrator: EXPERIMENT_ID not set — auto-generated '%s'. "
+        "Set EXPERIMENT_ID env var or experiment.experiment_id in config.yaml "
+        "for reproducibility.",
+        auto_id,
+    )
+    return auto_id
+
+EXPERIMENT_ID: str = _resolve_experiment_id()
+logger.info("orchestrator: EXPERIMENT_ID=%s", EXPERIMENT_ID)
+
 # --- Failure detection constants ---
 # finish_reason value Ollama returns when the model exhausted its token budget
 _OLLAMA_FINISH_REASON_LENGTH: str = "length"
@@ -143,7 +167,7 @@ class AttachmentInput:
 @dataclass
 class InteractionResult:
     response: str
-    session_id: str
+    series_id: str
     run_id: str
     input_mu_id: str
     output_mu_id: str
@@ -159,7 +183,7 @@ class InteractionResult:
 
 async def run_interaction(
     message: str,
-    session_id: str,
+    series_id: str,
     attachments: Optional[list[AttachmentInput]] = None,
 ) -> InteractionResult:
     """
@@ -219,7 +243,8 @@ async def run_interaction(
         source_type="user_input",
         boundary="user_input->agent",
         direction="in",
-        session_id=session_id,
+        series_id=series_id,
+        experiment_id=EXPERIMENT_ID,
         flags=input_result.flags,
     )
     await graph_store.create_mu(
@@ -227,12 +252,15 @@ async def run_interaction(
         source_type=input_um.source_type,
         raw_content=input_um.raw_content,
         created_at=input_um.created_at,
+        series_id=series_id,
+        experiment_id=EXPERIMENT_ID,
     )
     append_audit(input_um)
     logger.info(
-        "orchestrator: input MU mu_id=%s session_id=%s",
+        "orchestrator: input MU mu_id=%s series_id=%s experiment_id=%s",
         input_um.mu_id,
-        session_id,
+        series_id,
+        EXPERIMENT_ID,
     )
 
     # --- Step 2: Retrieve relevant memory ---
@@ -248,7 +276,7 @@ async def run_interaction(
         mus=retrieval.mus,
         keywords=retrieval.keywords,
         store=graph_store,
-        session_id=session_id,
+        session_id=series_id,
         ollama_host=OLLAMA_HOST,
         model_name=MODEL_NAME,
     )
@@ -277,7 +305,7 @@ async def run_interaction(
 
     # --- Step 4b: Compute turn indices before creating edges ---
     turn_index = await graph_store.get_next_turn_index()
-    session_turn_index = await graph_store.get_session_turn_count(session_id)
+    session_turn_index = await graph_store.get_series_turn_count(series_id)
 
     # --- Step 5: Create prompt MU + edges to contributing MUs ---
     prompt_um = create_um(
@@ -285,13 +313,16 @@ async def run_interaction(
         source_type="prompt",
         boundary="agent->llm",
         direction="out",
-        session_id=session_id,
+        series_id=series_id,
+        experiment_id=EXPERIMENT_ID,
     )
     await graph_store.create_mu(
         mu_id=prompt_um.mu_id,
         source_type=prompt_um.source_type,
         raw_content=prompt_um.raw_content,
         created_at=prompt_um.created_at,
+        series_id=series_id,
+        experiment_id=EXPERIMENT_ID,
     )
 
     # Edge: prompt -> input MU
@@ -319,7 +350,7 @@ async def run_interaction(
     all_flags.extend(prompt_gate.flags)
 
     # --- Step 7: Build multi-turn messages array ---
-    history = get_session_messages(session_id) if USE_SESSION_CONTEXT else []
+    history = get_session_messages(series_id) if USE_SESSION_CONTEXT else []
     logger.info(
         "orchestrator: use_session_context=%s history_turns=%d",
         USE_SESSION_CONTEXT,
@@ -336,7 +367,7 @@ async def run_interaction(
     tool_schemas = _tool_registry.get_all_schemas()
     llm_content, tool_call_mu_ids, tokens_in, tokens_out, llm_failure_reason = await _run_tool_loop(
         messages=ollama_messages,
-        session_id=session_id,
+        series_id=series_id,
         tool_schemas=tool_schemas,
         all_flags=all_flags,
     )
@@ -352,8 +383,8 @@ async def run_interaction(
         )
 
     # Append clean turn to session history (without memory context injection)
-    append_session_message(session_id, {"role": "user", "content": input_result.content})
-    append_session_message(session_id, {"role": "assistant", "content": llm_content})
+    append_session_message(series_id, {"role": "user", "content": input_result.content})
+    append_session_message(series_id, {"role": "assistant", "content": llm_content})
 
     # --- Step 9: Gate LLM response (entering agent boundary) ---
     output_result = sanitize_in(llm_content, boundary="llm->agent")
@@ -371,7 +402,8 @@ async def run_interaction(
         source_type=output_source_type,
         boundary="llm->agent",
         direction="in",
-        session_id=session_id,
+        series_id=series_id,
+        experiment_id=EXPERIMENT_ID,
         flags=output_result.flags,
     )
     await graph_store.create_mu(
@@ -379,6 +411,8 @@ async def run_interaction(
         source_type=output_um.source_type,
         raw_content=output_um.raw_content,
         created_at=output_um.created_at,
+        series_id=series_id,
+        experiment_id=EXPERIMENT_ID,
     )
 
     # Edge: input MU -> output MU
@@ -400,9 +434,9 @@ async def run_interaction(
     latency_ms = int((time.monotonic() - start_time) * 1000)
 
     logger.info(
-        "orchestrator: complete session_id=%s run_id=%s input=%s prompt=%s output=%s "
+        "orchestrator: complete series_id=%s run_id=%s input=%s prompt=%s output=%s "
         "activated_mus=%d activated_edges=%d tool_calls=%d flags=%d latency_ms=%d",
-        session_id,
+        series_id,
         run_id,
         input_um.mu_id,
         prompt_um.mu_id,
@@ -419,7 +453,8 @@ async def run_interaction(
 
     run_record = RunRecord(
         run_id=run_id,
-        session_id=session_id,
+        series_id=series_id,
+        experiment_id=EXPERIMENT_ID,
         input_mu_id=input_um.mu_id,
         output_mu_id=output_um.mu_id,
         tool_calls=tool_call_mu_ids,
@@ -453,7 +488,7 @@ async def run_interaction(
 
     return InteractionResult(
         response=final_result.content,
-        session_id=session_id,
+        series_id=series_id,
         run_id=run_id,
         input_mu_id=input_um.mu_id,
         output_mu_id=output_um.mu_id,
@@ -519,7 +554,7 @@ def _build_ollama_messages(
 
 async def _run_tool_loop(
     messages: list[dict],
-    session_id: str,
+    series_id: str,
     tool_schemas: list[dict],
     all_flags: list[str],
 ) -> tuple[str, list[str], Optional[int], Optional[int], Optional[str]]:
@@ -653,13 +688,16 @@ async def _run_tool_loop(
                 source_type="tool_call",
                 boundary="agent->tool",
                 direction="out",
-                session_id=session_id,
+                series_id=series_id,
+                experiment_id=EXPERIMENT_ID,
             )
             await graph_store.create_mu(
                 mu_id=tc_um.mu_id,
                 source_type=tc_um.source_type,
                 raw_content=tc_um.raw_content,
                 created_at=tc_um.created_at,
+                series_id=series_id,
+                experiment_id=EXPERIMENT_ID,
             )
             tool_call_mu_ids.append(tc_um.mu_id)
             append_audit(tc_um)
@@ -694,13 +732,16 @@ async def _run_tool_loop(
                 source_type="tool_result",
                 boundary="tool->agent",
                 direction="in",
-                session_id=session_id,
+                series_id=series_id,
+                experiment_id=EXPERIMENT_ID,
             )
             await graph_store.create_mu(
                 mu_id=tr_um.mu_id,
                 source_type=tr_um.source_type,
                 raw_content=tr_um.raw_content,
                 created_at=tr_um.created_at,
+                series_id=series_id,
+                experiment_id=EXPERIMENT_ID,
             )
             tool_call_mu_ids.append(tr_um.mu_id)
             append_audit(tr_um)

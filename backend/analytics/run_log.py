@@ -22,7 +22,8 @@ class RunRecord(BaseModel):
     """Complete record of one agent interaction."""
 
     run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    session_id: str
+    series_id: str
+    experiment_id: Optional[str] = None
     timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -80,32 +81,32 @@ async def capture_run(run: RunRecord) -> None:
     """
     await graph_store.insert_run(run.model_dump())
     logger.info(
-        "run_log: captured run_id=%s session_id=%s latency_ms=%s",
+        "run_log: captured run_id=%s series_id=%s latency_ms=%s",
         run.run_id,
-        run.session_id,
+        run.series_id,
         run.latency_ms,
     )
 
 
 async def query_runs(
-    session_id: Optional[str] = None,
+    series_id: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict]:
     """
     Retrieve run records for the Admin UI.
 
-    Optionally filter by session_id. Returns rows ordered by timestamp DESC.
+    Optionally filter by series_id. Returns rows ordered by timestamp DESC.
     """
     rows = await graph_store.query_runs(
-        session_id=session_id,
+        series_id=series_id,
         limit=limit,
         offset=offset,
     )
     logger.info(
-        "run_log: query returned %d run(s) session_id=%s limit=%d offset=%d",
+        "run_log: query returned %d run(s) series_id=%s limit=%d offset=%d",
         len(rows),
-        session_id,
+        series_id,
         limit,
         offset,
     )

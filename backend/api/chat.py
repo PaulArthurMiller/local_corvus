@@ -51,13 +51,13 @@ class AttachmentRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: Optional[str] = None
+    series_id: Optional[str] = None
     attachments: Optional[list[AttachmentRequest]] = None
 
 
 class ChatResponse(BaseModel):
     response: str
-    session_id: str
+    series_id: str
     run_id: str
     input_mu_id: str
     output_mu_id: str
@@ -84,23 +84,23 @@ async def chat(request: ChatRequest) -> ChatResponse:
     Session is resolved or created here; all other logic is in
     core/orchestrator.py.
     """
-    # --- Session resolution ---
-    if request.session_id:
-        session = get_session(request.session_id)
+    # --- Series resolution (series_id is what was previously called session_id) ---
+    if request.series_id:
+        session = get_session(request.series_id)
         if session is None:
             logger.warning(
-                "chat: unknown session_id=%s — creating new session",
-                request.session_id,
+                "chat: unknown series_id=%s — creating new series",
+                request.series_id,
             )
-            session_id = create_session()
+            series_id = create_session()
         else:
-            session_id = session.session_id
+            series_id = session.session_id
     else:
-        session_id = create_session()
+        series_id = create_session()
 
     logger.info(
-        "chat: session_id=%s message_len=%d attachments=%d",
-        session_id,
+        "chat: series_id=%s message_len=%d attachments=%d",
+        series_id,
         len(request.message),
         len(request.attachments) if request.attachments else 0,
     )
@@ -119,7 +119,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     try:
         result = await run_interaction(
             request.message,
-            session_id,
+            series_id,
             attachments=attachment_inputs or None,
         )
     except Exception as exc:
@@ -128,7 +128,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     return ChatResponse(
         response=result.response,
-        session_id=result.session_id,
+        series_id=result.series_id,
         run_id=result.run_id,
         input_mu_id=result.input_mu_id,
         output_mu_id=result.output_mu_id,

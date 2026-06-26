@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 11 — Empty-Response Failure Detection — COMPLETE  
-Next step: Review PR, then plan/build next milestone.
+Current milestone: 12 — Series ID Prerequisite Gate — COMPLETE  
+Next step: Review PR, then build Milestone 13 (Series Report Generator).
 
 ## Session log
 
@@ -230,6 +230,29 @@ Next step: Review PR, then plan/build next milestone.
     - finish_reason is guarded with `(finish_reason or "") == _OLLAMA_FINISH_REASON_LENGTH` to handle None from older Ollama versions
     - Max-iterations tool loop exhaustion uses FAILURE_REASON_EMPTY_OUTPUT (not a new constant — same bucket as other unexpected empties)
 
+- 2026-06-26: /build — Milestone 12 complete
+  - Modified: `config.yaml` (adds `experiment.experiment_id: ""`)
+  - Modified: `backend/gate/um.py` (`session_id` → `series_id` on UniversalMessage + create_um(); added `experiment_id: Optional[str]`)
+  - Modified: `backend/analytics/run_log.py` (`session_id` → `series_id`; added `experiment_id` on RunRecord; `query_runs` param renamed)
+  - Modified: `backend/memory/store.py` (`memory_units` table gains `series_id`, `experiment_id`, `cluster_id`; `analytics` table renames `session_id` → `series_id`, adds `experiment_id`; `_migrate_db` handles RENAME COLUMN; `get_session_turn_count` → `get_series_turn_count`; `create_mu` signature extended)
+  - Modified: `backend/core/orchestrator.py` (`_resolve_experiment_id()` + `EXPERIMENT_ID` constant; full project rename `session_id` → `series_id` throughout; all MU + UM creation stamped with `series_id` + `experiment_id`)
+  - Modified: `backend/analytics/seed_fixture.py` (seed MUs stamped with `series_id="seed:{version}"`, `experiment_id`, `cluster_id`)
+  - Modified: `backend/api/chat.py` + `backend/api/admin.py` (`session_id` → `series_id` in request/response)
+  - Modified: `docker-compose.yml` (adds `EXPERIMENT_ID` env var passthrough)
+  - Modified: `frontend/src/api.js` + `frontend/src/components/ChatWindow.jsx` (series_id rename, "New Series" button)
+  - Modified: `admin/src/api.js` + `admin/src/components/RunLogTable.jsx` (series_id rename, experiment_id in expanded detail)
+  - Modified: `admin/src/components/MemoryInspector.jsx` (series_id, experiment_id, cluster_id in expanded MU detail)
+  - Modified: `admin/src/components/ProbeResults.jsx` (placeholder clarified: "meas. session idx")
+  - Updated: 7 existing test files (all `session_id` → `series_id`; SQL column renamed; `get_series_turn_count`)
+  - Added: 17 new M12 tests (store, run_log, um, orchestrator)
+  - Tests: 17 new, 235 total — all passing
+  - Branch: milestone-12-series-id-prerequisite-gate
+  - Key decisions:
+    - EXPERIMENT_ID resolved at startup: env var → config.yaml → auto-generated `{condition_label}-{YYYY-MM-DD}` (logs WARNING if auto-generated)
+    - SQLite RENAME COLUMN requires >= 3.25 (confirmed 3.38.2 in this environment)
+    - `session.py` internal module NOT renamed — it stores UUIDs in `series_id` variables via the orchestrator
+    - Seed MU registration is idempotent (duplicate on re-registration caught silently)
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
@@ -243,3 +266,8 @@ Next step: Review PR, then plan/build next milestone.
 9. ~~**Experiment Framework** — Probe set, ground truth labels, seed fixture, battery snapshots~~ ✅ COMPLETE
 10. ~~**Session Context Flag** — Config-driven flag to disable session history injection; off by default; per-run auditability in RunRecord and Admin UI~~ ✅ COMPLETE
 11. ~~**Empty-Response Failure Detection** — Detect `finish_reason=length` + empty content; tag MU source_type with cause; thread `failure_reason` field through InteractionResult → ChatResponse → UI; `failure_reason` column in analytics; Admin UI failure indicator~~ ✅ COMPLETE
+12. **Series ID Prerequisite Gate** — Stamp `series_id` + `experiment_id` + `cluster_id` on `memory_units`; rename `session_id` → `series_id` project-wide; add `EXPERIMENT_ID` env var. Gates all reporting milestones.
+13. **Series Report Generator (§5)** — All 8 series-report sections (failures, retrieval digest, intra/cross rate, cross-series edges, weight deltas, probe integrity, Mode-3 count, num_ctx pressure); JSON + Markdown output to `/app/memory/reports/`; admin endpoints.
+14. **Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.
+15. **Experiment Report — Learning Measures (§6.1)** — State-transition detection (fail→pass, pass→fail, flat); bridge-MU rank trajectory; cross-cluster transfer candidates; edge delta ledger with orphan-update check; saturation / runaway-reinforcement flags.
+16. **Experiment Report — Control Shadow + Admin UI (§6.2 + dashboard)** — Control shadow embedded in learned-condition report; static/random control sanity checks; comparative deltas; Reports page with list, viewer, and comparison table.

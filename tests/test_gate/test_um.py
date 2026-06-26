@@ -27,7 +27,7 @@ class TestCreateUm:
             source_type="user_input",
             boundary="user_input→agent",
             direction="in",
-            session_id="session-abc",
+            series_id="session-abc",
         )
 
         print(f"[test] create_um: mu_id={um.mu_id}, source_type={um.source_type}")
@@ -39,7 +39,7 @@ class TestCreateUm:
             source_type="agent_output",
             boundary="llm→agent",
             direction="in",
-            session_id="sess-123",
+            series_id="sess-123",
         )
 
         print(f"[test] required fields: mu_id={um.mu_id}, created_at={um.created_at}")
@@ -49,7 +49,7 @@ class TestCreateUm:
         assert um.raw_content == "Test content"
         assert um.boundary == "llm→agent"
         assert um.direction == "in"
-        assert um.session_id == "sess-123"
+        assert um.series_id == "sess-123"
 
     def test_create_um_mu_id_is_unique(self):
         um1 = create_um("a", "user_input", "b1", "in", "s1")
@@ -71,7 +71,7 @@ class TestCreateUm:
             source_type="user_input",
             boundary="test",
             direction="in",
-            session_id="s",
+            series_id="s",
             flags=flags,
         )
 
@@ -84,7 +84,7 @@ class TestCreateUm:
             source_type="system",
             boundary="test",
             direction="out",
-            session_id="s",
+            series_id="s",
             channel_id="chan-1",
         )
 
@@ -99,7 +99,7 @@ class TestCreateUm:
                 raw_content="x",
                 boundary="test",
                 direction="in",
-                session_id="s",
+                series_id="s",
             )
 
 
@@ -111,7 +111,7 @@ class TestAppendAudit:
             source_type="user_input",
             boundary="user_input→agent",
             direction="in",
-            session_id="audit-session",
+            series_id="audit-session",
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -162,3 +162,49 @@ class TestAppendAudit:
         with mock.patch.object(audit_module, "_AUDIT_LOG_PATH", bad_path):
             # Should NOT raise
             audit_module.append_audit(um)
+
+
+# ---------------------------------------------------------------------------
+# Milestone 12 — series_id on UniversalMessage
+# ---------------------------------------------------------------------------
+
+
+class TestCreateUmM12:
+
+    def test_create_um_with_series_id_includes_it_in_returned_um(self):
+        """create_um() with series_id stores it on the returned UniversalMessage."""
+        sid = "series-m12-test"
+        um = create_um(
+            content="hello m12",
+            source_type="user_input",
+            boundary="user_input→agent",
+            direction="in",
+            series_id=sid,
+        )
+        print(f"[test] um.series_id={um.series_id}")
+        assert um.series_id == sid
+
+    def test_create_um_with_experiment_id_includes_it_in_returned_um(self):
+        """create_um() with experiment_id stores it on the returned UniversalMessage."""
+        um = create_um(
+            content="hello",
+            source_type="agent_output",
+            boundary="llm→agent",
+            direction="in",
+            series_id="s",
+            experiment_id="exp-2026",
+        )
+        print(f"[test] um.experiment_id={um.experiment_id}")
+        assert um.experiment_id == "exp-2026"
+
+    def test_create_um_experiment_id_defaults_to_none(self):
+        """experiment_id is None when not supplied to create_um()."""
+        um = create_um(
+            content="x",
+            source_type="system",
+            boundary="test",
+            direction="out",
+            series_id="s",
+        )
+        print(f"[test] um.experiment_id={um.experiment_id!r}")
+        assert um.experiment_id is None

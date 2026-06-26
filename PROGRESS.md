@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 9 — Experiment Framework — COMPLETE  
-Next step: Review PR for milestone-9-experiment-framework. Fill in probe content (prompt_text, gold_mu_ids) in probes/probe_set_v1.yaml after generating seed fixtures. All 193 unit tests pass.
+Current milestone: 10 — Session Context Flag — COMPLETE  
+Next step: Review PR, then begin experiment execution.
 
 ## Session log
 
@@ -199,6 +199,20 @@ Next step: Review PR for milestone-9-experiment-framework. Fill in probe content
   - PR: (see GitHub)
   - Key decision: _scrub_prompt_for_storage() strips base64 image data by estimating decoded size from b64 string length (len * 3/4) — avoids re-decoding just for size reporting
 
+- 2026-06-26: /build — Milestone 10 complete
+  - Modified: `config.yaml` (adds experiment.use_session_context: false)
+  - Modified: `backend/core/orchestrator.py` (USE_SESSION_CONTEXT module-level constant resolved from env or config; conditional history injection in Step 7 with INFO log; use_session_context added to RunRecord)
+  - Modified: `backend/analytics/run_log.py` (use_session_context: bool = False added to RunRecord)
+  - Modified: `backend/memory/store.py` (use_session_context column in analytics table; migration entry; insert_run updated)
+  - Modified: `docker-compose.yml` (USE_SESSION_CONTEXT env var passthrough)
+  - Modified: `admin/src/components/RunLogTable.jsx` (session_ctx: on/off in expanded row detail)
+  - Tests: 6 new tests, 199 total — all passing
+  - Branch: milestone-10-session-context-flag
+  - Key decisions:
+    - USE_SESSION_CONTEXT is a module-level constant — changing config.yaml or env var requires a restart (consistent with all other module-level config)
+    - Session history is still accumulated regardless of the flag (so a mid-session config change picks up full history on restart)
+    - assembled_prompt_json in the run record is the authoritative audit — naturally reflects whether history was sent
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
@@ -210,3 +224,4 @@ Next step: Review PR for milestone-9-experiment-framework. Fill in probe content
 7. ~~**Multimodal Attachment Support** — Image attachments through the UM gate; binary transient only~~ ✅ COMPLETE
 8. ~~**Core Instrumentation** — Retrieval decomposition, turn indexing, edge lifecycle, feedback-event log~~ ✅ COMPLETE
 9. ~~**Experiment Framework** — Probe set, ground truth labels, seed fixture, battery snapshots~~ ✅ COMPLETE
+10. ~~**Session Context Flag** — Config-driven flag to disable session history injection; off by default; per-run auditability in RunRecord and Admin UI~~ ✅ COMPLETE

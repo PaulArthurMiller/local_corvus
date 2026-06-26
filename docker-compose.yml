@@ -16,6 +16,7 @@ services:
       - PROBES_PATH=/app/probes
       - SEED_FIXTURES_PATH=/app/seed_fixtures
       - CONDITION_LABEL=${CONDITION_LABEL:-}
+      - USE_SESSION_CONTEXT=${USE_SESSION_CONTEXT:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

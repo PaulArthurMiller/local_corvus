@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
 from core.orchestrator import _build_ollama_messages, _scrub_prompt_for_storage
+from analytics.run_log import RunRecord
 
 
 # ---------------------------------------------------------------------------
@@ -235,3 +236,57 @@ class TestScrubPromptForStorage:
 
     def test_empty_messages_list_returns_empty_list(self):
         assert _scrub_prompt_for_storage([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Milestone 10 — Session context flag
+# ---------------------------------------------------------------------------
+
+
+class TestSessionContextFlag:
+
+    def test_session_context_excluded_when_history_empty(self):
+        """Passing an empty history list (flag=False path) produces no history turns."""
+        messages = _build_ollama_messages(
+            condensed_context=None,
+            history=[],
+            user_content="hello",
+        )
+        print(f"[test] messages with empty history: {messages}")
+        # Only the final user message should be present
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == "hello"
+
+    def test_session_context_included_when_history_provided(self):
+        """Passing a non-empty history list produces those turns in the messages array."""
+        history = [
+            {"role": "user", "content": "turn 1 question"},
+            {"role": "assistant", "content": "turn 1 answer"},
+        ]
+        messages = _build_ollama_messages(
+            condensed_context=None,
+            history=history,
+            user_content="turn 2 question",
+        )
+        print(f"[test] messages with history: {messages}")
+        # [user(turn1), assistant(turn1), user(turn2)]
+        assert len(messages) == 3
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == "turn 1 question"
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"] == "turn 1 answer"
+        assert messages[2]["role"] == "user"
+        assert messages[2]["content"] == "turn 2 question"
+
+    def test_use_session_context_field_defaults_false_in_run_record(self):
+        """RunRecord.use_session_context defaults to False."""
+        record = RunRecord(session_id="test-session")
+        print(f"[test] use_session_context: {record.use_session_context}")
+        assert record.model_dump()["use_session_context"] is False
+
+    def test_use_session_context_field_can_be_set_true_in_run_record(self):
+        """RunRecord.use_session_context can be set to True."""
+        record = RunRecord(session_id="test-session", use_session_context=True)
+        print(f"[test] use_session_context: {record.use_session_context}")
+        assert record.model_dump()["use_session_context"] is True

@@ -371,3 +371,46 @@ class TestFeedbackEvents:
             fetched = run(s.get_feedback_events_for_run(run_id))
             print(f"[test] two events: {[e['verdict'] for e in fetched]}")
             assert len(fetched) == 2
+
+
+# ---------------------------------------------------------------------------
+# Milestone 10 — use_session_context round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestUseSessionContextField:
+
+    def _insert_run_with_flag(self, s, run_id, use_session_context: bool):
+        """Insert a run record with the use_session_context flag."""
+        async def _insert():
+            import memory.store as sm
+            from analytics.run_log import RunRecord
+            record = RunRecord(
+                run_id=run_id,
+                session_id="sess-m10",
+                use_session_context=use_session_context,
+            )
+            await s.insert_run(record.model_dump())
+        run(_insert())
+
+    def test_use_session_context_false_stores_as_0(self):
+        """use_session_context=False round-trips as integer 0 in SQLite."""
+        with TempDBStore() as s:
+            run_id = str(uuid.uuid4())
+            self._insert_run_with_flag(s, run_id, use_session_context=False)
+
+            fetched = run(s.get_run(run_id))
+            print(f"[test] use_session_context (False): {fetched['use_session_context']}")
+            assert fetched is not None
+            assert fetched["use_session_context"] == 0
+
+    def test_use_session_context_true_stores_as_1(self):
+        """use_session_context=True round-trips as integer 1 in SQLite."""
+        with TempDBStore() as s:
+            run_id = str(uuid.uuid4())
+            self._insert_run_with_flag(s, run_id, use_session_context=True)
+
+            fetched = run(s.get_run(run_id))
+            print(f"[test] use_session_context (True): {fetched['use_session_context']}")
+            assert fetched is not None
+            assert fetched["use_session_context"] == 1

@@ -66,6 +66,14 @@ _CONFIG_HASH: str = hashlib.sha256(
     json.dumps(_CONFIG, sort_keys=True).encode()
 ).hexdigest()
 
+# Resolved at import time — changing config.yaml or env var requires a restart.
+_env_use_session = os.getenv("USE_SESSION_CONTEXT", "").strip().lower()
+USE_SESSION_CONTEXT: bool = (
+    _env_use_session in ("1", "true", "yes") if _env_use_session
+    else bool(_CONFIG.get("experiment", {}).get("use_session_context", False))
+)
+logger.info("orchestrator: USE_SESSION_CONTEXT=%s", USE_SESSION_CONTEXT)
+
 # Singleton registry — initialized once when the module loads.
 _tool_registry = ToolRegistry(config=_CONFIG)
 
@@ -289,9 +297,15 @@ async def run_interaction(
     all_flags.extend(prompt_gate.flags)
 
     # --- Step 7: Build multi-turn messages array ---
+    history = get_session_messages(session_id) if USE_SESSION_CONTEXT else []
+    logger.info(
+        "orchestrator: use_session_context=%s history_turns=%d",
+        USE_SESSION_CONTEXT,
+        len(history),
+    )
     ollama_messages = _build_ollama_messages(
         condensed_context=condensed_context,
-        history=get_session_messages(session_id),
+        history=history,
         user_content=input_result.content,
         sanitized_attachments=accepted_attachments or None,
     )
@@ -390,6 +404,7 @@ async def run_interaction(
         condition_label=os.getenv("CONDITION_LABEL") or _CONFIG.get("experiment", {}).get("condition_label"),
         turn_index=turn_index,
         session_turn_index=session_turn_index,
+        use_session_context=USE_SESSION_CONTEXT,
     )
     await capture_run(run_record)
 

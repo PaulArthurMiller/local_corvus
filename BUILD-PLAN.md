@@ -1308,11 +1308,131 @@ Add `/probe-results` route to `admin/src/App.jsx`.
 
 ---
 
+### Milestone 10 — Session Context Flag: Controllable History Injection
+
+**Why this milestone exists:** Experiment runs must isolate the memory retrieval signal from session-level conversational confounds. When prior conversation turns (session history) are injected into every prompt, the model's response at turn N depends on what was said at turns 1 through N-1 — variance orthogonal to what the memory graph retrieved. This milestone makes history injection an explicit, auditable, config-driven decision. The flag is `false` by default; flipping it to `true` restores prior behavior without any other changes.
+
+**What changes and what doesn't:**
+- **Changes:** Whether `get_session_messages()` history is passed to Ollama inside `_build_ollama_messages()`.
+- **Unchanged:** Memory context injection (condensed_context → system role), UM gate processing, MU creation, session history *accumulation* (history is still written on every turn; it's just not sent to Ollama when the flag is off), all other RunRecord fields, all other prompt setup.
+
+**Design note — why still accumulate history when the flag is off:** The session message list is always appended to regardless of the flag so that a mid-session flag change (e.g., `USE_SESSION_CONTEXT=true` restart) picks up the full history. The flag controls what gets *sent*, not what gets *stored*.
+
+**Build:**
+
+**1. `config.yaml` — add flag to experiment section**
+
+```yaml
+experiment:
+  use_session_context: false   # set true to restore multi-turn history injection
+  condition_label: "learning"
+```
+
+**2. `backend/core/orchestrator.py` — read flag + apply at call site**
+
+At module load (alongside the existing `CONDITION_LABEL` env-var pattern), resolve the boolean from env or config:
+
+```python
+_env_use_session = os.getenv("USE_SESSION_CONTEXT", "").strip().lower()
+USE_SESSION_CONTEXT: bool = (
+    _env_use_session in ("1", "true", "yes") if _env_use_session else
+    bool(_CONFIG.get("experiment", {}).get("use_session_context", False))
+)
+```
+
+In `run_interaction()`, Step 7 (assemble Ollama messages), replace the unconditional `get_session_messages()` call with:
+
+```python
+history = get_session_messages(session_id) if USE_SESSION_CONTEXT else []
+logger.info(
+    "orchestrator: use_session_context=%s history_turns=%d",
+    USE_SESSION_CONTEXT,
+    len(history),
+)
+ollama_messages = _build_ollama_messages(
+    condensed_context=condensed_context,
+    history=history,
+    user_content=input_result.content,
+    sanitized_attachments=accepted_attachments or None,
+)
+```
+
+In Step 11 (build RunRecord), add:
+```python
+use_session_context=USE_SESSION_CONTEXT,
+```
+
+**3. `backend/analytics/run_log.py` — add field to RunRecord**
+
+```python
+use_session_context: bool = False
+```
+
+**4. `backend/memory/store.py` — analytics table column + migration**
+
+a) Add to `CREATE TABLE IF NOT EXISTS analytics`:
+```sql
+use_session_context INTEGER NOT NULL DEFAULT 0,
+```
+
+b) Add to `_migrate_db()`:
+```python
+try:
+    await db.execute(
+        "ALTER TABLE analytics ADD COLUMN use_session_context INTEGER NOT NULL DEFAULT 0"
+    )
+    await db.commit()
+except Exception:
+    pass
+```
+
+c) Update `insert_run()` to include `use_session_context` in the INSERT statement and params (store as `int(run["use_session_context"])`).
+
+**5. `docker-compose.yml` — env var passthrough**
+
+Under backend service `environment:`:
+```yaml
+- USE_SESSION_CONTEXT=${USE_SESSION_CONTEXT:-}
+```
+
+**6. `admin/src/components/RunLogTable.jsx` — show flag in expanded row detail**
+
+In the expanded-row detail block, add one line after `algorithm`:
+```jsx
+<strong>session_ctx:</strong> {run.use_session_context ? 'on' : 'off'}<br />
+```
+
+**Tests:**
+- Extend `tests/test_core/test_orchestrator.py`:
+  - `test_session_context_excluded_when_flag_off`: call `_build_ollama_messages()` with `history=[]` (simulating flag=False); assert no role `user` or `assistant` history turns appear before the final user message.
+  - `test_session_context_included_when_flag_on`: call `_build_ollama_messages()` with a non-empty history list; assert those turns appear in the messages array in order.
+  - `test_use_session_context_field_in_run_record`: construct `RunRecord(use_session_context=False, ...)` and verify `model_dump()["use_session_context"]` is `False`.
+- Extend store tests:
+  - `insert_run()` with `use_session_context=False` → field round-trips as `0`; `use_session_context=True` → `1`.
+
+**Done when:**
+- Default behavior: history is NOT injected; Ollama receives only memory context (system role) + current user message
+- `USE_SESSION_CONTEXT=true` (env) or `use_session_context: true` (config.yaml) restores full history injection; restart required to pick up config change
+- Every run record has a `use_session_context` field queryable from `/admin/runs`
+- RunLogTable expanded row shows `session_ctx: on/off` for at-a-glance auditing
+- Container logs emit `use_session_context=False history_turns=0` (or `True` with real count) on every interaction
+- `assembled_prompt_json` stored in the run record naturally reflects what was sent (history absent when flag is off — the most authoritative audit)
+- Schema migration runs safely against existing `graph.db`
+- All 193 existing tests still pass
+
+**Risks:**
+- ⚠ `USE_SESSION_CONTEXT` is a module-level constant resolved at import time. Changing `config.yaml` while the server is running has no effect — restart required. Consistent with all other module-level config in the orchestrator; note this clearly in logs at startup.
+- ? Probe turns (`POST /admin/run-probe`) do not call `run_interaction()` and have no session history, so this flag has no effect on probe runs. No changes needed in `api/admin.py`.
+
+**Estimate:** 1 session
+
+---
+
 ## Status
 
 ```
-Current milestone: 9 — Experiment Framework — COMPLETE
-Last updated: 2026-06-22
+Current milestone: 10 — Session Context Flag — COMPLETE
+Last updated: 2026-06-26
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -1334,3 +1454,5 @@ Last updated: 2026-06-22
 **Milestone 8:** Complete — branch `milestone-8-core-instrumentation`, PR merged to main.
 
 **Milestone 9:** Complete — branch `milestone-9-experiment-framework`, PR pending merge.
+
+**Milestone 10:** Complete — branch `milestone-10-session-context-flag`, PR pending merge.

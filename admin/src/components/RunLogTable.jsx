@@ -96,6 +96,7 @@ export default function RunLogTable() {
                         <strong>input_mu_id:</strong> {run.input_mu_id}<br />
                         <strong>output_mu_id:</strong> {run.output_mu_id}<br />
                         <strong>algorithm:</strong> {run.algorithm}<br />
+                        <strong>session_ctx:</strong> {run.use_session_context ? 'on' : 'off'}<br />
                         {run.weight_updates?.length > 0 && (
                           <>
                             <strong>weight_updates:</strong>

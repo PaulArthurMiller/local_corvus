@@ -70,3 +70,4 @@ tools:
 
 experiment:
   condition_label: "learning"  # change to "static-weight" or "random-weight" for control runs
+  use_session_context: false   # set true to restore multi-turn history injection; restart required

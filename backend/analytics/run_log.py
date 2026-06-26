@@ -64,6 +64,9 @@ class RunRecord(BaseModel):
     measurement_session_index: Optional[int] = None
     is_probe_turn: bool = False
 
+    # Session context flag — whether get_session_messages() history was injected
+    use_session_context: bool = False
+
 
 async def capture_run(run: RunRecord) -> None:
     """

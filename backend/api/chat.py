@@ -68,6 +68,7 @@ class ChatResponse(BaseModel):
     flags: list[str]
     tokens_in: Optional[int] = None
     tokens_out: Optional[int] = None
+    failure_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +139,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         flags=result.flags,
         tokens_in=result.tokens_in,
         tokens_out=result.tokens_out,
+        failure_reason=result.failure_reason,
     )
 
 

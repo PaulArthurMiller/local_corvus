@@ -68,7 +68,7 @@ export default function RunLogTable() {
           <table style={{ borderCollapse: 'collapse', width: '100%' }}>
             <thead>
               <tr style={{ background: '#f0f0f0' }}>
-                {['Timestamp', 'Session', 'Latency ms', 'Feedback', 'Tools', 'Act. MUs', 'Act. Edges'].map(h => (
+                {['Timestamp', 'Session', 'Latency ms', 'Feedback', 'Tools', 'Act. MUs', 'Act. Edges', 'Failure'].map(h => (
                   <th key={h} style={{ border: '1px solid #ccc', padding: '4px 8px', textAlign: 'left' }}>{h}</th>
                 ))}
               </tr>
@@ -88,15 +88,21 @@ export default function RunLogTable() {
                     <td style={tdStyle}>{(run.tool_calls || []).length}</td>
                     <td style={tdStyle}>{(run.activated_mu_ids || []).length}</td>
                     <td style={tdStyle}>{(run.activated_edge_ids || []).length}</td>
+                    <td style={{ ...tdStyle, color: run.failure_reason ? '#b45309' : '#888' }}>
+                      {run.failure_reason ? '⚠ ' + run.failure_reason : '—'}
+                    </td>
                   </tr>
                   {expandedRunId === run.run_id && (
                     <tr key={`${run.run_id}-detail`}>
-                      <td colSpan={7} style={{ padding: '8px 12px', background: '#f8f8f8', border: '1px solid #ccc' }}>
+                      <td colSpan={8} style={{ padding: '8px 12px', background: '#f8f8f8', border: '1px solid #ccc' }}>
                         <strong>run_id:</strong> {run.run_id}<br />
                         <strong>input_mu_id:</strong> {run.input_mu_id}<br />
                         <strong>output_mu_id:</strong> {run.output_mu_id}<br />
                         <strong>algorithm:</strong> {run.algorithm}<br />
                         <strong>session_ctx:</strong> {run.use_session_context ? 'on' : 'off'}<br />
+                        {run.failure_reason && (
+                          <><strong style={{ color: '#b45309' }}>failure_reason:</strong> <span style={{ color: '#b45309' }}>{run.failure_reason}</span><br /></>
+                        )}
                         {run.weight_updates?.length > 0 && (
                           <>
                             <strong>weight_updates:</strong>
@@ -116,7 +122,7 @@ export default function RunLogTable() {
                 </>
               ))}
               {runs.length === 0 && (
-                <tr><td colSpan={7} style={{ padding: 12, textAlign: 'center', color: '#888' }}>No runs yet.</td></tr>
+                <tr><td colSpan={8} style={{ padding: 12, textAlign: 'center', color: '#888' }}>No runs yet.</td></tr>
               )}
             </tbody>
           </table>

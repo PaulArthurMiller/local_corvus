@@ -1428,10 +1428,113 @@ In the expanded-row detail block, add one line after `algorithm`:
 
 ---
 
+### Milestone 11 — Empty-Response Failure Detection, Tagging, and Visibility
+
+**Why this milestone exists:** When Ollama returns HTTP 200 with `finish_reason=length` and empty `message.content`, the model's completion budget was exhausted before any output token landed. Currently this stores a blank `agent_output` MU and returns an empty string to the UI (blank bubble), with no error flag and no trace in run-level summaries. This failure mode must become explicitly detected, named, tagged at every layer, and visible everywhere a normal completed turn would appear.
+
+**What changes:**
+- Detection in `_run_tool_loop` — one insertion point
+- Failure signal threads through `_run_tool_loop` → `run_interaction` → `InteractionResult` → `ChatResponse` → Chat UI
+- MU `source_type` extended to carry the cause (`agent_output_failed_token_limit` | `agent_output_failed_empty_output`)
+- `RunRecord` + `analytics` table gain a `failure_reason` column
+- Chat UI: blank bubble replaced by user-visible explanation
+- Admin UI: failure indicator per row; failed turns queryable by SQL predicate
+
+**Out of scope:** num_ctx / context window sizing; session history wiring; the unconditional input→output edge creation (flagged for later).
+
+**Named constants (all new strings are constants, no inline literals):**
+
+```python
+# orchestrator.py — module level
+
+_OLLAMA_FINISH_REASON_LENGTH: str = "length"
+
+FAILURE_REASON_TOKEN_LIMIT: str = "token_limit_exhausted"
+FAILURE_REASON_EMPTY_OUTPUT: str = "empty_output"
+
+_MU_SOURCE_TYPE_FAILED_TOKEN_LIMIT: str = "agent_output_failed_token_limit"
+_MU_SOURCE_TYPE_FAILED_EMPTY_OUTPUT: str = "agent_output_failed_empty_output"
+
+FAILURE_UI_MESSAGES: dict[str, str] = {
+    FAILURE_REASON_TOKEN_LIMIT: (
+        "[The model hit its completion-token limit before producing any output. "
+        "Response is empty. This turn has been flagged for review.]"
+    ),
+    FAILURE_REASON_EMPTY_OUTPUT: (
+        "[The model returned an empty response unexpectedly "
+        "(finish_reason was not 'length'). This turn has been flagged for review.]"
+    ),
+}
+```
+
+**Build:**
+
+1. `core/orchestrator.py` — six named constants after `USE_SESSION_CONTEXT`, before `_tool_registry`.
+
+2. `core/orchestrator.py` — `_run_tool_loop` detection: in the text-response branch (lines 547–555), after computing `content = llm_message.get("content") or ""`, detect the failure condition:
+   - `content.strip() == ""` AND `finish_reason == _OLLAMA_FINISH_REASON_LENGTH` → `FAILURE_REASON_TOKEN_LIMIT`
+   - `content.strip() == ""` AND any other finish_reason → `FAILURE_REASON_EMPTY_OUTPUT`
+   - otherwise → `None`
+   - Log at WARNING for failures, INFO for normal.
+   - Return type extends to 5-tuple: `(content, tool_call_mu_ids, tokens_in, tokens_out, failure_reason)`.
+   - Also update the fallback return at end of while loop (max-iterations) to return `FAILURE_REASON_EMPTY_OUTPUT` as 5th element.
+
+3. `core/orchestrator.py` — `run_interaction` Step 8: unpack 5-tuple. If `llm_failure_reason` is not None, substitute `FAILURE_UI_MESSAGES[llm_failure_reason]` into `llm_content` before Step 9 (session history, gate, MU creation all receive the substituted message — correct because history should reflect what the user saw).
+
+4. `core/orchestrator.py` — Step 9 (`output_um` creation): compute `output_source_type` from `llm_failure_reason` using the named source-type constants; pass to `create_um()`.
+
+5. `core/orchestrator.py` — Step 11 (`RunRecord`): add `failure_reason=llm_failure_reason`.
+
+6. `core/orchestrator.py` — `InteractionResult` dataclass: add `failure_reason: Optional[str] = None`. Populate from `llm_failure_reason` in the return statement.
+
+7. `analytics/run_log.py` — `RunRecord`: add `failure_reason: Optional[str] = None`.
+
+8. `memory/store.py`:
+   - `_INIT_SQL analytics` table: add `failure_reason TEXT` column.
+   - `_migrate_db()`: add `("analytics", "failure_reason", "TEXT")` to migrations list.
+   - `insert_run()`: add `failure_reason` to INSERT and params.
+   - `query_runs()` / `get_run()`: no JSON decoding needed (plain TEXT).
+
+9. `api/chat.py` — `ChatResponse`: add `failure_reason: Optional[str] = None`. Endpoint handler: populate from `result.failure_reason`.
+
+10. `frontend/src/components/MessageBubble.jsx` — when `message.failure_reason` is truthy, apply distinct visual treatment (warning border/color, italic text). Content already has the UI message substituted in by the orchestrator.
+
+11. `admin/src/components/RunLogTable.jsx` — show failure badge/label when `run.failure_reason` is not null.
+
+**Tests:**
+
+New file `tests/test_core/test_failure_detection.py`:
+- `test_run_tool_loop_detects_token_limit` — empty content + `finish_reason=length` → `FAILURE_REASON_TOKEN_LIMIT`
+- `test_run_tool_loop_detects_token_limit_whitespace` — whitespace-only content + `finish_reason=length` → same
+- `test_run_tool_loop_detects_empty_output` — empty content + `finish_reason=stop` → `FAILURE_REASON_EMPTY_OUTPUT`
+- `test_run_tool_loop_normal_response_no_failure` — non-empty content → `failure_reason is None`
+- `test_output_mu_source_type_on_token_limit` — MU stored with `source_type == "agent_output_failed_token_limit"`
+- `test_output_mu_source_type_on_empty_output` — MU stored with `source_type == "agent_output_failed_empty_output"`
+- `test_run_record_failure_reason_stored` — `RunRecord.failure_reason` round-trips through `insert_run` → `query_runs`
+- `test_normal_turn_failure_reason_null` — normal turn stores `failure_reason = NULL`
+- `test_interaction_result_carries_failure_reason` — `InteractionResult.failure_reason` propagates end-to-end
+- `test_ui_message_substituted_on_token_limit` — response is `FAILURE_UI_MESSAGES[FAILURE_REASON_TOKEN_LIMIT]`, not `""`
+
+**Done when:**
+- A turn with `finish_reason=length` + empty content logs a WARNING (not INFO)
+- The Chat UI shows the cause message, not a blank bubble
+- The output MU in `memory_units` has `source_type` of `"agent_output_failed_token_limit"` — not `"agent_output"`
+- `SELECT * FROM analytics WHERE failure_reason IS NOT NULL` returns the failed turn
+- Admin UI run row shows failure indicator for the failed turn
+- All new tests pass; all 199 existing tests still pass
+
+**Risks:**
+- ⚠ `finish_reason` may be `None` or absent in some Ollama versions — use `(finish_reason or "") == _OLLAMA_FINISH_REASON_LENGTH` to guard
+- ⚠ Session history stores the substituted UI message, not `""` — behavioral change; correct but worth noting in the PR
+
+**Estimate:** 1 session
+
+---
+
 ## Status
 
 ```
-Current milestone: 10 — Session Context Flag — COMPLETE
+Current milestone: 11 — Empty-Response Failure Detection — COMPLETE
 Last updated: 2026-06-26
 ```
 
@@ -1456,3 +1559,5 @@ Last updated: 2026-06-26
 **Milestone 9:** Complete — branch `milestone-9-experiment-framework`, PR pending merge.
 
 **Milestone 10:** Complete — branch `milestone-10-session-context-flag`, PR pending merge.
+
+**Milestone 11:** Complete — branch `milestone-11-empty-response-detection`, PR pending merge.

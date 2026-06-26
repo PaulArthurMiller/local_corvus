@@ -110,6 +110,7 @@ export default function ChatWindow() {
         role: 'assistant',
         content: data.response,
         runId: data.run_id,
+        failureReason: data.failure_reason || null,
       }])
     } catch (err) {
       console.error('[ChatWindow] error:', err)
@@ -174,7 +175,7 @@ export default function ChatWindow() {
           </p>
         )}
         {messages.map((msg, i) => (
-          <MessageBubble key={i} role={msg.role} content={msg.content} runId={msg.runId} />
+          <MessageBubble key={i} role={msg.role} content={msg.content} runId={msg.runId} failureReason={msg.failureReason} />
         ))}
         {loading && (
           <div style={{ fontFamily: 'monospace', color: '#888', fontSize: 13, marginBottom: 12 }}>

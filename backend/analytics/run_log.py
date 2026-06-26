@@ -67,6 +67,10 @@ class RunRecord(BaseModel):
     # Session context flag — whether get_session_messages() history was injected
     use_session_context: bool = False
 
+    # Failure detection — None for normal turns; set to a FAILURE_REASON_* constant when the
+    # model returned empty content (token_limit_exhausted or empty_output)
+    failure_reason: Optional[str] = None
+
 
 async def capture_run(run: RunRecord) -> None:
     """

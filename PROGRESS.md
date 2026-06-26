@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 10 — Session Context Flag — COMPLETE  
-Next step: Review PR, then begin experiment execution.
+Current milestone: 11 — Empty-Response Failure Detection — COMPLETE  
+Next step: Review PR, then plan/build next milestone.
 
 ## Session log
 
@@ -213,6 +213,23 @@ Next step: Review PR, then begin experiment execution.
     - Session history is still accumulated regardless of the flag (so a mid-session config change picks up full history on restart)
     - assembled_prompt_json in the run record is the authoritative audit — naturally reflects whether history was sent
 
+- 2026-06-26: /build — Milestone 11 complete
+  - Modified: `backend/core/orchestrator.py` (6 named constants: _OLLAMA_FINISH_REASON_LENGTH, FAILURE_REASON_TOKEN_LIMIT, FAILURE_REASON_EMPTY_OUTPUT, _MU_SOURCE_TYPE_FAILED_TOKEN_LIMIT, _MU_SOURCE_TYPE_FAILED_EMPTY_OUTPUT, FAILURE_UI_MESSAGES; _run_tool_loop now returns 5-tuple with failure_reason; run_interaction substitutes UI message on failure; output MU source_type encodes failure cause; RunRecord and InteractionResult gain failure_reason field)
+  - Modified: `backend/analytics/run_log.py` (failure_reason: Optional[str] = None added to RunRecord)
+  - Modified: `backend/memory/store.py` (failure_reason TEXT column in analytics table; migration entry; insert_run updated)
+  - Modified: `backend/api/chat.py` (failure_reason: Optional[str] = None added to ChatResponse; populated from result.failure_reason)
+  - Modified: `frontend/src/components/MessageBubble.jsx` (failureReason prop; warning visual treatment: amber border, warm background, italic text)
+  - Modified: `frontend/src/components/ChatWindow.jsx` (failure_reason from API response threaded into message object; passed to MessageBubble)
+  - Modified: `admin/src/components/RunLogTable.jsx` (Failure column in table header; failure indicator per row; failure_reason in expanded detail)
+  - Created: `tests/test_core/test_failure_detection.py` (19 new tests)
+  - Tests: 19 new tests, 218 total — all passing
+  - Branch: milestone-11-empty-response-detection
+  - Key decisions:
+    - UI message substitution happens in run_interaction() BEFORE session history append, gate, and MU creation — so the audit trail reflects exactly what the user saw
+    - output MU source_type is one of: "agent_output", "agent_output_failed_token_limit", "agent_output_failed_empty_output" — queryable by failure mode via SQL
+    - finish_reason is guarded with `(finish_reason or "") == _OLLAMA_FINISH_REASON_LENGTH` to handle None from older Ollama versions
+    - Max-iterations tool loop exhaustion uses FAILURE_REASON_EMPTY_OUTPUT (not a new constant — same bucket as other unexpected empties)
+
 ## Upcoming milestones
 
 1. ~~**Foundation** — UM Gate + Graph Store + Session Management~~ ✅ COMPLETE
@@ -225,3 +242,4 @@ Next step: Review PR, then begin experiment execution.
 8. ~~**Core Instrumentation** — Retrieval decomposition, turn indexing, edge lifecycle, feedback-event log~~ ✅ COMPLETE
 9. ~~**Experiment Framework** — Probe set, ground truth labels, seed fixture, battery snapshots~~ ✅ COMPLETE
 10. ~~**Session Context Flag** — Config-driven flag to disable session history injection; off by default; per-run auditability in RunRecord and Admin UI~~ ✅ COMPLETE
+11. ~~**Empty-Response Failure Detection** — Detect `finish_reason=length` + empty content; tag MU source_type with cause; thread `failure_reason` field through InteractionResult → ChatResponse → UI; `failure_reason` column in analytics; Admin UI failure indicator~~ ✅ COMPLETE

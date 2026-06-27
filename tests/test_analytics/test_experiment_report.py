@@ -529,17 +529,20 @@ def test_statistical_caveat_in_markdown():
 # ---------------------------------------------------------------------------
 
 
-def test_json_has_learning_measures_null():
-    """The generated report JSON has learning_measures=null."""
+def test_json_has_learning_measures_populated():
+    """The generated report JSON has learning_measures populated (not null) by M15."""
     with TempDB() as store:
         with mock.patch(
             "analytics.reports.experiment_report._load_config", return_value=_CONFIG
         ):
             report = run(generate_experiment_report("exp-empty", store))
 
-    print(f"keys: {list(report.keys())}")
     assert "learning_measures" in report
-    assert report["learning_measures"] is None
+    # M15 now fills learning_measures — it is a dict, not None
+    assert report["learning_measures"] is not None
+    assert isinstance(report["learning_measures"], dict)
+    assert "state_transitions" in report["learning_measures"]
+    assert "edge_delta_ledger" in report["learning_measures"]
 
 
 def test_json_has_control_shadow_null():

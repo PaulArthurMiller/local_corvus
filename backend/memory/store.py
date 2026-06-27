@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS probe_results (
     gold_mu_rank INTEGER,
     retrieval_precision REAL,
     retrieval_recall REAL,
-    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}'
+    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}',
+    outcome_override TEXT
 );
 
 CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
@@ -188,6 +189,8 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("memory_units", "series_id", "TEXT"),
         ("memory_units", "experiment_id", "TEXT"),
         ("memory_units", "cluster_id", "TEXT"),
+        # M15: outcome_override on probe_results
+        ("probe_results", "outcome_override", "TEXT"),
     ]
     for table, column, col_type in add_column_migrations:
         try:
@@ -793,8 +796,9 @@ class GraphStore:
                 INSERT INTO probe_results
                     (result_id, probe_id, run_id, measurement_session_index,
                      condition_label, retrieved_mu_ids, gold_mu_rank,
-                     retrieval_precision, retrieval_recall, bm25_scores_per_mu)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     retrieval_precision, retrieval_recall, bm25_scores_per_mu,
+                     outcome_override)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result["result_id"],
@@ -807,6 +811,7 @@ class GraphStore:
                     result.get("retrieval_precision"),
                     result.get("retrieval_recall"),
                     _json.dumps(result.get("bm25_scores_per_mu", {})),
+                    result.get("outcome_override"),
                 ),
             )
             await db.commit()
@@ -853,6 +858,7 @@ class GraphStore:
             r = dict(row)
             r["retrieved_mu_ids"] = _json.loads(r.get("retrieved_mu_ids") or "[]")
             r["bm25_scores_per_mu"] = _json.loads(r.get("bm25_scores_per_mu") or "{}")
+            # outcome_override is plain TEXT — no JSON decode needed
             result.append(r)
         return result
 
@@ -1279,6 +1285,99 @@ class GraphStore:
         finally:
             await db.close()
         return row[0] if row else None
+
+    # -------------------------------------------------------------------------
+    # M15: Learning measures query methods
+    # -------------------------------------------------------------------------
+
+    async def get_all_runs_for_experiment(self, experiment_id: str) -> list[dict]:
+        """
+        Return all run records for an experiment ordered by turn_index ASC.
+
+        JSON fields are decoded. Used by §6.1 learning measures to access
+        weight_updates and feedback_signal across the full experiment.
+        """
+        import json as _json
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM analytics WHERE experiment_id = ? ORDER BY turn_index ASC",
+                (experiment_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        json_fields = {
+            "tool_calls", "activated_mu_ids", "activated_edge_ids",
+            "weight_updates", "hyperparameters_snapshot",
+            "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
+            "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
+            "assembled_prompt_json", "full_config_snapshot",
+        }
+        result = []
+        for row in rows:
+            r = dict(row)
+            for field in json_fields:
+                if r.get(field):
+                    try:
+                        r[field] = _json.loads(r[field])
+                    except (ValueError, TypeError):
+                        pass
+            result.append(r)
+        return result
+
+    async def get_all_probes(self) -> list[dict]:
+        """
+        Return all probe definitions from the probes table.
+
+        Used by §6.1 to iterate over probes for state-transition analysis
+        and bridge-MU detection.
+        """
+        import json as _json
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM probes ORDER BY probe_id ASC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        result = []
+        for row in rows:
+            r = dict(row)
+            r["gold_mu_ids"] = _json.loads(r.get("gold_mu_ids") or "[]")
+            r["is_bridge_probe"] = bool(r.get("is_bridge_probe", 0))
+            result.append(r)
+        return result
+
+    async def get_mu_info_batch(self, mu_ids: list[str]) -> dict[str, dict]:
+        """
+        Return {mu_id: {series_id, cluster_id, source_type}} for a list of MU IDs.
+
+        MUs not found in the DB are excluded from the result. Used by §6.1 to
+        classify retrieved MUs by cluster and series origin.
+        """
+        if not mu_ids:
+            return {}
+        placeholders = ",".join("?" for _ in mu_ids)
+        db = await _open_db()
+        try:
+            async with db.execute(
+                f"SELECT mu_id, series_id, cluster_id, source_type FROM memory_units WHERE mu_id IN ({placeholders})",
+                mu_ids,
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return {
+            row["mu_id"]: {
+                "series_id": row["series_id"],
+                "cluster_id": row["cluster_id"],
+                "source_type": row["source_type"],
+            }
+            for row in rows
+        }
 
 
 # Module-level singleton — imported by other modules

@@ -453,6 +453,564 @@ async def _section_63_integrity_checks(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# §6.1 learning measures — pure helpers
+# ---------------------------------------------------------------------------
+
+
+def _classify_probe_outcome(result: dict, pass_rank_threshold: int) -> str:
+    """
+    Classify a single probe result as 'pass', 'fail', or 'negative_flagged'.
+
+    'negative_flagged' requires an explicit outcome_override on the result.
+    'pass' requires gold_mu_rank to be set and within the threshold.
+    """
+    if result.get("outcome_override") == "negative_flagged":
+        return "negative_flagged"
+    rank = result.get("gold_mu_rank")
+    if rank is not None and rank <= pass_rank_threshold:
+        return "pass"
+    return "fail"
+
+
+def _compute_state_transitions(
+    probes: list[dict],
+    results_by_probe: dict[str, list[dict]],
+    pass_rank_threshold: int,
+) -> dict:
+    """
+    For each probe, classify results as pass/fail/negative_flagged, derive a
+    state sequence, and identify fail_to_pass / pass_to_fail transitions.
+
+    Returns per-probe detail and per-phenomenon aggregates.
+    """
+    by_phenomenon: dict[str, dict] = {}
+    per_probe: list[dict] = []
+
+    for probe in probes:
+        probe_id = probe["probe_id"]
+        phenomenon = probe.get("phenomenon_type", "unknown")
+        results = sorted(
+            results_by_probe.get(probe_id, []),
+            key=lambda r: r.get("measurement_session_index", 0),
+        )
+
+        outcomes = [_classify_probe_outcome(r, pass_rank_threshold) for r in results]
+        session_indices = [r.get("measurement_session_index") for r in results]
+        gold_ranks = [r.get("gold_mu_rank") for r in results]
+
+        fail_to_pass = 0
+        pass_to_fail = 0
+        for i in range(len(outcomes) - 1):
+            cur, nxt = outcomes[i], outcomes[i + 1]
+            if cur == "fail" and nxt == "pass":
+                fail_to_pass += 1
+            elif cur == "pass" and nxt == "fail":
+                pass_to_fail += 1
+
+        non_flagged = [o for o in outcomes if o != "negative_flagged"]
+        if not non_flagged:
+            pattern = "insufficient_data"
+        elif all(o == "fail" for o in non_flagged):
+            pattern = "flat_fail"
+        elif all(o == "pass" for o in non_flagged):
+            pattern = "flat_pass"
+        else:
+            pattern = "mixed"
+
+        per_probe.append({
+            "probe_id": probe_id,
+            "phenomenon_type": phenomenon,
+            "is_bridge_probe": probe.get("is_bridge_probe", False),
+            "bridge_pair_id": probe.get("bridge_pair_id"),
+            "outcome_sequence": outcomes,
+            "session_indices": session_indices,
+            "gold_mu_ranks": gold_ranks,
+            "fail_to_pass_count": fail_to_pass,
+            "pass_to_fail_count": pass_to_fail,
+            "pattern": pattern,
+        })
+
+        if phenomenon not in by_phenomenon:
+            by_phenomenon[phenomenon] = {
+                "probe_count": 0,
+                "fail_to_pass": 0,
+                "pass_to_fail": 0,
+                "flat_fail": 0,
+                "flat_pass": 0,
+                "mixed": 0,
+                "insufficient_data": 0,
+            }
+        by_phenomenon[phenomenon]["probe_count"] += 1
+        by_phenomenon[phenomenon]["fail_to_pass"] += fail_to_pass
+        by_phenomenon[phenomenon]["pass_to_fail"] += pass_to_fail
+        by_phenomenon[phenomenon][pattern] = by_phenomenon[phenomenon].get(pattern, 0) + 1
+
+    logger.info(
+        "experiment_report §6.1 state_transitions: probes=%d phenomena=%s",
+        len(per_probe),
+        list(by_phenomenon.keys()),
+    )
+    return {
+        "per_probe": per_probe,
+        "by_phenomenon": by_phenomenon,
+    }
+
+
+def _compute_mus_by_probe_outcome(
+    probes: list[dict],
+    results_by_probe: dict[str, list[dict]],
+    pass_rank_threshold: int,
+    mu_info: dict[str, dict],
+) -> list[dict]:
+    """
+    For each probe, group retrieved MUs by classified outcome (pass/fail/negative_flagged).
+
+    Enables "what was retrieved when it worked vs. when it didn't" comparison.
+    """
+    per_probe: list[dict] = []
+
+    for probe in probes:
+        probe_id = probe["probe_id"]
+        results = sorted(
+            results_by_probe.get(probe_id, []),
+            key=lambda r: r.get("measurement_session_index", 0),
+        )
+
+        by_outcome: dict[str, list[dict]] = {"pass": [], "fail": [], "negative_flagged": []}
+        for result in results:
+            outcome = _classify_probe_outcome(result, pass_rank_threshold)
+            retrieved_mus = []
+            for mu_id in result.get("retrieved_mu_ids") or []:
+                info = mu_info.get(mu_id) or {}
+                retrieved_mus.append({
+                    "mu_id": mu_id,
+                    "series_id": info.get("series_id"),
+                    "cluster_id": info.get("cluster_id"),
+                    "source_type": info.get("source_type"),
+                })
+            by_outcome[outcome].append({
+                "measurement_session_index": result.get("measurement_session_index"),
+                "retrieved_mus": retrieved_mus,
+            })
+
+        per_probe.append({
+            "probe_id": probe_id,
+            "phenomenon_type": probe.get("phenomenon_type"),
+            "by_outcome": by_outcome,
+        })
+
+    return per_probe
+
+
+def _collect_all_weight_updates(
+    all_runs: list[dict],
+    mu_cluster_info: dict[str, dict],
+) -> list[dict]:
+    """
+    Collect all weight_updates entries across all runs, enriched with cluster_id
+    for source and target MUs.
+
+    Returns a flat list ordered by turn_index.
+    """
+    collected: list[dict] = []
+    for run in all_runs:
+        wupdates = run.get("weight_updates") or []
+        if isinstance(wupdates, str):
+            try:
+                wupdates = json.loads(wupdates)
+            except (ValueError, TypeError):
+                wupdates = []
+        for wu in wupdates:
+            src_id = wu.get("source_mu_id") or ""
+            tgt_id = wu.get("target_mu_id") or ""
+            old_w = wu.get("old_weight") or 0.0
+            new_w = wu.get("new_weight") or 0.0
+            src_info = mu_cluster_info.get(src_id) or {}
+            tgt_info = mu_cluster_info.get(tgt_id) or {}
+            collected.append({
+                "edge_id": wu.get("edge_id"),
+                "old_weight": old_w,
+                "new_weight": new_w,
+                "delta": new_w - old_w,
+                "feedback_event_id": wu.get("feedback_event_id"),
+                "source_mu_id": src_id or None,
+                "target_mu_id": tgt_id or None,
+                "source_cluster": src_info.get("cluster_id"),
+                "target_cluster": tgt_info.get("cluster_id"),
+                "turn_index": run.get("turn_index"),
+                "run_id": run.get("run_id"),
+            })
+    return collected
+
+
+def _compute_edge_delta_ledger(all_updates: list[dict]) -> dict:
+    """
+    Aggregate weight update statistics for the §6.1 edge delta ledger.
+
+    Includes orphan-update check (updates without a feedback_event_id) and
+    within-cluster vs. cross-cluster segmentation.
+    """
+    increased = sum(1 for u in all_updates if u["delta"] > 0)
+    decreased = sum(1 for u in all_updates if u["delta"] < 0)
+    unchanged = sum(1 for u in all_updates if u["delta"] == 0)
+    abs_deltas = [abs(u["delta"]) for u in all_updates]
+    mean_abs_delta = sum(abs_deltas) / len(abs_deltas) if abs_deltas else 0.0
+
+    orphan_count = sum(1 for u in all_updates if not u.get("feedback_event_id"))
+
+    within_cluster = [
+        u for u in all_updates
+        if u.get("source_cluster") is not None
+        and u.get("source_cluster") == u.get("target_cluster")
+    ]
+    cross_cluster = [
+        u for u in all_updates
+        if u.get("source_cluster") is not None
+        and u.get("target_cluster") is not None
+        and u.get("source_cluster") != u.get("target_cluster")
+    ]
+
+    logger.info(
+        "experiment_report §6.1 edge_delta_ledger: total=%d orphans=%d cross_cluster=%d",
+        len(all_updates), orphan_count, len(cross_cluster),
+    )
+    return {
+        "total_updates": len(all_updates),
+        "increased_count": increased,
+        "decreased_count": decreased,
+        "unchanged_count": unchanged,
+        "mean_abs_delta": round(mean_abs_delta, 6),
+        "orphan_update_count": orphan_count,
+        "within_cluster_count": len(within_cluster),
+        "cross_cluster_count": len(cross_cluster),
+        "unknown_cluster_count": len(all_updates) - len(within_cluster) - len(cross_cluster),
+        "cross_cluster_deltas": [
+            {
+                "edge_id": u["edge_id"],
+                "delta": u["delta"],
+                "source_cluster": u["source_cluster"],
+                "target_cluster": u["target_cluster"],
+                "feedback_event_id": u.get("feedback_event_id"),
+            }
+            for u in cross_cluster
+        ],
+    }
+
+
+def _compute_cross_series_probe_mus(
+    probes: list[dict],
+    results_by_probe: dict[str, list[dict]],
+    mu_info: dict[str, dict],
+) -> list[dict]:
+    """
+    For each probe result, report the series_id and cluster_id of each retrieved MU.
+
+    Answers: "which series contributed to each retrieval?"
+    """
+    per_probe: list[dict] = []
+
+    for probe in probes:
+        probe_id = probe["probe_id"]
+        results = sorted(
+            results_by_probe.get(probe_id, []),
+            key=lambda r: r.get("measurement_session_index", 0),
+        )
+
+        per_session: list[dict] = []
+        for result in results:
+            session_mus = []
+            for mu_id in result.get("retrieved_mu_ids") or []:
+                info = mu_info.get(mu_id) or {}
+                session_mus.append({
+                    "mu_id": mu_id,
+                    "series_id": info.get("series_id"),
+                    "cluster_id": info.get("cluster_id"),
+                })
+            per_session.append({
+                "measurement_session_index": result.get("measurement_session_index"),
+                "retrieved_mus": session_mus,
+            })
+
+        per_probe.append({
+            "probe_id": probe_id,
+            "phenomenon_type": probe.get("phenomenon_type"),
+            "per_session": per_session,
+        })
+
+    return per_probe
+
+
+def _compute_bridge_mu_analysis(
+    bridge_probes: list[dict],
+    results_by_probe: dict[str, list[dict]],
+    all_runs: list[dict],
+    mu_cluster_info: dict[str, dict],
+    pass_rank_threshold: int,
+) -> dict:
+    """
+    Bridge-MU / cross-cluster transfer analysis.
+
+    For each bridge probe, tracks gold_mu_rank trajectory across sessions and
+    identifies rank improvements. Checks whether rank improvements follow
+    cluster-A-only reinforcement events as evidence of cross-cluster transfer.
+
+    Cross-cluster transfer candidate: a bridge probe shows rank improvement AND
+    all reinforcement events (feedback_signal=1) in the experiment had source
+    MUs exclusively in cluster_a.
+    """
+    # Build reinforcement events (thumbs_up runs) with their source clusters
+    reinforcement_events: list[dict] = []
+    for run in all_runs:
+        if run.get("feedback_signal") == 1:
+            wupdates = run.get("weight_updates") or []
+            if isinstance(wupdates, str):
+                try:
+                    wupdates = json.loads(wupdates)
+                except (ValueError, TypeError):
+                    wupdates = []
+            src_clusters: set[str] = set()
+            for wu in wupdates:
+                src_id = wu.get("source_mu_id") or ""
+                cluster = (mu_cluster_info.get(src_id) or {}).get("cluster_id")
+                if cluster:
+                    src_clusters.add(cluster)
+            reinforcement_events.append({
+                "run_id": run.get("run_id"),
+                "turn_index": run.get("turn_index"),
+                "source_clusters": sorted(src_clusters),
+            })
+
+    bridge_probe_results: list[dict] = []
+    for probe in bridge_probes:
+        probe_id = probe["probe_id"]
+        results = sorted(
+            results_by_probe.get(probe_id, []),
+            key=lambda r: r.get("measurement_session_index", 0),
+        )
+
+        rank_trajectory = [
+            (r.get("measurement_session_index"), r.get("gold_mu_rank"))
+            for r in results
+        ]
+
+        transfer_candidates: list[dict] = []
+        for i in range(len(rank_trajectory) - 1):
+            sess_n, rank_n = rank_trajectory[i]
+            sess_n1, rank_n1 = rank_trajectory[i + 1]
+
+            # Rank improvement: lower numeric rank is better; None = not found = worst
+            rank_n_val = rank_n if rank_n is not None else 9999
+            rank_n1_val = rank_n1 if rank_n1 is not None else 9999
+            if rank_n1_val >= rank_n_val:
+                continue  # no improvement this step
+
+            # Check if all reinforcement events are cluster-A-only
+            non_empty_events = [
+                e for e in reinforcement_events if e["source_clusters"]
+            ]
+            cluster_a_only = bool(non_empty_events) and all(
+                set(e["source_clusters"]) == {"cluster_a"}
+                for e in non_empty_events
+            )
+
+            transfer_candidates.append({
+                "session_n": sess_n,
+                "session_n1": sess_n1,
+                "rank_n": rank_n,
+                "rank_n1": rank_n1,
+                "reinforcement_event_run_ids": [e["run_id"] for e in reinforcement_events],
+                "cross_cluster_transfer_flag": cluster_a_only,
+            })
+
+        bridge_probe_results.append({
+            "probe_id": probe_id,
+            "bridge_pair_id": probe.get("bridge_pair_id"),
+            "phenomenon_type": probe.get("phenomenon_type"),
+            "rank_trajectory": rank_trajectory,
+            "rank_improvement_count": len(transfer_candidates),
+            "transfer_candidates": transfer_candidates,
+        })
+
+    logger.info(
+        "experiment_report §6.1 bridge_mu: bridge_probes=%d reinforcement_events=%d",
+        len(bridge_probes), len(reinforcement_events),
+    )
+    return {
+        "bridge_probe_count": len(bridge_probes),
+        "reinforcement_event_count": len(reinforcement_events),
+        "bridge_probe_results": bridge_probe_results,
+    }
+
+
+def _compute_saturation_analysis(all_runs: list[dict], saturation_threshold: float) -> dict:
+    """
+    Saturation and runaway-reinforcement detection.
+
+    Saturation: edge reaches weight > saturation_threshold.
+    Runaway: three consecutive deltas are each strictly larger than the previous
+    (accelerating reinforcement, not diminishing). Fires for [0.05, 0.07, 0.10];
+    does not fire for [0.10, 0.07, 0.05].
+    """
+    # Collect per-edge update sequences, ordered by turn_index
+    edge_updates: dict[str, list[dict]] = {}
+    for run in sorted(all_runs, key=lambda r: r.get("turn_index") or 0):
+        wupdates = run.get("weight_updates") or []
+        if isinstance(wupdates, str):
+            try:
+                wupdates = json.loads(wupdates)
+            except (ValueError, TypeError):
+                wupdates = []
+        for wu in wupdates:
+            eid = wu.get("edge_id")
+            if not eid:
+                continue
+            if eid not in edge_updates:
+                edge_updates[eid] = []
+            old_w = wu.get("old_weight") or 0.0
+            new_w = wu.get("new_weight") or 0.0
+            edge_updates[eid].append({
+                "old_weight": old_w,
+                "new_weight": new_w,
+                "delta": new_w - old_w,
+                "turn_index": run.get("turn_index"),
+            })
+
+    saturation_flags: list[dict] = []
+    runaway_flags: list[dict] = []
+
+    for edge_id, updates in edge_updates.items():
+        final_weight = updates[-1]["new_weight"] if updates else None
+
+        # Saturation: final weight above threshold
+        if final_weight is not None and final_weight > saturation_threshold:
+            saturation_flags.append({
+                "edge_id": edge_id,
+                "final_weight": final_weight,
+                "update_count": len(updates),
+                "delta_sequence": [u["delta"] for u in updates],
+            })
+
+        # Runaway: any 3 consecutive deltas are strictly increasing
+        deltas = [u["delta"] for u in updates]
+        for i in range(len(deltas) - 2):
+            d0, d1, d2 = deltas[i], deltas[i + 1], deltas[i + 2]
+            if d1 > d0 and d2 > d1:
+                runaway_flags.append({
+                    "edge_id": edge_id,
+                    "consecutive_deltas": [d0, d1, d2],
+                    "starting_at_turn": updates[i]["turn_index"],
+                })
+                break  # one flag per edge is sufficient
+
+    logger.info(
+        "experiment_report §6.1 saturation: unique_edges=%d saturation=%d runaway=%d",
+        len(edge_updates), len(saturation_flags), len(runaway_flags),
+    )
+    return {
+        "saturation_threshold": saturation_threshold,
+        "total_unique_edges": len(edge_updates),
+        "saturation_flag_count": len(saturation_flags),
+        "runaway_flag_count": len(runaway_flags),
+        "saturation_flags": saturation_flags,
+        "runaway_flags": runaway_flags,
+    }
+
+
+async def _section_61_learning_measures(
+    experiment_id: str,
+    store: GraphStore,
+    config: dict,
+) -> dict:
+    """
+    §6.1 — Full learning measures section.
+
+    Requires the experiment to have probe results and feedback-signal runs.
+    If no probe results exist, the section still generates with empty data.
+    """
+    reporting_cfg = config.get("reporting", {})
+    pass_rank_threshold = reporting_cfg.get("pass_rank_threshold", 3)
+    saturation_threshold = reporting_cfg.get("saturation_threshold", 0.9)
+
+    condition_label = await store.get_condition_label_for_experiment(experiment_id)
+    logger.info(
+        "experiment_report §6.1: experiment_id=%s condition=%s "
+        "pass_rank_threshold=%d saturation_threshold=%.2f",
+        experiment_id, condition_label, pass_rank_threshold, saturation_threshold,
+    )
+
+    # All runs for this experiment (weight_updates, feedback_signal, turn_index)
+    all_runs = await store.get_all_runs_for_experiment(experiment_id)
+    logger.info("experiment_report §6.1: %d runs loaded", len(all_runs))
+
+    # All probe definitions
+    probes = await store.get_all_probes()
+
+    # Probe results grouped by probe_id (filter by condition_label)
+    results_by_probe: dict[str, list[dict]] = {}
+    for probe in probes:
+        pid = probe["probe_id"]
+        results_by_probe[pid] = await store.query_probe_results(
+            probe_id=pid,
+            condition_label=condition_label,
+        )
+
+    # Collect all MU IDs referenced in probe results and weight_updates for info lookup
+    all_mu_ids: set[str] = set()
+    for results in results_by_probe.values():
+        for r in results:
+            all_mu_ids.update(r.get("retrieved_mu_ids") or [])
+    for run in all_runs:
+        wupdates = run.get("weight_updates") or []
+        if isinstance(wupdates, str):
+            try:
+                wupdates = json.loads(wupdates)
+            except (ValueError, TypeError):
+                wupdates = []
+        for wu in wupdates:
+            if wu.get("source_mu_id"):
+                all_mu_ids.add(wu["source_mu_id"])
+            if wu.get("target_mu_id"):
+                all_mu_ids.add(wu["target_mu_id"])
+
+    mu_info = await store.get_mu_info_batch(list(all_mu_ids))
+    logger.info("experiment_report §6.1: %d unique MU IDs looked up", len(mu_info))
+
+    # --- Sub-sections ---
+    state_transitions = _compute_state_transitions(probes, results_by_probe, pass_rank_threshold)
+    mus_by_probe_outcome = _compute_mus_by_probe_outcome(
+        probes, results_by_probe, pass_rank_threshold, mu_info
+    )
+
+    all_updates = _collect_all_weight_updates(all_runs, mu_info)
+    edge_delta_ledger = _compute_edge_delta_ledger(all_updates)
+
+    cross_series_probe_mus = _compute_cross_series_probe_mus(
+        probes, results_by_probe, mu_info
+    )
+
+    bridge_probes = [p for p in probes if p.get("is_bridge_probe")]
+    bridge_mu_analysis = _compute_bridge_mu_analysis(
+        bridge_probes, results_by_probe, all_runs, mu_info, pass_rank_threshold
+    )
+
+    saturation_analysis = _compute_saturation_analysis(all_runs, saturation_threshold)
+
+    return {
+        "pass_rank_threshold": pass_rank_threshold,
+        "saturation_threshold": saturation_threshold,
+        "condition_label": condition_label,
+        "probe_count": len(probes),
+        "run_count": len(all_runs),
+        "state_transitions": state_transitions,
+        "mus_by_probe_outcome": mus_by_probe_outcome,
+        "edge_delta_ledger": edge_delta_ledger,
+        "cross_series_probe_mus": cross_series_probe_mus,
+        "bridge_mu_analysis": bridge_mu_analysis,
+        "saturation_analysis": saturation_analysis,
+    }
+
+
 async def generate_experiment_report(
     experiment_id: str,
     store: GraphStore,
@@ -511,6 +1069,9 @@ async def generate_experiment_report(
     # §6.3 integrity checks
     integrity_checks = await _section_63_integrity_checks(experiment_id, store)
 
+    # §6.1 learning measures
+    learning_measures = await _section_61_learning_measures(experiment_id, store, config)
+
     report = {
         "report_id": str(uuid.uuid4()),
         "report_type": "experiment",
@@ -519,7 +1080,7 @@ async def generate_experiment_report(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "series_summary": series_summary,
         "integrity_checks": integrity_checks,
-        "learning_measures": None,   # filled by Milestone 15
+        "learning_measures": learning_measures,
         "control_shadow": None,       # filled by Milestone 16
     }
 

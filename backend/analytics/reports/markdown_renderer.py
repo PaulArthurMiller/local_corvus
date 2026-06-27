@@ -225,6 +225,143 @@ def _render_s58(section: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_s61(section: dict) -> str:
+    """Render §6.1 Learning Measures as Markdown."""
+    if section is None:
+        return "## §6.1 Learning Measures\n\n_Not yet computed._"
+
+    lines = [
+        "## §6.1 Learning Measures\n",
+        f"**Condition:** `{section.get('condition_label', '—')}`  ",
+        f"**Pass-rank threshold:** top-{section.get('pass_rank_threshold', 3)}  ",
+        f"**Probes:** {section.get('probe_count', 0)}  ",
+        f"**Runs with weight updates:** {section.get('run_count', 0)}\n",
+    ]
+
+    # State transitions
+    st = section.get("state_transitions") or {}
+    lines += [
+        "### State Transitions\n",
+        "| probe_id | phenomenon | pattern | fail→pass | pass→fail |",
+        "|---|---|---|---|---|",
+    ]
+    for p in st.get("per_probe") or []:
+        lines.append(
+            f"| {p.get('probe_id', '—')} "
+            f"| {p.get('phenomenon_type', '—')} "
+            f"| {p.get('pattern', '—')} "
+            f"| {p.get('fail_to_pass_count', 0)} "
+            f"| {p.get('pass_to_fail_count', 0)} |"
+        )
+
+    by_phenom = st.get("by_phenomenon") or {}
+    if by_phenom:
+        lines += [
+            "\n#### By Phenomenon\n",
+            "| phenomenon | probes | fail→pass | pass→fail | flat_fail | flat_pass |",
+            "|---|---|---|---|---|---|",
+        ]
+        for phenom, counts in by_phenom.items():
+            lines.append(
+                f"| {phenom} "
+                f"| {counts.get('probe_count', 0)} "
+                f"| {counts.get('fail_to_pass', 0)} "
+                f"| {counts.get('pass_to_fail', 0)} "
+                f"| {counts.get('flat_fail', 0)} "
+                f"| {counts.get('flat_pass', 0)} |"
+            )
+
+    # Edge delta ledger
+    ledger = section.get("edge_delta_ledger") or {}
+    orphan_count = ledger.get("orphan_update_count", 0)
+    orphan_flag = " ⚠ **PROCESS VIOLATION**" if orphan_count > 0 else ""
+    lines += [
+        "\n### Edge Weight Delta Ledger\n",
+        f"**Total updates:** {ledger.get('total_updates', 0)}  ",
+        f"**Increased:** {ledger.get('increased_count', 0)} | "
+        f"**Decreased:** {ledger.get('decreased_count', 0)} | "
+        f"**Unchanged:** {ledger.get('unchanged_count', 0)}  ",
+        f"**Mean |delta|:** {ledger.get('mean_abs_delta', 0.0):.6f}  ",
+        f"**Orphan updates (no feedback_event_id):** {orphan_count}{orphan_flag}  ",
+        f"**Within-cluster:** {ledger.get('within_cluster_count', 0)} | "
+        f"**Cross-cluster:** {ledger.get('cross_cluster_count', 0)} | "
+        f"**Unknown cluster:** {ledger.get('unknown_cluster_count', 0)}\n",
+    ]
+
+    cross_deltas = ledger.get("cross_cluster_deltas") or []
+    if cross_deltas:
+        lines += [
+            "#### Cross-Cluster Edge Deltas\n",
+            "| edge_id | delta | source_cluster | target_cluster |",
+            "|---|---|---|---|",
+        ]
+        for cd in cross_deltas[:20]:
+            lines.append(
+                f"| {str(cd.get('edge_id', ''))[:8]}… "
+                f"| {cd.get('delta', 0.0):+.4f} "
+                f"| {cd.get('source_cluster', '—')} "
+                f"| {cd.get('target_cluster', '—')} |"
+            )
+        if len(cross_deltas) > 20:
+            lines.append(f"\n_…and {len(cross_deltas) - 20} more (see JSON)_")
+
+    # Bridge-MU analysis
+    bridge = section.get("bridge_mu_analysis") or {}
+    lines += [
+        "\n### Bridge-MU / Cross-Cluster Transfer\n",
+        f"**Bridge probes:** {bridge.get('bridge_probe_count', 0)}  ",
+        f"**Reinforcement events (thumbs-up runs):** {bridge.get('reinforcement_event_count', 0)}\n",
+    ]
+    for bp in bridge.get("bridge_probe_results") or []:
+        trajectory = bp.get("rank_trajectory") or []
+        traj_str = " → ".join(
+            f"s{s}:{'r'+str(r) if r is not None else 'absent'}"
+            for s, r in trajectory
+        )
+        lines.append(f"**{bp.get('probe_id')}** rank trajectory: {traj_str or '—'}")
+        for tc in bp.get("transfer_candidates") or []:
+            flag = "🔵 TRANSFER CANDIDATE" if tc.get("cross_cluster_transfer_flag") else ""
+            lines.append(
+                f"  - Session {tc.get('session_n')}→{tc.get('session_n1')}: "
+                f"rank {tc.get('rank_n')}→{tc.get('rank_n1')} {flag}"
+            )
+        lines.append("")
+
+    # Saturation
+    sat = section.get("saturation_analysis") or {}
+    lines += [
+        "### Saturation / Runaway-Reinforcement\n",
+        f"**Saturation threshold:** {sat.get('saturation_threshold', 0.9)}  ",
+        f"**Unique edges tracked:** {sat.get('total_unique_edges', 0)}  ",
+        f"**Saturation flags:** {sat.get('saturation_flag_count', 0)}  ",
+        f"**Runaway flags:** {sat.get('runaway_flag_count', 0)}\n",
+    ]
+    sat_flags = sat.get("saturation_flags") or []
+    if sat_flags:
+        lines += [
+            "#### Saturated Edges\n",
+            "| edge_id | final_weight | update_count |",
+            "|---|---|---|",
+        ]
+        for sf in sat_flags:
+            lines.append(
+                f"| {str(sf.get('edge_id', ''))[:8]}… "
+                f"| {sf.get('final_weight', '—'):.4f} "
+                f"| {sf.get('update_count', 0)} |"
+            )
+    runaway_flags = sat.get("runaway_flags") or []
+    if runaway_flags:
+        lines.append("\n#### Runaway-Reinforcement Edges\n")
+        for rf in runaway_flags:
+            lines.append(
+                f"- `{str(rf.get('edge_id', ''))[:8]}…` "
+                f"consecutive deltas: {rf.get('consecutive_deltas')} "
+                f"(from turn {rf.get('starting_at_turn', '—')})"
+            )
+
+    return "\n".join(lines)
+
+
 def render_experiment_report_markdown(report: dict) -> str:
     """
     Render an experiment report dict as a Markdown document.
@@ -369,11 +506,12 @@ def render_experiment_report_markdown(report: dict) -> str:
     ]
     integrity_section = "\n".join(integrity_lines)
 
-    # §6.4 placeholder note for learning measures / control shadow
-    placeholders = (
-        "## §6.1 Learning Measures\n\n"
-        "_Not yet computed — will be populated by Milestone 15._\n\n"
-        "---\n\n"
+    # §6.1 learning measures
+    learning_measures = report.get("learning_measures")
+    s61_section = _render_s61(learning_measures)
+
+    # §6.2 control shadow placeholder (Milestone 16)
+    s62_placeholder = (
         "## §6.2 Control Shadow\n\n"
         "_Not yet computed — will be populated by Milestone 16._"
     )
@@ -383,7 +521,8 @@ def render_experiment_report_markdown(report: dict) -> str:
         series_section,
         integrity_section,
         STATISTICAL_CAVEAT_TEXT,
-        placeholders,
+        s61_section,
+        s62_placeholder,
     ]
     return "\n\n---\n\n".join(body_parts) + "\n"
 

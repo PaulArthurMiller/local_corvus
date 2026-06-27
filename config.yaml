@@ -69,9 +69,9 @@ tools:
       operation: "write"
 
 experiment:
-  experiment_id: ""            # set explicitly before each experiment run; auto-generated if empty
-  condition_label: "learning"  # change to "static-weight" or "random-weight" for control runs
-  use_session_context: false   # set true to restore multi-turn history injection; restart required
+  experiment_id: ""  # set explicitly before each experiment run; auto-generated if empty
+  condition_label: "learning"              # change to "static-weight" or "random-weight" for control runs
+  use_session_context: false               # set true to restore multi-turn history injection; restart required
 
 reporting:
   mode3_min_expected_length: 100    # §5.7: system MUs shorter than this are flagged as anomalous

@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 14 — Experiment Report Non-Learning Rollup — COMPLETE  
-Next step: Review PR, then build Milestone 15 (Experiment Report — Learning Measures §6.1).
+Current milestone: 15 — Experiment Report Learning Measures — COMPLETE  
+Next step: Review PR, then build Milestone 16 (Experiment Report — Control Shadow + Admin UI §6.2 + dashboard).
 
 ## Session log
 
@@ -248,6 +248,22 @@ Next step: Review PR, then build Milestone 15 (Experiment Report — Learning Me
     - Markdown renderer caps table rows at 50 (§5.4) and 30 (§5.5) with a "…and N more" note for large datasets
     - `generated_reports` table uses CREATE TABLE IF NOT EXISTS — no ALTER TABLE migration needed (new table, not schema change to existing)
 
+- 2026-06-27: /build — Milestone 15 complete
+  - Modified: `backend/analytics/reports/experiment_report.py` (§6.1 section: state-transition detection, MUs by probe outcome, edge delta ledger with orphan-update check, cross-series probe MUs, bridge-MU rank trajectory + transfer candidate detection, saturation/runaway-reinforcement flags; integrated into `generate_experiment_report()`)
+  - Modified: `backend/analytics/reports/markdown_renderer.py` (`_render_s61()` — full Markdown renderer for all §6.1 sub-sections; replaces M14 placeholder)
+  - Modified: `backend/memory/store.py` (`outcome_override TEXT` on `probe_results` schema + migration; 3 new methods: `get_all_runs_for_experiment`, `get_all_probes`, `get_mu_info_batch`)
+  - Modified: `config.yaml` (`reporting.pass_rank_threshold: 3`, `reporting.saturation_threshold: 0.9`)
+  - Modified: `tests/test_analytics/test_experiment_report.py` (updated M14 null-placeholder assertion to match M15 behavior)
+  - Created: `tests/test_analytics/test_learning_measures.py` (33 new tests)
+  - Tests: 33 new, 302 total — all passing
+  - Branch: milestone-15-experiment-report-learning
+  - PR: https://github.com/PaulArthurMiller/local_corvus/pull/19
+  - Key decisions:
+    - Weight update processing is Python-side (iterate over decoded `weight_updates` JSON arrays) to avoid SQLite `json_each()` version dependency
+    - `outcome_override` is the correct mechanism for negative_flagged outcome — checked first in `_classify_probe_outcome()` before pass/fail rank logic
+    - Bridge-MU transfer detection uses all reinforcement events for the experiment (no precise temporal windowing between probe sessions — probe results don't carry turn_index)
+    - `learning_measures` key in the experiment report JSON is now a dict, not null
+
 - 2026-06-27: /build — Milestone 14 complete
   - Created: `backend/analytics/reports/experiment_report.py` (§5 aggregation across series, §6.3 integrity checks, §6.4 statistical caveat, §6.1/§6.2 null placeholders)
   - Modified: `backend/analytics/reports/markdown_renderer.py` (added `render_experiment_report_markdown()`)
@@ -303,5 +319,5 @@ Next step: Review PR, then build Milestone 15 (Experiment Report — Learning Me
 12. ~~**Series ID Prerequisite Gate** — Stamp `series_id` + `experiment_id` + `cluster_id` on `memory_units`; rename `session_id` → `series_id` project-wide; add `EXPERIMENT_ID` env var. Gates all reporting milestones.~~ ✅ COMPLETE
 13. ~~**Series Report Generator (§5)** — All 8 series-report sections (failures, retrieval digest, intra/cross rate, cross-series edges, weight deltas, probe integrity, Mode-3 count, num_ctx pressure); JSON + Markdown output to `/app/memory/reports/`; admin endpoints.~~ ✅ COMPLETE
 14. ~~**Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.~~ ✅ COMPLETE
-15. **Experiment Report — Learning Measures (§6.1)** — State-transition detection (fail→pass, pass→fail, flat); bridge-MU rank trajectory; cross-cluster transfer candidates; edge delta ledger with orphan-update check; saturation / runaway-reinforcement flags.
+15. ~~**Experiment Report — Learning Measures (§6.1)** — State-transition detection (fail→pass, pass→fail, flat); bridge-MU rank trajectory; cross-cluster transfer candidates; edge delta ledger with orphan-update check; saturation / runaway-reinforcement flags.~~ ✅ COMPLETE
 16. **Experiment Report — Control Shadow + Admin UI (§6.2 + dashboard)** — Control shadow embedded in learned-condition report; static/random control sanity checks; comparative deltas; Reports page with list, viewer, and comparison table.

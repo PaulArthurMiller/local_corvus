@@ -6,7 +6,7 @@ and renders a human-readable Markdown document. Each section corresponds to
 a §5.N section of the experiment report spec.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 
 def _truncate(value: Any, max_chars: int = 60) -> str:
@@ -362,6 +362,64 @@ def _render_s61(section: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_s62(control_shadow: Optional[dict]) -> str:
+    """Render §6.2 Control Shadow as Markdown."""
+    if not control_shadow:
+        return "## §6.2 Control Shadow\n\n_Not computed — no control_experiment_ids provided._"
+
+    lines = ["## §6.2 Control Shadow\n"]
+
+    for control_name, cs in control_shadow.items():
+        condition = cs.get("condition_label") or control_name
+        exp_id = cs.get("experiment_id", "—")
+        lines += [
+            f"### {control_name} (`{condition}`)\n",
+            f"**Experiment ID:** `{exp_id}`\n",
+        ]
+
+        # Sanity checks
+        sanity = cs.get("sanity_checks") or {}
+        lines.append("#### Sanity Checks\n")
+        for check_name, check_result in sanity.items():
+            status = check_result.get("status", "UNKNOWN")
+            status_display = "✅ PASS" if status == "PASS" else ("⏭ SKIP" if status == "SKIP" else "❌ FAIL")
+            lines.append(f"**{check_name}:** {status_display}")
+            if status == "FAIL":
+                violations = check_result.get("violation_count", check_result.get("violating_run_ids", ""))
+                lines.append(f"  - Violations: {violations}")
+        lines.append("")
+
+        # Comparative deltas table
+        deltas = cs.get("comparative_deltas") or {}
+        lines += [
+            "#### Comparative Deltas (learned − control)\n",
+            "| Measure | Learned | Delta |",
+            "|---|---|---|",
+        ]
+        for measure_name, delta_val in deltas.items():
+            delta_str = f"{delta_val:+.4f}" if delta_val is not None else "—"
+            lines.append(f"| {measure_name} | — | {delta_str} |")
+        lines.append("")
+
+    # Comparison table (cross-condition, if multiple controls)
+    if len(control_shadow) >= 1:
+        lines += [
+            "### Condition Comparison Summary\n",
+            "| Measure | Learned | " + " | ".join(cs.get("condition_label") or n for n, cs in control_shadow.items()) + " |",
+            "|---|---|" + "---|" * len(control_shadow),
+        ]
+        measure_names = ["probe_pass_rate_delta", "bridge_mu_rank_delta",
+                         "edge_weight_delta_magnitude", "mean_gold_mu_rank_delta"]
+        for m in measure_names:
+            control_vals = []
+            for cs in control_shadow.values():
+                d = (cs.get("comparative_deltas") or {}).get(m)
+                control_vals.append(f"{d:+.4f}" if d is not None else "—")
+            lines.append(f"| {m} | (baseline) | " + " | ".join(control_vals) + " |")
+
+    return "\n".join(lines)
+
+
 def render_experiment_report_markdown(report: dict) -> str:
     """
     Render an experiment report dict as a Markdown document.
@@ -510,11 +568,9 @@ def render_experiment_report_markdown(report: dict) -> str:
     learning_measures = report.get("learning_measures")
     s61_section = _render_s61(learning_measures)
 
-    # §6.2 control shadow placeholder (Milestone 16)
-    s62_placeholder = (
-        "## §6.2 Control Shadow\n\n"
-        "_Not yet computed — will be populated by Milestone 16._"
-    )
+    # §6.2 control shadow
+    control_shadow = report.get("control_shadow")
+    s62_section = _render_s62(control_shadow)
 
     body_parts = [
         header,
@@ -522,7 +578,7 @@ def render_experiment_report_markdown(report: dict) -> str:
         integrity_section,
         STATISTICAL_CAVEAT_TEXT,
         s61_section,
-        s62_placeholder,
+        s62_section,
     ]
     return "\n\n---\n\n".join(body_parts) + "\n"
 

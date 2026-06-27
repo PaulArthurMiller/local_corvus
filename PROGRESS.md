@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 12 — Series ID Prerequisite Gate — COMPLETE  
-Next step: Review PR, then build Milestone 13 (Series Report Generator).
+Current milestone: 13 — Series Report Generator — COMPLETE  
+Next step: Review PR, then build Milestone 14 (Experiment Report Non-Learning Rollup).
 
 ## Session log
 
@@ -230,6 +230,24 @@ Next step: Review PR, then build Milestone 13 (Series Report Generator).
     - finish_reason is guarded with `(finish_reason or "") == _OLLAMA_FINISH_REASON_LENGTH` to handle None from older Ollama versions
     - Max-iterations tool loop exhaustion uses FAILURE_REASON_EMPTY_OUTPUT (not a new constant — same bucket as other unexpected empties)
 
+- 2026-06-27: /build — Milestone 13 complete
+  - Created: `backend/analytics/reports/__init__.py`
+  - Created: `backend/analytics/reports/series_report.py` (8-section §5 generator: failure summary, retrieval trace, retrieval rate, cross-series edges, edge weight deltas, probe integrity, Mode-3 count, num_ctx pressure)
+  - Created: `backend/analytics/reports/markdown_renderer.py` (JSON → Markdown renderer for all 8 sections)
+  - Modified: `backend/memory/store.py` (added `generated_reports` table + 10 new query methods for report support)
+  - Modified: `backend/api/admin.py` (4 new endpoints: POST /admin/reports/generate-series, GET /admin/reports, GET /admin/reports/{id}, GET /admin/reports/{id}/markdown)
+  - Modified: `config.yaml` (added `reporting.mode3_min_expected_length: 100`)
+  - Created: `tests/test_analytics/test_series_report.py` (13 new tests)
+  - Created: `tests/test_analytics/test_markdown_renderer.py` (8 new tests)
+  - Tests: 21 new, 256 total — all passing
+  - Branch: milestone-13-series-report-generator
+  - Key decisions:
+    - All DB access for report generation goes through new GraphStore methods — no direct SQLite in the report module
+    - Ghost-MU check uses Python-side set intersection (activated_mu_ids is a JSON array — SQLite json_each() not needed for this query)
+    - §5.2 trace digest truncates MU IDs to 8 chars for readability; full IDs in JSON
+    - Markdown renderer caps table rows at 50 (§5.4) and 30 (§5.5) with a "…and N more" note for large datasets
+    - `generated_reports` table uses CREATE TABLE IF NOT EXISTS — no ALTER TABLE migration needed (new table, not schema change to existing)
+
 - 2026-06-26: /build — Milestone 12 complete
   - Modified: `config.yaml` (adds `experiment.experiment_id: ""`)
   - Modified: `backend/gate/um.py` (`session_id` → `series_id` on UniversalMessage + create_um(); added `experiment_id: Optional[str]`)
@@ -266,8 +284,9 @@ Next step: Review PR, then build Milestone 13 (Series Report Generator).
 9. ~~**Experiment Framework** — Probe set, ground truth labels, seed fixture, battery snapshots~~ ✅ COMPLETE
 10. ~~**Session Context Flag** — Config-driven flag to disable session history injection; off by default; per-run auditability in RunRecord and Admin UI~~ ✅ COMPLETE
 11. ~~**Empty-Response Failure Detection** — Detect `finish_reason=length` + empty content; tag MU source_type with cause; thread `failure_reason` field through InteractionResult → ChatResponse → UI; `failure_reason` column in analytics; Admin UI failure indicator~~ ✅ COMPLETE
-12. **Series ID Prerequisite Gate** — Stamp `series_id` + `experiment_id` + `cluster_id` on `memory_units`; rename `session_id` → `series_id` project-wide; add `EXPERIMENT_ID` env var. Gates all reporting milestones.
-13. **Series Report Generator (§5)** — All 8 series-report sections (failures, retrieval digest, intra/cross rate, cross-series edges, weight deltas, probe integrity, Mode-3 count, num_ctx pressure); JSON + Markdown output to `/app/memory/reports/`; admin endpoints.
+12. ~~**Series ID Prerequisite Gate** — Stamp `series_id` + `experiment_id` + `cluster_id` on `memory_units`; rename `session_id` → `series_id` project-wide; add `EXPERIMENT_ID` env var. Gates all reporting milestones.~~ ✅ COMPLETE
+13. ~~**Series Report Generator (§5)** — All 8 series-report sections (failures, retrieval digest, intra/cross rate, cross-series edges, weight deltas, probe integrity, Mode-3 count, num_ctx pressure); JSON + Markdown output to `/app/memory/reports/`; admin endpoints.~~ ✅ COMPLETE
+14. **Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.
 14. **Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.
 15. **Experiment Report — Learning Measures (§6.1)** — State-transition detection (fail→pass, pass→fail, flat); bridge-MU rank trajectory; cross-cluster transfer candidates; edge delta ledger with orphan-update check; saturation / runaway-reinforcement flags.
 16. **Experiment Report — Control Shadow + Admin UI (§6.2 + dashboard)** — Control shadow embedded in learned-condition report; static/random control sanity checks; comparative deltas; Reports page with list, viewer, and comparison table.

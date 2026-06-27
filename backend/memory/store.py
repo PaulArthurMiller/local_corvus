@@ -130,6 +130,19 @@ CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
     generation_record TEXT NOT NULL DEFAULT '[]'
 );
 
+CREATE TABLE IF NOT EXISTS generated_reports (
+    report_id TEXT PRIMARY KEY,
+    report_type TEXT NOT NULL,
+    experiment_id TEXT NOT NULL,
+    series_id TEXT,
+    generated_at TEXT NOT NULL,
+    json_path TEXT NOT NULL,
+    md_path TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_generated_reports_experiment ON generated_reports(experiment_id);
+CREATE INDEX IF NOT EXISTS idx_generated_reports_type ON generated_reports(report_type);
+
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_mu_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_mu_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_series ON analytics(series_id);
@@ -199,6 +212,11 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
     except Exception:
         # Column already renamed (fresh install uses series_id directly)
         pass
+
+    # --- M13: generated_reports table (created via _INIT_SQL on fresh install; ---
+    # --- migration is a no-op here since CREATE TABLE IF NOT EXISTS handles it) ---
+    # Existing DBs get the table on next _open_db() call via executescript(_INIT_SQL).
+    # No ALTER TABLE needed — this is a wholly new table.
 
 
 async def _open_db() -> aiosqlite.Connection:
@@ -889,6 +907,244 @@ class GraphStore:
         r["type_distribution"] = _json.loads(r.get("type_distribution") or "{}")
         r["generation_record"] = _json.loads(r.get("generation_record") or "[]")
         return r
+
+    # -------------------------------------------------------------------------
+    # M13: Series report support queries
+    # -------------------------------------------------------------------------
+
+    async def get_all_runs_for_series(self, series_id: str) -> list[dict]:
+        """
+        Return all run records for a series ordered by turn_index ASC.
+
+        JSON fields are decoded. No pagination — callers need the full set
+        for report generation.
+        """
+        import json as _json
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM analytics WHERE series_id = ? ORDER BY turn_index ASC",
+                (series_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        json_fields = {
+            "tool_calls", "activated_mu_ids", "activated_edge_ids",
+            "weight_updates", "hyperparameters_snapshot",
+            "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
+            "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
+            "assembled_prompt_json", "full_config_snapshot",
+        }
+        result = []
+        for row in rows:
+            r = dict(row)
+            for field in json_fields:
+                if r.get(field):
+                    try:
+                        r[field] = _json.loads(r[field])
+                    except (ValueError, TypeError):
+                        pass
+            result.append(r)
+        return result
+
+    async def get_mus_by_source_type_pattern(
+        self, pattern: str, series_id: Optional[str] = None
+    ) -> list[dict]:
+        """
+        Return MUs whose source_type matches a LIKE pattern.
+
+        If series_id is given, restricts to that series. Used by §5.7 (Mode-3)
+        and §5.1 (failed MUs).
+        """
+        db = await _open_db()
+        try:
+            if series_id is not None:
+                async with db.execute(
+                    "SELECT * FROM memory_units WHERE source_type LIKE ? AND series_id = ? ORDER BY created_at ASC",
+                    (pattern, series_id),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            else:
+                async with db.execute(
+                    "SELECT * FROM memory_units WHERE source_type LIKE ? ORDER BY created_at ASC",
+                    (pattern,),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
+
+    async def get_mu_series_ids(self, mu_ids: list[str]) -> dict[str, Optional[str]]:
+        """
+        Return {mu_id: series_id} mapping for a list of MU IDs.
+
+        MUs not found in the DB are excluded from the result. Used by §5.3
+        to classify retrieved MUs by their originating series.
+        """
+        if not mu_ids:
+            return {}
+        db = await _open_db()
+        try:
+            placeholders = ",".join("?" * len(mu_ids))
+            async with db.execute(
+                f"SELECT mu_id, series_id FROM memory_units WHERE mu_id IN ({placeholders})",
+                mu_ids,
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return {row["mu_id"]: row["series_id"] for row in rows}
+
+    async def get_cross_series_edges(self, series_id: str) -> list[dict]:
+        """
+        Return edges where one endpoint belongs to series_id and the other
+        belongs to a different (or NULL) series.
+
+        Used by §5.4 — cross-series edge analysis.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT e.edge_id, e.weight,
+                       s.series_id AS source_series, s.mu_id AS source_mu,
+                       t.series_id AS target_series, t.mu_id AS target_mu
+                FROM edges e
+                JOIN memory_units s ON e.source_mu_id = s.mu_id
+                JOIN memory_units t ON e.target_mu_id = t.mu_id
+                WHERE (s.series_id = ? OR t.series_id = ?)
+                  AND (s.series_id != t.series_id
+                       OR s.series_id IS NULL
+                       OR t.series_id IS NULL)
+                """,
+                (series_id, series_id),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
+
+    async def get_edges_by_ids(self, edge_ids: list[str]) -> list[dict]:
+        """
+        Return edge records for a list of edge IDs.
+
+        Used by §5.5 to get current weights for edges activated in a series.
+        """
+        if not edge_ids:
+            return []
+        db = await _open_db()
+        try:
+            placeholders = ",".join("?" * len(edge_ids))
+            async with db.execute(
+                f"SELECT * FROM edges WHERE edge_id IN ({placeholders})",
+                edge_ids,
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
+
+    async def count_probe_feedback_events_for_series(
+        self, series_id: str
+    ) -> tuple[int, list[dict]]:
+        """
+        Count feedback events with is_probe_turn=1 for runs belonging to series_id.
+
+        Returns (count, list_of_offending_events). Used by §5.6 probe integrity check.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT fe.feedback_event_id, fe.run_id, fe.verdict, fe.turn_index
+                FROM feedback_events fe
+                JOIN analytics a ON fe.run_id = a.run_id
+                WHERE a.series_id = ? AND fe.is_probe_turn = 1
+                """,
+                (series_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        events = [dict(r) for r in rows]
+        return len(events), events
+
+    # -------------------------------------------------------------------------
+    # M13: Generated reports CRUD
+    # -------------------------------------------------------------------------
+
+    async def insert_generated_report(self, report: dict) -> None:
+        """Insert a generated report record into the generated_reports table."""
+        db = await _open_db()
+        try:
+            await db.execute(
+                """
+                INSERT INTO generated_reports
+                    (report_id, report_type, experiment_id, series_id,
+                     generated_at, json_path, md_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report["report_id"],
+                    report["report_type"],
+                    report["experiment_id"],
+                    report.get("series_id"),
+                    report["generated_at"],
+                    report["json_path"],
+                    report["md_path"],
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info(
+            "store: inserted generated_report report_id=%s type=%s",
+            report["report_id"],
+            report["report_type"],
+        )
+
+    async def query_generated_reports(
+        self,
+        report_type: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Query generated report records with optional filters.
+
+        Returns rows ordered by generated_at DESC.
+        """
+        conditions: list[str] = []
+        params: list = []
+        if report_type:
+            conditions.append("report_type = ?")
+            params.append(report_type)
+        if experiment_id:
+            conditions.append("experiment_id = ?")
+            params.append(experiment_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM generated_reports {where} ORDER BY generated_at DESC"
+
+        db = await _open_db()
+        try:
+            async with db.execute(sql, params) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
+
+    async def get_generated_report(self, report_id: str) -> Optional[dict]:
+        """Fetch a single generated report record by ID."""
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM generated_reports WHERE report_id = ?", (report_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        return dict(row) if row is not None else None
 
 
 # Module-level singleton — imported by other modules

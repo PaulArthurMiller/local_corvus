@@ -2093,8 +2093,8 @@ The "Generate New..." button opens a small form: select `experiment_id`, optiona
 ## Status
 
 ```
-Current milestone: 12 — Series ID Prerequisite Gate — COMPLETE
-Last updated: 2026-06-26
+Current milestone: 13 — Series Report Generator — COMPLETE
+Last updated: 2026-06-27
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -2122,3 +2122,5 @@ Last updated: 2026-06-26
 **Milestone 11:** Complete — branch `milestone-11-empty-response-detection`, PR pending merge.
 
 **Milestone 12:** Complete — branch `milestone-12-series-id-prerequisite-gate`, PR pending merge.
+
+**Milestone 13:** Complete — branch `milestone-13-series-report-generator`, PR pending merge.

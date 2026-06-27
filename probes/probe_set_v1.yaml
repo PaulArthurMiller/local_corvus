@@ -10,43 +10,53 @@ phenomenon_map:
     description: "Output must satisfy the named rule; measured on output, not retrieved set"
 
 # Probe definitions.
-# Fill in prompt_text and gold_mu_ids after seed fixture generation.
-# probe_id must be unique across all probes.
-# gold_mu_ids: list of mu_id strings that the retrieval engine should surface.
-# is_bridge_probe: true if this probe is designed to trigger cross-cluster transfer.
-# bridge_pair_id: probe_id of the paired probe (if is_bridge_probe is true).
+# Seed fixture version: v1 (seed_fixtures/seed_v1.json.gz)
+# Cluster A MUs (cluster_id="cluster_a"): file tool operation facts
+#   a1a1a1a1-aaaa-4aaa-8aaa-a1a1a1a1a1a1 — file_write facts
+#   a2a2a2a2-aaaa-4aaa-8aaa-a2a2a2a2a2a2 — file_read facts
+#   rule1111-dddd-4ddd-8ddd-rule11111111  — input validation rule
+# Cluster B MUs (cluster_id="cluster_b"): learning & retrieval concepts
+#   b1b1b1b1-bbbb-4bbb-8bbb-b1b1b1b1b1b1 — RL feedback/edge weights
+#   b2b2b2b2-bbbb-4bbb-8bbb-b2b2b2b2b2b2 — BM25 keyword retrieval
+# Bridge MU (cluster_id="bridge_ab"): connects file tools with RL storage
+#   ab123456-cccc-4ccc-8ccc-abcdef123456  — saving RL results to files
 probes:
   - probe_id: "p01"
     phenomenon_type: "ranking_improvement"
-    prompt_text: ""
-    gold_mu_ids: []
+    prompt_text: "How do I write data to a file using the file_write tool?"
+    gold_mu_ids:
+      - "a1a1a1a1-aaaa-4aaa-8aaa-a1a1a1a1a1a1"
     is_bridge_probe: false
     bridge_pair_id: null
 
   - probe_id: "p02"
     phenomenon_type: "ranking_improvement"
-    prompt_text: ""
-    gold_mu_ids: []
+    prompt_text: "How does BM25 keyword retrieval rank and select memory units?"
+    gold_mu_ids:
+      - "b2b2b2b2-bbbb-4bbb-8bbb-b2b2b2b2b2b2"
     is_bridge_probe: false
     bridge_pair_id: null
 
   - probe_id: "p03"
     phenomenon_type: "cross_cluster_transfer"
-    prompt_text: ""
-    gold_mu_ids: []
+    prompt_text: "How do I save reinforcement learning experiment results and probe scores to files?"
+    gold_mu_ids:
+      - "ab123456-cccc-4ccc-8ccc-abcdef123456"
     is_bridge_probe: true
     bridge_pair_id: "p04"
 
   - probe_id: "p04"
     phenomenon_type: "cross_cluster_transfer"
-    prompt_text: ""
-    gold_mu_ids: []
+    prompt_text: "How do I load stored experiment data from files to analyze learning curves?"
+    gold_mu_ids:
+      - "ab123456-cccc-4ccc-8ccc-abcdef123456"
     is_bridge_probe: true
     bridge_pair_id: "p03"
 
   - probe_id: "p05"
     phenomenon_type: "process_rule_adherence"
-    prompt_text: ""
-    gold_mu_ids: []
+    prompt_text: "What should I always verify before reading data from files or processing inputs?"
+    gold_mu_ids:
+      - "rule1111-dddd-4ddd-8ddd-rule11111111"
     is_bridge_probe: false
     bridge_pair_id: null

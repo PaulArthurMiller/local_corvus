@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 15 — Experiment Report Learning Measures — COMPLETE  
-Next step: Review PR, then build Milestone 16 (Experiment Report — Control Shadow + Admin UI §6.2 + dashboard).
+Current milestone: 16 — Experiment Report Control Shadow + Admin UI — COMPLETE  
+Next step: Review PR, then run the three-condition experiment (learning / static-weight / random-weight) to produce real data for the reports.
 
 ## Session log
 
@@ -248,6 +248,27 @@ Next step: Review PR, then build Milestone 16 (Experiment Report — Control Sha
     - Markdown renderer caps table rows at 50 (§5.4) and 30 (§5.5) with a "…and N more" note for large datasets
     - `generated_reports` table uses CREATE TABLE IF NOT EXISTS — no ALTER TABLE migration needed (new table, not schema change to existing)
 
+- 2026-06-27: /build — Milestone 16 complete
+  - Created: `backend/analytics/reports/control_shadow.py` (§6.2: three sanity checks + comparative delta computation + generate_control_shadow() orchestrator)
+  - Modified: `backend/analytics/reports/experiment_report.py` (generate_experiment_report() accepts optional control_experiment_ids; calls control shadow when provided; control_shadow key now populated)
+  - Modified: `backend/analytics/reports/markdown_renderer.py` (_render_s62() replaces M14/M15 §6.2 placeholder; renders sanity checks + comparative delta table + cross-condition comparison)
+  - Modified: `backend/api/admin.py` (GenerateExperimentReportRequest accepts optional control_experiment_ids dict)
+  - Modified: `config.yaml` (adds reporting.random_control_variance_floor: 0.05)
+  - Created: `admin/src/pages/Reports.jsx` (Reports page: list, generate form, viewer, comparison table)
+  - Created: `admin/src/components/ReportsList.jsx` (filterable list with View + ↓ JSON buttons)
+  - Created: `admin/src/components/ReportViewer.jsx` (react-markdown renderer for Markdown reports, GFM tables)
+  - Created: `admin/src/components/ExperimentComparison.jsx` (auto-renders when control_shadow present; sanity check status badges + delta table)
+  - Modified: `admin/src/App.jsx` (adds Reports tab)
+  - Modified: `admin/package.json` (adds react-markdown + remark-gfm)
+  - Created: `tests/test_analytics/test_control_shadow.py` (13 new tests)
+  - Tests: 13 new, 315 total — all passing
+  - Branch: milestone-16-control-shadow-admin-ui
+  - Key decisions:
+    - Control shadow embedded in the learned-condition report (not a separate file) — comparison can't drift out of sync
+    - generate_control_shadow() runs _section_61_learning_measures() for each control — same code path as the learned condition, no separate implementation
+    - react-markdown + remark-gfm renders GFM tables (| delimited) correctly in browser
+    - Comparison table auto-renders when control_shadow is non-null in the fetched report JSON
+
 - 2026-06-27: /build — Milestone 15 complete
   - Modified: `backend/analytics/reports/experiment_report.py` (§6.1 section: state-transition detection, MUs by probe outcome, edge delta ledger with orphan-update check, cross-series probe MUs, bridge-MU rank trajectory + transfer candidate detection, saturation/runaway-reinforcement flags; integrated into `generate_experiment_report()`)
   - Modified: `backend/analytics/reports/markdown_renderer.py` (`_render_s61()` — full Markdown renderer for all §6.1 sub-sections; replaces M14 placeholder)
@@ -320,4 +341,4 @@ Next step: Review PR, then build Milestone 16 (Experiment Report — Control Sha
 13. ~~**Series Report Generator (§5)** — All 8 series-report sections (failures, retrieval digest, intra/cross rate, cross-series edges, weight deltas, probe integrity, Mode-3 count, num_ctx pressure); JSON + Markdown output to `/app/memory/reports/`; admin endpoints.~~ ✅ COMPLETE
 14. ~~**Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.~~ ✅ COMPLETE
 15. ~~**Experiment Report — Learning Measures (§6.1)** — State-transition detection (fail→pass, pass→fail, flat); bridge-MU rank trajectory; cross-cluster transfer candidates; edge delta ledger with orphan-update check; saturation / runaway-reinforcement flags.~~ ✅ COMPLETE
-16. **Experiment Report — Control Shadow + Admin UI (§6.2 + dashboard)** — Control shadow embedded in learned-condition report; static/random control sanity checks; comparative deltas; Reports page with list, viewer, and comparison table.
+16. ~~**Experiment Report — Control Shadow + Admin UI (§6.2 + dashboard)** — Control shadow embedded in learned-condition report; static/random control sanity checks; comparative deltas; Reports page with list, viewer, and comparison table.~~ ✅ COMPLETE

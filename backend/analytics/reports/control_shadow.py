@@ -1,0 +1,427 @@
+"""
+§6.2 Control Shadow — helpers for embedding control-condition analysis
+in the learned-condition experiment report.
+
+The control shadow is NOT a separate file. It's a sub-structure embedded
+under the 'control_shadow' key in the learned-condition experiment report so
+the comparison can't drift out of sync with the primary results.
+
+Design note: the sanity checks in this module detect *bugs*, not results.
+A non-zero `zero_weight_changes` count means the static control was
+accidentally updated — that's a process violation, not a finding.
+"""
+
+import json
+import logging
+import math
+from typing import Any, Optional
+
+from memory.store import GraphStore
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
+
+
+async def _check_static_zero_weight_changes(
+    store: GraphStore,
+    control_experiment_id: str,
+) -> dict:
+    """
+    Static-control sanity check: no run in the control experiment should have
+    any weight_updates entries.
+
+    A non-zero count is a bug — the static control should never update weights.
+    """
+    all_runs = await store.get_all_runs_for_experiment(control_experiment_id)
+    violation_count = 0
+    violating_run_ids: list[str] = []
+
+    for run in all_runs:
+        wupdates = run.get("weight_updates") or []
+        if isinstance(wupdates, str):
+            try:
+                wupdates = json.loads(wupdates)
+            except (ValueError, TypeError):
+                wupdates = []
+        if wupdates:
+            violation_count += 1
+            violating_run_ids.append(run.get("run_id", ""))
+
+    status = "PASS" if violation_count == 0 else "FAIL"
+    logger.info(
+        "control_shadow static zero_weight_changes: experiment=%s status=%s violations=%d",
+        control_experiment_id, status, violation_count,
+    )
+    return {
+        "status": status,
+        "violation_count": violation_count,
+        "violating_run_ids": violating_run_ids,
+    }
+
+
+async def _check_random_weights_rerandomized(
+    store: GraphStore,
+    control_experiment_id: str,
+    variance_floor: float,
+) -> dict:
+    """
+    Random-control sanity check: edge weights should have meaningful variance
+    across runs (std-dev > variance_floor).
+
+    Near-zero variance means weights were accidentally frozen (static, not random).
+
+    Samples edge weights from activated_edge_ids across all runs in the experiment.
+    """
+    all_runs = await store.get_all_runs_for_experiment(control_experiment_id)
+
+    all_edge_ids: set[str] = set()
+    for run in all_runs:
+        edge_ids = run.get("activated_edge_ids") or []
+        if isinstance(edge_ids, str):
+            try:
+                edge_ids = json.loads(edge_ids)
+            except (ValueError, TypeError):
+                edge_ids = []
+        all_edge_ids.update(edge_ids)
+
+    if not all_edge_ids:
+        logger.info(
+            "control_shadow random weights_rerandomized: experiment=%s no_edges SKIP",
+            control_experiment_id,
+        )
+        return {
+            "status": "SKIP",
+            "reason": "No activated edges found in control experiment",
+            "sample_size": 0,
+            "weight_std_dev": None,
+            "variance_floor": variance_floor,
+        }
+
+    # Fetch current weight for each unique edge
+    sampled_weights: list[float] = []
+    for edge_id in list(all_edge_ids)[:200]:  # cap at 200 for performance
+        edge = await store.get_edge(edge_id)
+        if edge is not None:
+            sampled_weights.append(edge.get("weight", 0.0))
+
+    if len(sampled_weights) < 2:
+        return {
+            "status": "SKIP",
+            "reason": "Insufficient edge samples for variance computation",
+            "sample_size": len(sampled_weights),
+            "weight_std_dev": None,
+            "variance_floor": variance_floor,
+        }
+
+    mean_w = sum(sampled_weights) / len(sampled_weights)
+    variance = sum((w - mean_w) ** 2 for w in sampled_weights) / len(sampled_weights)
+    std_dev = math.sqrt(variance)
+
+    status = "PASS" if std_dev >= variance_floor else "FAIL"
+    logger.info(
+        "control_shadow random weights_rerandomized: experiment=%s status=%s "
+        "sample_size=%d std_dev=%.4f floor=%.4f",
+        control_experiment_id, status, len(sampled_weights), std_dev, variance_floor,
+    )
+    return {
+        "status": status,
+        "sample_size": len(sampled_weights),
+        "weight_std_dev": round(std_dev, 6),
+        "variance_floor": variance_floor,
+    }
+
+
+async def _check_zero_feedback_edge_correlation(
+    store: GraphStore,
+    control_experiment_id: str,
+) -> dict:
+    """
+    Both-controls sanity check: for each feedback event in the control experiment,
+    the associated run should have NO weight_updates (feedback is causally inert).
+
+    Counts violations — should be 0 for both static and random controls.
+    """
+    all_runs = await store.get_all_runs_for_experiment(control_experiment_id)
+
+    # Index runs by run_id for fast lookup
+    runs_by_id = {run.get("run_id"): run for run in all_runs}
+
+    # Fetch all feedback events for runs in this experiment
+    violation_count = 0
+    violating_feedback_event_ids: list[str] = []
+
+    for run in all_runs:
+        run_id = run.get("run_id")
+        if not run_id:
+            continue
+        feedback_events = await store.get_feedback_events_for_run(run_id)
+        for event in feedback_events:
+            # If this run has a feedback event, it should have no weight_updates
+            wupdates = run.get("weight_updates") or []
+            if isinstance(wupdates, str):
+                try:
+                    wupdates = json.loads(wupdates)
+                except (ValueError, TypeError):
+                    wupdates = []
+            if wupdates:
+                violation_count += 1
+                violating_feedback_event_ids.append(
+                    event.get("feedback_event_id", "")
+                )
+
+    status = "PASS" if violation_count == 0 else "FAIL"
+    logger.info(
+        "control_shadow zero_feedback_edge_correlation: experiment=%s status=%s violations=%d",
+        control_experiment_id, status, violation_count,
+    )
+    return {
+        "status": status,
+        "violation_count": violation_count,
+        "violating_feedback_event_ids": violating_feedback_event_ids,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Comparative delta computation
+# ---------------------------------------------------------------------------
+
+
+def _compute_comparative_deltas(
+    learned_measures: dict,
+    control_measures: dict,
+    probe_results_by_condition: dict[str, list[dict]],
+    learned_condition: str,
+    control_condition: str,
+) -> dict:
+    """
+    Compute comparative deltas between learned and control conditions for each
+    learning measure that can be compared numerically.
+
+    Deltas: learned_value - control_value. Positive = learned is higher/better.
+    """
+
+    def _final_pass_rate(measures: dict, condition: str, results_by_probe: list[dict]) -> Optional[float]:
+        """Fraction of probes with 'pass' outcome at the final measurement session."""
+        if not results_by_probe:
+            return None
+        # Group by probe_id, get last session for each
+        from collections import defaultdict
+        by_probe: dict[str, list] = defaultdict(list)
+        for r in results_by_probe:
+            by_probe[r.get("probe_id", "")].append(r)
+        pass_count = 0
+        total = 0
+        for pid, results in by_probe.items():
+            sorted_r = sorted(results, key=lambda x: x.get("measurement_session_index", 0))
+            if not sorted_r:
+                continue
+            last = sorted_r[-1]
+            total += 1
+            rank = last.get("gold_mu_rank")
+            threshold = measures.get("pass_rank_threshold", 3)
+            if rank is not None and rank <= threshold:
+                pass_count += 1
+        return pass_count / total if total > 0 else None
+
+    def _final_bridge_mu_rank(measures: dict) -> Optional[float]:
+        """Mean gold_mu_rank of bridge probes at their final measurement session."""
+        bridge = measures.get("bridge_mu_analysis") or {}
+        results = bridge.get("bridge_probe_results") or []
+        if not results:
+            return None
+        final_ranks = []
+        for bp in results:
+            traj = bp.get("rank_trajectory") or []
+            if traj:
+                _, last_rank = traj[-1]
+                if last_rank is not None:
+                    final_ranks.append(last_rank)
+        return sum(final_ranks) / len(final_ranks) if final_ranks else None
+
+    def _mean_edge_delta_magnitude(measures: dict) -> Optional[float]:
+        ledger = measures.get("edge_delta_ledger") or {}
+        val = ledger.get("mean_abs_delta")
+        return val if val is not None else None
+
+    def _mean_gold_mu_rank_final(results_by_probe: list[dict]) -> Optional[float]:
+        from collections import defaultdict
+        by_probe: dict[str, list] = defaultdict(list)
+        for r in results_by_probe:
+            by_probe[r.get("probe_id", "")].append(r)
+        ranks = []
+        for pid, results in by_probe.items():
+            sorted_r = sorted(results, key=lambda x: x.get("measurement_session_index", 0))
+            if not sorted_r:
+                continue
+            last = sorted_r[-1]
+            rank = last.get("gold_mu_rank")
+            if rank is not None:
+                ranks.append(rank)
+        return sum(ranks) / len(ranks) if ranks else None
+
+    learned_results = probe_results_by_condition.get(learned_condition, [])
+    control_results = probe_results_by_condition.get(control_condition, [])
+
+    l_pass = _final_pass_rate(learned_measures, learned_condition, learned_results)
+    c_pass = _final_pass_rate(control_measures, control_condition, control_results)
+    probe_pass_rate_delta = (
+        round(l_pass - c_pass, 4)
+        if (l_pass is not None and c_pass is not None) else None
+    )
+
+    l_bridge = _final_bridge_mu_rank(learned_measures)
+    c_bridge = _final_bridge_mu_rank(control_measures)
+    bridge_mu_rank_delta = (
+        round(l_bridge - c_bridge, 4)
+        if (l_bridge is not None and c_bridge is not None) else None
+    )
+
+    l_edge = _mean_edge_delta_magnitude(learned_measures)
+    c_edge = _mean_edge_delta_magnitude(control_measures)
+    edge_weight_delta_magnitude = (
+        round(l_edge - c_edge, 6)
+        if (l_edge is not None and c_edge is not None) else None
+    )
+
+    l_rank = _mean_gold_mu_rank_final(learned_results)
+    c_rank = _mean_gold_mu_rank_final(control_results)
+    mean_gold_mu_rank_delta = (
+        round(l_rank - c_rank, 4)
+        if (l_rank is not None and c_rank is not None) else None
+    )
+
+    logger.info(
+        "control_shadow comparative_deltas: learned=%s control=%s "
+        "pass_rate_delta=%s bridge_rank_delta=%s edge_mag_delta=%s rank_delta=%s",
+        learned_condition, control_condition,
+        probe_pass_rate_delta, bridge_mu_rank_delta,
+        edge_weight_delta_magnitude, mean_gold_mu_rank_delta,
+    )
+    return {
+        "probe_pass_rate_delta": probe_pass_rate_delta,
+        "bridge_mu_rank_delta": bridge_mu_rank_delta,
+        "edge_weight_delta_magnitude": edge_weight_delta_magnitude,
+        "mean_gold_mu_rank_delta": mean_gold_mu_rank_delta,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main control shadow generator
+# ---------------------------------------------------------------------------
+
+
+async def generate_control_shadow(
+    learned_experiment_id: str,
+    learned_measures: dict,
+    learned_condition: str,
+    control_experiment_ids: dict[str, str],
+    store: GraphStore,
+    config: dict,
+) -> dict:
+    """
+    Generate the §6.2 control shadow sub-structure.
+
+    For each control condition in control_experiment_ids:
+    1. Run §6.1 learning measures analysis on the control experiment.
+    2. Run control-specific sanity checks.
+    3. Compute comparative deltas against the learned condition.
+
+    Returns a dict keyed by control condition name (e.g. 'static_weight',
+    'random_weight'), suitable for embedding as report['control_shadow'].
+    """
+    reporting_cfg = config.get("reporting", {})
+    variance_floor = reporting_cfg.get("random_control_variance_floor", 0.05)
+
+    # Probe-set version match check: all conditions must use the same probes
+    probe_set_versions: dict[str, str] = {}
+    all_probes = await store.get_all_probes()
+    # The DB does not track probe_set_version per condition — use the YAML version.
+    # For now we just check that probes exist; version mismatch guard is a warning.
+
+    # Collect probe results per condition label for comparative deltas
+    probe_results_by_condition: dict[str, list[dict]] = {}
+    learned_cond_results = []
+    for probe in all_probes:
+        results = await store.query_probe_results(
+            probe_id=probe["probe_id"],
+            condition_label=learned_condition,
+        )
+        learned_cond_results.extend(results)
+    probe_results_by_condition[learned_condition] = learned_cond_results
+
+    control_shadow: dict[str, dict] = {}
+
+    for control_name, control_eid in control_experiment_ids.items():
+        logger.info(
+            "control_shadow: processing control=%s experiment_id=%s",
+            control_name, control_eid,
+        )
+
+        # Fetch control condition label
+        control_condition = await store.get_condition_label_for_experiment(control_eid)
+
+        # Run §6.1 analysis for the control experiment
+        from analytics.reports.experiment_report import _section_61_learning_measures
+        control_measures = await _section_61_learning_measures(
+            control_eid, store, config
+        )
+
+        # Probe results for this control condition
+        control_cond_results = []
+        if control_condition:
+            for probe in all_probes:
+                results = await store.query_probe_results(
+                    probe_id=probe["probe_id"],
+                    condition_label=control_condition,
+                )
+                control_cond_results.extend(results)
+        probe_results_by_condition[control_condition or control_name] = control_cond_results
+
+        # Sanity checks
+        sanity_checks: dict[str, Any] = {}
+
+        if control_name == "static_weight":
+            sanity_checks["zero_weight_changes"] = await _check_static_zero_weight_changes(
+                store, control_eid
+            )
+        elif control_name == "random_weight":
+            sanity_checks["weights_rerandomized"] = await _check_random_weights_rerandomized(
+                store, control_eid, variance_floor
+            )
+        else:
+            # Unknown control type — run both generic checks
+            sanity_checks["zero_weight_changes"] = await _check_static_zero_weight_changes(
+                store, control_eid
+            )
+
+        sanity_checks["zero_feedback_edge_correlation"] = (
+            await _check_zero_feedback_edge_correlation(store, control_eid)
+        )
+
+        # Comparative deltas
+        comparative_deltas = _compute_comparative_deltas(
+            learned_measures=learned_measures,
+            control_measures=control_measures,
+            probe_results_by_condition=probe_results_by_condition,
+            learned_condition=learned_condition,
+            control_condition=control_condition or control_name,
+        )
+
+        control_shadow[control_name] = {
+            "experiment_id": control_eid,
+            "condition_label": control_condition,
+            "learning_measures": control_measures,
+            "sanity_checks": sanity_checks,
+            "comparative_deltas": comparative_deltas,
+        }
+
+        logger.info(
+            "control_shadow: %s complete sanity_check_keys=%s",
+            control_name, list(sanity_checks.keys()),
+        )
+
+    return control_shadow

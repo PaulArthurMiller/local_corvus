@@ -270,6 +270,7 @@ async def generate_series_report_endpoint(body: GenerateSeriesReportRequest):
 
 class GenerateExperimentReportRequest(BaseModel):
     experiment_id: str
+    control_experiment_ids: Optional[dict] = None
 
 
 @router.post("/reports/generate-experiment")
@@ -277,20 +278,27 @@ async def generate_experiment_report_endpoint(body: GenerateExperimentReportRequ
     """
     Generate an Experiment Report for the given experiment_id.
 
-    Covers §5 aggregation across all series, §6.3 data-integrity checks, and
-    §6.4 statistical caveat. §6.1 (learning measures) and §6.2 (control shadow)
-    are null placeholder keys until Milestones 15 and 16 are built.
+    Covers §5 aggregation across all series, §6.3 data-integrity checks, §6.4
+    statistical caveat, §6.1 learning measures, and (when control_experiment_ids
+    is provided) §6.2 control shadow.
+
+    control_experiment_ids: optional dict mapping control condition name to
+    experiment_id, e.g. {"static_weight": "exp-static-2026-07-10",
+    "random_weight": "exp-random-2026-07-10"}.
 
     Writes JSON + Markdown to /app/memory/reports/, registers the paths in
     generated_reports, and returns the report_id plus file paths.
     """
     logger.info(
-        "admin/reports/generate-experiment: experiment_id=%s", body.experiment_id
+        "admin/reports/generate-experiment: experiment_id=%s control_ids=%s",
+        body.experiment_id,
+        list(body.control_experiment_ids.keys()) if body.control_experiment_ids else None,
     )
     try:
         report = await generate_experiment_report(
             experiment_id=body.experiment_id,
             store=graph_store,
+            control_experiment_ids=body.control_experiment_ids or None,
         )
         json_path, md_path = await write_experiment_report(report)
     except Exception as exc:

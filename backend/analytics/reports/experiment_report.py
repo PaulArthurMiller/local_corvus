@@ -1014,6 +1014,7 @@ async def _section_61_learning_measures(
 async def generate_experiment_report(
     experiment_id: str,
     store: GraphStore,
+    control_experiment_ids: Optional[dict[str, str]] = None,
 ) -> dict:
     """
     Generate an Experiment Report for the given experiment_id.
@@ -1022,15 +1023,16 @@ async def generate_experiment_report(
     - §5 aggregated across all series in the experiment
     - §6.3 data-integrity / confound checks
     - §6.4 statistical caveat (static text embedded in Markdown)
-    - §6.1 / §6.2 placeholder keys (null) for Milestones 15 and 16
+    - §6.1 learning measures
+    - §6.2 control shadow (when control_experiment_ids is provided)
 
     Returns the report as a dict (caller writes JSON + Markdown to disk).
     """
     config = _load_config()
     condition_label = config.get("experiment", {}).get("condition_label")
     logger.info(
-        "experiment_report: starting generation experiment_id=%s condition=%s",
-        experiment_id, condition_label,
+        "experiment_report: starting generation experiment_id=%s condition=%s control_ids=%s",
+        experiment_id, condition_label, list(control_experiment_ids.keys()) if control_experiment_ids else None,
     )
 
     # Enumerate all series in this experiment
@@ -1072,6 +1074,23 @@ async def generate_experiment_report(
     # §6.1 learning measures
     learning_measures = await _section_61_learning_measures(experiment_id, store, config)
 
+    # §6.2 control shadow (optional — only when control_experiment_ids is provided)
+    control_shadow = None
+    if control_experiment_ids:
+        from analytics.reports.control_shadow import generate_control_shadow
+        control_shadow = await generate_control_shadow(
+            learned_experiment_id=experiment_id,
+            learned_measures=learning_measures,
+            learned_condition=condition_label,
+            control_experiment_ids=control_experiment_ids,
+            store=store,
+            config=config,
+        )
+        logger.info(
+            "experiment_report: control_shadow computed for %d conditions",
+            len(control_shadow),
+        )
+
     report = {
         "report_id": str(uuid.uuid4()),
         "report_type": "experiment",
@@ -1081,7 +1100,7 @@ async def generate_experiment_report(
         "series_summary": series_summary,
         "integrity_checks": integrity_checks,
         "learning_measures": learning_measures,
-        "control_shadow": None,       # filled by Milestone 16
+        "control_shadow": control_shadow,
     }
 
     logger.info("experiment_report: generation complete report_id=%s", report["report_id"])

@@ -2093,7 +2093,7 @@ The "Generate New..." button opens a small form: select `experiment_id`, optiona
 ## Status
 
 ```
-Current milestone: 15 — Experiment Report Learning Measures — COMPLETE
+Current milestone: 16 — Experiment Report Control Shadow + Admin UI — COMPLETE
 Last updated: 2026-06-27
 ```
 

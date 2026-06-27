@@ -342,3 +342,12 @@ Next step: Review PR, then run the three-condition experiment (learning / static
 14. ~~**Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.~~ ✅ COMPLETE
 15. ~~**Experiment Report — Learning Measures (§6.1)** — State-transition detection (fail→pass, pass→fail, flat); bridge-MU rank trajectory; cross-cluster transfer candidates; edge delta ledger with orphan-update check; saturation / runaway-reinforcement flags.~~ ✅ COMPLETE
 16. ~~**Experiment Report — Control Shadow + Admin UI (§6.2 + dashboard)** — Control shadow embedded in learned-condition report; static/random control sanity checks; comparative deltas; Reports page with list, viewer, and comparison table.~~ ✅ COMPLETE
+
+- 2026-06-27: /smoketest — Milestone 17 Phase 1 checks, 2 bugs found and fixed
+  - Bugs found: 2
+  - Bugs fixed: 2
+  - Branch: fix/smoketest-2026-06-27
+  - PR: https://github.com/PaulArthurMiller/local_corvus/pull/22
+  - Fix 1: Python 3.12 strict `executescript()` blocked M12 migration — `_INIT_SQL` contained `CREATE INDEX idx_analytics_series ON analytics(series_id)` which fails on pre-M12 DBs (still have `session_id`). Python 3.12 made executescript raise on first failing statement, aborting `_open_db()` before `_migrate_db()` could run the RENAME COLUMN. Every admin endpoint returned 500 "no such column: series_id". Fixed by removing the index from `_INIT_SQL` and creating it in `_migrate_db()` outside the RENAME COLUMN try/except.
+  - Fix 2: `memory/workspace/` and `memory/reports/` were missing from `.gitignore` — runtime files created by the file tool and report generator were being tracked by git.
+  - Phase 1 status: All endpoints pass (/health, /ollama-health, all /admin/* tabs). Full pipeline verified: chat → tool use → feedback → weight updates. 315 tests passing.

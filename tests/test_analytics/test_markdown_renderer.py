@@ -1,0 +1,231 @@
+"""
+Tests for analytics/reports/markdown_renderer.py.
+
+Covers:
+  - All 8 section headers appear in the Markdown output
+  - render_series_report_markdown returns a non-empty string
+  - Each section function produces non-empty Markdown
+  - Section with empty data renders gracefully (no exception)
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
+
+from analytics.reports.markdown_renderer import (
+    render_series_report_markdown,
+    _render_s51,
+    _render_s52,
+    _render_s53,
+    _render_s54,
+    _render_s55,
+    _render_s56,
+    _render_s57,
+    _render_s58,
+)
+
+SECTION_HEADERS = [
+    "§5.1 Failure Summary",
+    "§5.2 Retrieval Trace Digest",
+    "§5.3 Intra-Series vs. Cross-Series Retrieval Rate",
+    "§5.4 Cross-Series Edges",
+    "§5.5 Edge Weight Deltas",
+    "§5.6 Probe Integrity Check",
+    "§5.7 Mode-3 Trigger Count",
+    "§5.8 num_ctx Pressure",
+]
+
+
+def _make_report() -> dict:
+    """Minimal but structurally valid report dict for rendering tests."""
+    return {
+        "report_id": "report-abc123",
+        "report_type": "series",
+        "experiment_id": "exp-2026-07-01",
+        "series_id": "series-1",
+        "generated_at": "2026-07-01T12:00:00+00:00",
+        "run_count": 3,
+        "sections": {
+            "s5_1_failure_summary": {
+                "failed_turn_count": 1,
+                "failed_turns": [
+                    {"run_id": "run-abc", "turn_index": 2, "failure_reason": "token_limit_exhausted"}
+                ],
+                "ghost_mu_count": 0,
+                "ghost_incidents": [],
+            },
+            "s5_2_retrieval_trace_digest": {
+                "turn_count": 3,
+                "traces": [
+                    {
+                        "turn_index": 1,
+                        "run_id": "run-001",
+                        "bm25_candidate_count": 5,
+                        "entry_point_mu_ids_short": ["abc12345", "def67890"],
+                        "traversal_hop_count": 1,
+                        "retrieved_mu_count": 2,
+                        "retrieved_mu_ids_short": ["abc12345", "def67890"],
+                    }
+                ],
+            },
+            "s5_3_retrieval_rate_classification": {
+                "total_retrieved": 10,
+                "intra_series_count": 7,
+                "seed_fixture_count": 2,
+                "cross_series_count": 1,
+                "unknown_count": 0,
+                "intra_series_rate": 0.7,
+                "per_turn": [
+                    {
+                        "turn_index": 1,
+                        "run_id": "run-001",
+                        "total_retrieved": 10,
+                        "intra_series": 7,
+                        "seed_fixture": 2,
+                        "cross_series": 1,
+                        "unknown": 0,
+                    }
+                ],
+            },
+            "s5_4_cross_series_edges": {
+                "cross_series_edge_count": 2,
+                "edges": [
+                    {
+                        "edge_id": "edge-abc123",
+                        "weight": 0.6,
+                        "source_series": "series-1",
+                        "source_mu": "mu-src",
+                        "target_series": "series-2",
+                        "target_mu": "mu-tgt",
+                    }
+                ],
+            },
+            "s5_5_edge_weight_deltas": {
+                "activated_edge_count": 3,
+                "deltas": [
+                    {
+                        "edge_id": "edge-001",
+                        "start_weight": 0.5,
+                        "end_weight": 0.7,
+                        "delta": 0.2,
+                        "traversal_count_total": 4,
+                        "update_count_in_series": 2,
+                    }
+                ],
+                "zero_delta_high_traversal_flags": [],
+            },
+            "s5_6_probe_integrity": {
+                "status": "PASS",
+                "violation_count": 0,
+                "violations": [],
+            },
+            "s5_7_mode3_trigger_count": {
+                "mode3_mu_count": 2,
+                "min_expected_length": 100,
+                "anomaly_count": 0,
+                "anomalies": [],
+            },
+            "s5_8_num_ctx_pressure": {
+                "context_window_tokens": 8192,
+                "pressure_threshold_ratio": 0.8,
+                "series_mean_retrieved_count": 2.5,
+                "pressure_turn_count": 0,
+                "pressure_turns": [],
+            },
+        },
+    }
+
+
+def test_all_section_headers_present():
+    """render_series_report_markdown includes all 8 §5.N headers."""
+    report = _make_report()
+    md = render_series_report_markdown(report)
+    print(f"Markdown length: {len(md)} chars")
+    for header in SECTION_HEADERS:
+        assert header in md, f"Missing section header: {header}"
+
+
+def test_render_returns_nonempty_string():
+    """render_series_report_markdown returns a non-empty string."""
+    report = _make_report()
+    md = render_series_report_markdown(report)
+    assert isinstance(md, str)
+    assert len(md) > 0
+
+
+def test_report_metadata_in_header():
+    """Experiment ID, series ID, and run count appear in the rendered document."""
+    report = _make_report()
+    md = render_series_report_markdown(report)
+    assert "exp-2026-07-01" in md
+    assert "series-1" in md
+    assert "3" in md  # run_count
+
+
+def test_each_section_function_nonempty():
+    """Each individual section render function produces non-empty Markdown."""
+    assert len(_render_s51({})) > 0
+    assert len(_render_s52({})) > 0
+    assert len(_render_s53({})) > 0
+    assert len(_render_s54({})) > 0
+    assert len(_render_s55({})) > 0
+    assert len(_render_s56({})) > 0
+    assert len(_render_s57({})) > 0
+    assert len(_render_s58({})) > 0
+
+
+def test_render_with_empty_sections_no_exception():
+    """render_series_report_markdown handles an empty sections dict without raising."""
+    report = {
+        "report_id": "r1",
+        "report_type": "series",
+        "experiment_id": "exp",
+        "series_id": "series",
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "run_count": 0,
+        "sections": {},
+    }
+    md = render_series_report_markdown(report)
+    print(f"Empty-sections MD length: {len(md)}")
+    assert isinstance(md, str)
+    assert len(md) > 0
+
+
+def test_probe_integrity_pass_shows_correct_status():
+    """PASS status renders clearly in the probe integrity section."""
+    section = {"status": "PASS", "violation_count": 0, "violations": []}
+    md = _render_s56(section)
+    assert "PASS" in md
+    assert "0" in md
+
+
+def test_probe_integrity_hard_fail_shows_status():
+    """HARD FAIL status and violations are visible in the rendered section."""
+    section = {
+        "status": "HARD_FAIL",
+        "violation_count": 2,
+        "violations": [
+            {"feedback_event_id": "fe-abc123456789", "run_id": "run-abc123456789", "verdict": "thumbs_up", "turn_index": 3},
+        ],
+    }
+    md = _render_s56(section)
+    print(f"Hard fail section:\n{md}")
+    assert "HARD FAIL" in md
+    assert "thumbs_up" in md
+
+
+def test_failure_summary_with_ghost_mus():
+    """Ghost-MU incidents are visible in §5.1 when present."""
+    section = {
+        "failed_turn_count": 1,
+        "failed_turns": [{"run_id": "run-abc", "turn_index": 1, "failure_reason": "empty_output"}],
+        "ghost_mu_count": 1,
+        "ghost_incidents": [
+            {"ghost_mu_id": "mu-ghost-abc", "appearing_in_run_id": "run-def", "appearing_at_turn_index": 3}
+        ],
+    }
+    md = _render_s51(section)
+    print(f"Ghost MU section:\n{md}")
+    assert "Ghost-MU" in md
+    assert "empty_output" in md

@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Building  
-Current milestone: 13 — Series Report Generator — COMPLETE  
-Next step: Review PR, then build Milestone 14 (Experiment Report Non-Learning Rollup).
+Current milestone: 14 — Experiment Report Non-Learning Rollup — COMPLETE  
+Next step: Review PR, then build Milestone 15 (Experiment Report — Learning Measures §6.1).
 
 ## Session log
 
@@ -248,6 +248,22 @@ Next step: Review PR, then build Milestone 14 (Experiment Report Non-Learning Ro
     - Markdown renderer caps table rows at 50 (§5.4) and 30 (§5.5) with a "…and N more" note for large datasets
     - `generated_reports` table uses CREATE TABLE IF NOT EXISTS — no ALTER TABLE migration needed (new table, not schema change to existing)
 
+- 2026-06-27: /build — Milestone 14 complete
+  - Created: `backend/analytics/reports/experiment_report.py` (§5 aggregation across series, §6.3 integrity checks, §6.4 statistical caveat, §6.1/§6.2 null placeholders)
+  - Modified: `backend/analytics/reports/markdown_renderer.py` (added `render_experiment_report_markdown()`)
+  - Modified: `backend/api/admin.py` (added `POST /admin/reports/generate-experiment` endpoint)
+  - Modified: `backend/memory/store.py` (6 new M14 query methods: `get_all_series_for_experiment`, `get_earliest_run_timestamp_for_experiment`, `count_pre_experiment_foreign_mus`, `get_distinct_seed_series_ids`, `get_probe_session_indices_for_condition`, `get_condition_label_for_experiment`)
+  - Created: `tests/test_analytics/test_experiment_report.py` (13 new tests)
+  - Tests: 13 new, 269 total — all passing
+  - Branch: milestone-14-experiment-report-nonlearning
+  - Key decisions:
+    - §5 aggregation re-queries the DB directly per-series rather than reading from prior series report files — always current, even for mid-experiment rollups
+    - Outlier series in §5.3 flagged when intra-series rate differs from mean by >15 percentage points (configurable threshold)
+    - §6.3 probe replay check links to experiment via `condition_label` (probe_results table has no experiment_id FK)
+    - Graph-wipe check excludes NULL experiment_id MUs (pre-M12) — they're "unattributed", not foreign
+    - `STATISTICAL_CAVEAT_TEXT` exported as a module-level constant so tests can assert verbatim inclusion
+    - `learning_measures` and `control_shadow` keys present as `null` in JSON schema — stable for M15/M16 to fill in
+
 - 2026-06-26: /build — Milestone 12 complete
   - Modified: `config.yaml` (adds `experiment.experiment_id: ""`)
   - Modified: `backend/gate/um.py` (`session_id` → `series_id` on UniversalMessage + create_um(); added `experiment_id: Optional[str]`)
@@ -286,7 +302,6 @@ Next step: Review PR, then build Milestone 14 (Experiment Report Non-Learning Ro
 11. ~~**Empty-Response Failure Detection** — Detect `finish_reason=length` + empty content; tag MU source_type with cause; thread `failure_reason` field through InteractionResult → ChatResponse → UI; `failure_reason` column in analytics; Admin UI failure indicator~~ ✅ COMPLETE
 12. ~~**Series ID Prerequisite Gate** — Stamp `series_id` + `experiment_id` + `cluster_id` on `memory_units`; rename `session_id` → `series_id` project-wide; add `EXPERIMENT_ID` env var. Gates all reporting milestones.~~ ✅ COMPLETE
 13. ~~**Series Report Generator (§5)** — All 8 series-report sections (failures, retrieval digest, intra/cross rate, cross-series edges, weight deltas, probe integrity, Mode-3 count, num_ctx pressure); JSON + Markdown output to `/app/memory/reports/`; admin endpoints.~~ ✅ COMPLETE
-14. **Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.
-14. **Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.
+14. ~~**Experiment Report — Non-Learning Rollup (§5 aggregation + §6.3 + §6.4)** — §5 rolled up across all series; data-integrity / confound checks (seed provenance, graph-wipe, probe-replay-index normalization); statistical caveat text in template.~~ ✅ COMPLETE
 15. **Experiment Report — Learning Measures (§6.1)** — State-transition detection (fail→pass, pass→fail, flat); bridge-MU rank trajectory; cross-cluster transfer candidates; edge delta ledger with orphan-update check; saturation / runaway-reinforcement flags.
 16. **Experiment Report — Control Shadow + Admin UI (§6.2 + dashboard)** — Control shadow embedded in learned-condition report; static/random control sanity checks; comparative deltas; Reports page with list, viewer, and comparison table.

@@ -3,9 +3,12 @@ Admin API router — read-only endpoints for the Admin UI.
 
 GET  /admin/runs                           — paginated run log
 GET  /admin/graph                          — all MUs and edges (for memory inspector)
+GET  /admin/graph/stats                   — MU count summary with cluster_id coverage
 GET  /admin/config                         — current hyperparameter registry
+POST /admin/seed-graph                    — register a seed fixture and load MUs into the graph
 POST /admin/run-probe                      — run a probe through retrieval (read-only; no MU creation)
 GET  /admin/probe-results                  — query probe results with optional filters
+POST /admin/probes/snapshot               — take a named battery snapshot of the current graph state
 POST /admin/reports/generate-series       — generate §5 series report
 POST /admin/reports/generate-experiment   — generate §5 aggregation + §6.3 + §6.4 experiment report
 GET  /admin/reports                       — list all generated reports
@@ -31,7 +34,9 @@ from analytics.probes import ProbeResult, compute_probe_result, load_probe_set, 
 from analytics.reports.experiment_report import generate_experiment_report, write_experiment_report
 from analytics.reports.series_report import generate_series_report, write_series_report
 from analytics.run_log import query_runs
+from analytics.seed_fixture import register_fixture
 from memory.retrieval import retrieve
+from memory.snapshot import take_battery_snapshot
 from memory.store import store as graph_store
 
 logger = logging.getLogger(__name__)
@@ -86,6 +91,111 @@ async def get_graph():
         "edge_count": len(edges),
         "memory_units": mus,
         "edges": edges,
+    }
+
+
+@router.get("/graph/stats")
+async def get_graph_stats():
+    """
+    Return a summary of graph coverage: total MU count broken down by
+    cluster_id presence. Used in Phase 2 to verify seed MUs have cluster_id.
+    """
+    logger.info("admin/graph/stats: computing MU stats")
+    try:
+        mus = await graph_store.get_all_mus()
+    except Exception as exc:
+        logger.error("admin/graph/stats: failed — %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    total = len(mus)
+    with_cluster = sum(1 for m in mus if m.get("cluster_id"))
+    without_cluster = total - with_cluster
+    cluster_distribution: dict[str, int] = {}
+    for m in mus:
+        cid = m.get("cluster_id") or "NULL"
+        cluster_distribution[cid] = cluster_distribution.get(cid, 0) + 1
+
+    logger.info(
+        "admin/graph/stats: total=%d with_cluster_id=%d without_cluster_id=%d",
+        total, with_cluster, without_cluster,
+    )
+    return {
+        "mu_count": total,
+        "mu_with_cluster_id": with_cluster,
+        "mu_without_cluster_id": without_cluster,
+        "cluster_distribution": cluster_distribution,
+    }
+
+
+class SeedGraphRequest(BaseModel):
+    version: str = "v1"
+
+
+@router.post("/seed-graph")
+async def seed_graph(body: SeedGraphRequest):
+    """
+    Register the seed fixture and load its MUs into the graph store.
+
+    The fixture file must exist at seed_fixtures/seed_{version}.json.gz
+    (mounted at /app/seed_fixtures inside Docker). Re-registration is
+    idempotent — existing MUs are silently skipped.
+    """
+    logger.info("admin/seed-graph: registering fixture version=%s", body.version)
+
+    _seed_fixtures_dir = Path(os.getenv("SEED_FIXTURES_PATH", "/app/seed_fixtures"))
+    fixture_path = _seed_fixtures_dir / f"seed_{body.version}.json.gz"
+
+    try:
+        manifest = await register_fixture(fixture_path=fixture_path, version=body.version)
+    except FileNotFoundError as exc:
+        logger.error("admin/seed-graph: fixture not found — %s", exc)
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.error("admin/seed-graph: registration failed — %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    logger.info(
+        "admin/seed-graph: done version=%s mu_count=%d hash=%s",
+        manifest.fixture_version, manifest.mu_count, manifest.manifest_hash[:16],
+    )
+    return manifest.model_dump()
+
+
+class ProbeSnapshotRequest(BaseModel):
+    battery_index: int = 0
+    phase: str = "pre"
+    condition_label: str = "seed"
+
+
+@router.post("/probes/snapshot")
+async def create_probe_snapshot(body: ProbeSnapshotRequest):
+    """
+    Take a named battery snapshot of the current graph state.
+
+    Used before and after each probe measurement battery to bound the
+    graph state. phase should be 'pre' or 'post'. battery_index is the
+    sequential measurement session number (0-based).
+    """
+    logger.info(
+        "admin/probes/snapshot: battery_index=%d phase=%s condition=%s",
+        body.battery_index, body.phase, body.condition_label,
+    )
+    try:
+        filepath = await take_battery_snapshot(
+            battery_index=body.battery_index,
+            phase=body.phase,
+            condition_label=body.condition_label,
+        )
+    except Exception as exc:
+        logger.error("admin/probes/snapshot: failed — %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    logger.info("admin/probes/snapshot: wrote %s", filepath)
+    return {
+        "snapshot_path": filepath,
+        "battery_index": body.battery_index,
+        "phase": body.phase,
+        "condition_label": body.condition_label,
     }
 
 

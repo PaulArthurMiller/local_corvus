@@ -2093,7 +2093,7 @@ The "Generate New..." button opens a small form: select `experiment_id`, optiona
 ## Status
 
 ```
-Current milestone: 14 — Experiment Report Non-Learning Rollup — COMPLETE
+Current milestone: 15 — Experiment Report Learning Measures — COMPLETE
 Last updated: 2026-06-27
 ```
 
@@ -2126,3 +2126,5 @@ Last updated: 2026-06-27
 **Milestone 13:** Complete — branch `milestone-13-series-report-generator`, PR pending merge.
 
 **Milestone 14:** Complete — branch `milestone-14-experiment-report-nonlearning`, PR pending merge.
+
+**Milestone 15:** Complete — branch `milestone-15-experiment-report-learning`, PR pending merge.

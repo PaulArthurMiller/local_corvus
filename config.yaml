@@ -75,3 +75,5 @@ experiment:
 
 reporting:
   mode3_min_expected_length: 100    # §5.7: system MUs shorter than this are flagged as anomalous
+  pass_rank_threshold: 3            # §6.1: gold MU in top-N retrieved counts as a pass
+  saturation_threshold: 0.9         # §6.1: edge weight above this value is flagged as saturation risk

@@ -225,6 +225,169 @@ def _render_s58(section: dict) -> str:
     return "\n".join(lines)
 
 
+def render_experiment_report_markdown(report: dict) -> str:
+    """
+    Render an experiment report dict as a Markdown document.
+
+    Covers §5 aggregation across series, §6.3 integrity checks, and §6.4
+    statistical caveat. Pure function (no I/O).
+    """
+    from analytics.reports.experiment_report import STATISTICAL_CAVEAT_TEXT
+
+    experiment_id = report.get("experiment_id", "unknown")
+    condition_label = report.get("condition_label", "unknown")
+    generated_at = report.get("generated_at", "unknown")
+    ss = report.get("series_summary") or {}
+    ic = report.get("integrity_checks") or {}
+
+    header = (
+        f"# Experiment Report\n\n"
+        f"**Experiment:** `{experiment_id}`  \n"
+        f"**Condition:** `{condition_label}`  \n"
+        f"**Generated:** {generated_at}  \n"
+        f"**Series:** {ss.get('series_count', 0)} | "
+        f"**Total runs:** {ss.get('total_run_count', 0)}\n"
+    )
+
+    # §5 Aggregated Series Summary
+    s51 = ss.get("s5_1_failure_aggregation") or {}
+    s53 = ss.get("s5_3_retrieval_rate_aggregation") or {}
+    s55 = ss.get("s5_5_edge_weight_aggregation") or {}
+    s56 = ss.get("s5_6_probe_integrity_aggregation") or {}
+    s57 = ss.get("s5_7_mode3_aggregation") or {}
+    s58 = ss.get("s5_8_ctx_pressure_aggregation") or {}
+
+    series_section_lines = [
+        "## §5 Series Summary (Aggregated)\n",
+        f"**Series:** {', '.join(ss.get('series_ids') or [])}  \n",
+    ]
+
+    # §5.1
+    series_section_lines += [
+        "### §5.1 Failure Summary\n",
+        f"**Total failed turns:** {s51.get('total_failed_turn_count', 0)}  ",
+        f"**Total ghost-MU incidents:** {s51.get('total_ghost_mu_incidents', 0)}\n",
+        "| series | failed_turns | ghost_mus |",
+        "|---|---|---|",
+    ]
+    for p in s51.get("per_series") or []:
+        series_section_lines.append(
+            f"| {p.get('series_id', '—')} | {p.get('failed_turn_count', 0)} | {p.get('ghost_mu_count', 0)} |"
+        )
+
+    # §5.3
+    outliers = s53.get("outlier_series") or []
+    series_section_lines += [
+        "\n### §5.3 Retrieval Rate\n",
+        f"**Mean intra-series rate:** {s53.get('mean_intra_series_rate', 0.0):.1%}  ",
+        f"**Range:** {s53.get('min_intra_series_rate', 0.0):.1%} – {s53.get('max_intra_series_rate', 0.0):.1%}  ",
+    ]
+    if outliers:
+        series_section_lines.append(f"**⚠ Outlier series (>15% from mean):** {', '.join(outliers)}")
+    series_section_lines += [
+        "\n| series | intra_rate | total_retrieved |",
+        "|---|---|---|",
+    ]
+    for p in s53.get("per_series") or []:
+        series_section_lines.append(
+            f"| {p.get('series_id', '—')} | {p.get('intra_series_rate', 0.0):.1%} | {p.get('total_retrieved', 0)} |"
+        )
+
+    # §5.5
+    series_section_lines += [
+        "\n### §5.5 Edge Weight Deltas\n",
+        f"**Total activated edges:** {s55.get('total_activated_edge_count', 0)}  ",
+        f"**Increased:** {s55.get('edges_increased', 0)} | **Decreased:** {s55.get('edges_decreased', 0)} | **Unchanged:** {s55.get('edges_unchanged', 0)}  ",
+        f"**Mean |delta|:** {s55.get('mean_abs_delta', 0.0):.4f}\n",
+    ]
+
+    # §5.6
+    s56_status = s56.get("status", "UNKNOWN")
+    s56_display = "✅ PASS" if s56_status == "PASS" else "❌ HARD FAIL"
+    series_section_lines += [
+        "### §5.6 Probe Integrity\n",
+        f"**Experiment-level status:** {s56_display}  ",
+        f"**Total violations:** {s56.get('total_violations', 0)}  ",
+    ]
+    if s56.get("hard_fail_series"):
+        series_section_lines.append(
+            f"**HARD FAIL in series:** {', '.join(s56['hard_fail_series'])}"
+        )
+
+    # §5.7
+    series_section_lines += [
+        "\n### §5.7 Mode-3 Triggers\n",
+        f"**Total Mode-3 MUs:** {s57.get('total_mode3_mu_count', 0)}  ",
+    ]
+    if s57.get("increasing_pressure_flag"):
+        series_section_lines.append("**⚠ Increasing Mode-3 pressure detected (later series trigger more summarization)**")
+
+    # §5.8
+    series_section_lines += [
+        "\n### §5.8 Context Pressure\n",
+    ]
+    if s58.get("increasing_pressure_flag"):
+        series_section_lines.append("**⚠ Increasing context pressure detected (growing number of pressure turns)**\n")
+    series_section_lines += [
+        "| series | pressure_turns |",
+        "|---|---|",
+    ]
+    for p in s58.get("per_series") or []:
+        series_section_lines.append(
+            f"| {p.get('series_id', '—')} | {p.get('pressure_turn_count', 0)} |"
+        )
+
+    series_section = "\n".join(series_section_lines)
+
+    # §6.3 Integrity Checks
+    overall = "✅ PASS" if ic.get("overall_pass") else "❌ ISSUES FOUND"
+    sp = ic.get("seed_fixture_provenance") or {}
+    gw = ic.get("graph_wipe_verification") or {}
+    pr = ic.get("probe_replay_index_normalization") or {}
+
+    sp_display = "✅ PASS" if sp.get("status") == "PASS" else ("⏭ SKIP" if sp.get("status") == "SKIP" else "❌ FAIL")
+    gw_display = "✅ PASS" if gw.get("status") == "PASS" else ("⏭ SKIP" if gw.get("status") == "SKIP" else "❌ FAIL")
+    pr_display = "✅ PASS" if pr.get("status") == "PASS" else ("⏭ SKIP" if pr.get("status") == "SKIP" else "❌ FAIL")
+
+    integrity_lines = [
+        "## §6.3 Data-Integrity / Confound Checks\n",
+        f"**Overall:** {overall}\n",
+        "### Seed-Fixture Provenance\n",
+        f"**Status:** {sp_display}  ",
+        f"**Fixture versions found:** {', '.join(sp.get('fixture_versions_found') or []) or '—'}  ",
+        f"**Unregistered versions:** {', '.join(sp.get('unregistered_versions') or []) or '—'}  ",
+        f"**Hash mismatch:** {sp.get('hash_mismatch', False)}\n",
+        "### Graph-Wipe Verification\n",
+        f"**Status:** {gw_display}  ",
+        f"**Pre-experiment foreign MUs:** {gw.get('pre_experiment_foreign_mu_count', 0)}  ",
+        f"**Earliest run timestamp:** {gw.get('earliest_run_timestamp') or '—'}\n",
+        "### Probe-Replay-Index Normalization\n",
+        f"**Status:** {pr_display}  ",
+        f"**Condition:** `{pr.get('condition_label') or '—'}`  ",
+        f"**Session indices found:** {pr.get('session_indices_found') or []}  ",
+        f"**Gaps:** {pr.get('gaps') or 'none'}\n",
+    ]
+    integrity_section = "\n".join(integrity_lines)
+
+    # §6.4 placeholder note for learning measures / control shadow
+    placeholders = (
+        "## §6.1 Learning Measures\n\n"
+        "_Not yet computed — will be populated by Milestone 15._\n\n"
+        "---\n\n"
+        "## §6.2 Control Shadow\n\n"
+        "_Not yet computed — will be populated by Milestone 16._"
+    )
+
+    body_parts = [
+        header,
+        series_section,
+        integrity_section,
+        STATISTICAL_CAVEAT_TEXT,
+        placeholders,
+    ]
+    return "\n\n---\n\n".join(body_parts) + "\n"
+
+
 def render_series_report_markdown(report: dict) -> str:
     """
     Render a series report dict as a Markdown document.

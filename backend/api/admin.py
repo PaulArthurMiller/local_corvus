@@ -1,15 +1,16 @@
 """
 Admin API router — read-only endpoints for the Admin UI.
 
-GET  /admin/runs                        — paginated run log
-GET  /admin/graph                       — all MUs and edges (for memory inspector)
-GET  /admin/config                      — current hyperparameter registry
-POST /admin/run-probe                   — run a probe through retrieval (read-only; no MU creation)
-GET  /admin/probe-results               — query probe results with optional filters
-POST /admin/reports/generate-series    — generate §5 series report
-GET  /admin/reports                    — list all generated reports
-GET  /admin/reports/{report_id}        — return report JSON
-GET  /admin/reports/{report_id}/markdown — return report Markdown
+GET  /admin/runs                           — paginated run log
+GET  /admin/graph                          — all MUs and edges (for memory inspector)
+GET  /admin/config                         — current hyperparameter registry
+POST /admin/run-probe                      — run a probe through retrieval (read-only; no MU creation)
+GET  /admin/probe-results                  — query probe results with optional filters
+POST /admin/reports/generate-series       — generate §5 series report
+POST /admin/reports/generate-experiment   — generate §5 aggregation + §6.3 + §6.4 experiment report
+GET  /admin/reports                       — list all generated reports
+GET  /admin/reports/{report_id}           — return report JSON
+GET  /admin/reports/{report_id}/markdown  — return report Markdown
 
 This is a thin HTTP layer; all data access goes through memory/store.py
 via analytics/run_log.py and analytics/probes.py.
@@ -27,6 +28,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from analytics.probes import ProbeResult, compute_probe_result, load_probe_set, record_probe_result
+from analytics.reports.experiment_report import generate_experiment_report, write_experiment_report
 from analytics.reports.series_report import generate_series_report, write_series_report
 from analytics.run_log import query_runs
 from memory.retrieval import retrieve
@@ -263,6 +265,66 @@ async def generate_series_report_endpoint(body: GenerateSeriesReportRequest):
         "json_path": json_path,
         "md_path": md_path,
         "run_count": report.get("run_count", 0),
+    }
+
+
+class GenerateExperimentReportRequest(BaseModel):
+    experiment_id: str
+
+
+@router.post("/reports/generate-experiment")
+async def generate_experiment_report_endpoint(body: GenerateExperimentReportRequest):
+    """
+    Generate an Experiment Report for the given experiment_id.
+
+    Covers §5 aggregation across all series, §6.3 data-integrity checks, and
+    §6.4 statistical caveat. §6.1 (learning measures) and §6.2 (control shadow)
+    are null placeholder keys until Milestones 15 and 16 are built.
+
+    Writes JSON + Markdown to /app/memory/reports/, registers the paths in
+    generated_reports, and returns the report_id plus file paths.
+    """
+    logger.info(
+        "admin/reports/generate-experiment: experiment_id=%s", body.experiment_id
+    )
+    try:
+        report = await generate_experiment_report(
+            experiment_id=body.experiment_id,
+            store=graph_store,
+        )
+        json_path, md_path = await write_experiment_report(report)
+    except Exception as exc:
+        logger.error("admin/reports/generate-experiment: generation failed — %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    report_record = {
+        "report_id": report["report_id"],
+        "report_type": "experiment",
+        "experiment_id": body.experiment_id,
+        "series_id": None,
+        "generated_at": report["generated_at"],
+        "json_path": json_path,
+        "md_path": md_path,
+    }
+    try:
+        await graph_store.insert_generated_report(report_record)
+    except Exception as exc:
+        logger.error(
+            "admin/reports/generate-experiment: could not register report — %s", exc
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Report generated but not registered: {exc}"
+        )
+
+    logger.info(
+        "admin/reports/generate-experiment: complete report_id=%s json=%s md=%s",
+        report["report_id"], json_path, md_path,
+    )
+    return {
+        "report_id": report["report_id"],
+        "json_path": json_path,
+        "md_path": md_path,
+        "series_count": report.get("series_summary", {}).get("series_count", 0),
     }
 
 

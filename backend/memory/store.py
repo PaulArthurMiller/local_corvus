@@ -1146,6 +1146,140 @@ class GraphStore:
             await db.close()
         return dict(row) if row is not None else None
 
+    # -------------------------------------------------------------------------
+    # M14: Experiment report support queries
+    # -------------------------------------------------------------------------
+
+    async def get_all_series_for_experiment(self, experiment_id: str) -> list[str]:
+        """
+        Return distinct series_ids for an experiment, ordered by earliest turn_index.
+
+        Used by M14 experiment report to iterate over series.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT series_id
+                FROM analytics
+                WHERE experiment_id = ? AND series_id IS NOT NULL
+                GROUP BY series_id
+                ORDER BY MIN(turn_index) ASC
+                """,
+                (experiment_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [row[0] for row in rows]
+
+    async def get_earliest_run_timestamp_for_experiment(
+        self, experiment_id: str
+    ) -> Optional[str]:
+        """
+        Return the earliest run timestamp for an experiment.
+
+        Used by the graph-wipe verification check in §6.3.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT MIN(timestamp) FROM analytics WHERE experiment_id = ?",
+                (experiment_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        return row[0] if row and row[0] is not None else None
+
+    async def count_pre_experiment_foreign_mus(
+        self, experiment_id: str, earliest_timestamp: str
+    ) -> int:
+        """
+        Count MUs from a different experiment that existed before this experiment started.
+
+        A non-zero count indicates a possible incomplete graph wipe before this
+        experiment run. Excludes NULL experiment_id (pre-M12 MUs) and seed-prefixed
+        experiment_ids (excluded by the experiment_id != :eid check, since seed MUs
+        share the same experiment_id). Per §6.3 graph-wipe verification.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT COUNT(*) FROM memory_units
+                WHERE experiment_id IS NOT NULL
+                  AND experiment_id != ?
+                  AND experiment_id NOT LIKE 'seed:%'
+                  AND created_at < ?
+                """,
+                (experiment_id, earliest_timestamp),
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        return row[0] if row else 0
+
+    async def get_distinct_seed_series_ids(self) -> list[str]:
+        """
+        Return all distinct seed series_ids from memory_units (format: 'seed:{version}').
+
+        Used by §6.3 seed-fixture provenance check to enumerate which fixture
+        versions are present in the database.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT DISTINCT series_id FROM memory_units WHERE series_id LIKE 'seed:%'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [row[0] for row in rows]
+
+    async def get_probe_session_indices_for_condition(
+        self, condition_label: str
+    ) -> list[int]:
+        """
+        Return distinct measurement_session_index values for a condition label, sorted ASC.
+
+        Used by §6.3 probe-replay-index normalization check to detect gaps.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT DISTINCT measurement_session_index
+                FROM probe_results
+                WHERE condition_label = ?
+                ORDER BY measurement_session_index ASC
+                """,
+                (condition_label,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [row[0] for row in rows]
+
+    async def get_condition_label_for_experiment(
+        self, experiment_id: str
+    ) -> Optional[str]:
+        """
+        Return the condition_label associated with an experiment (from analytics).
+
+        Used to link probe_results (filtered by condition_label) to the experiment.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT condition_label FROM analytics WHERE experiment_id = ? LIMIT 1",
+                (experiment_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        return row[0] if row else None
+
 
 # Module-level singleton — imported by other modules
 store = GraphStore()

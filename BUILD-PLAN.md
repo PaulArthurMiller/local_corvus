@@ -2090,10 +2090,154 @@ The "Generate New..." button opens a small form: select `experiment_id`, optiona
 
 ---
 
+### Milestone 17 — End-to-End Integration + Hardening
+
+**Why this milestone exists:** Every milestone from M1-M16 built and tested against synthetic fixtures. The platform has never been run for its actual research purpose: a three-condition experiment (learned / static-weight / random-weight) generating real data and a real report suite. Several known risks from prior milestones can only be resolved with real data flowing through the full stack. M17 closes that gap.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│          Three-Condition Experiment Flow                     │
+│                                                             │
+│  Seed Graph ──▶ Probe Snapshot                              │
+│       │                │                                    │
+│       ▼                ▼                                    │
+│  ┌──────────┐   ┌─────────────────────────────────────────┐ │
+│  │  Learned │   │  Probe Battery (same probes, all runs)  │ │
+│  │ Condition│──▶│  Runs at: start / mid / end of series   │ │
+│  │ (M1-M11) │   └─────────────────────────────────────────┘ │
+│  └────┬─────┘                    │                          │
+│       │ weight updates on        │ probe results            │
+│       ▼                          ▼                          │
+│  ┌──────────┐   ┌────────────────────────────────────────┐  │
+│  │  Static  │   │  Analytics DB                          │  │
+│  │  Control │──▶│  run_log / probe_results /             │  │
+│  │ (frozen  │   │  feedback_events / weight_updates      │  │
+│  │ weights) │   └──────────────────┬─────────────────────┘  │
+│  └────┬─────┘                      │                        │
+│       │                            ▼                        │
+│  ┌──────────┐   ┌────────────────────────────────────────┐  │
+│  │  Random  │   │  Report Generators (M13-M16)           │  │
+│  │  Control │──▶│  series_report_{id}.json / .md         │  │
+│  │ (per-run │   │  experiment_report_{id}.json / .md     │  │
+│  │ rerandom)│   │  + control_shadow embedded              │  │
+│  └──────────┘   └──────────────────┬─────────────────────┘  │
+│                                    │                        │
+│                                    ▼                        │
+│                      ┌─────────────────────────┐           │
+│                      │  Admin UI Reports Tab   │           │
+│                      │  comparison table       │           │
+│                      │  Markdown rendering     │           │
+│                      └─────────────────────────┘           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**What it builds:**
+
+**Phase 1 — Environment smoke test:**
+1. Merge all pending PRs (M9–M16 branches) to main in order. Resolve any merge conflicts.
+2. Run `docker-compose up` — all three services (backend, chat UI, admin UI) must reach healthy state.
+3. Run the full test suite: all 218+ existing tests must pass before any experiment begins.
+4. Smoke-test the admin UI: Runs, Graph, Config, Probe Results, and Reports tabs must all load without errors.
+5. Verify Ollama connectivity: `GET /ollama-health` returns OK; a simple test chat turn completes.
+
+**Phase 2 — Seed graph + probe setup:**
+1. `POST /admin/seed-graph` — initialize the seed fixture with cluster_id tags on all seed MUs.
+2. Verify via `GET /admin/graph/stats` that all seed MUs have `cluster_id` populated (not NULL). If any are NULL, the bridge-MU cross-cluster transfer analysis in the experiment report will degrade; document and proceed.
+3. `POST /admin/probes/snapshot` — create the baseline probe snapshot.
+4. Confirm the probe set version appears in the admin Probe Results tab.
+5. Check `config.yaml` K2 value: if K2 = 1, update `reporting.pass_rank_threshold` to 1 (otherwise all probes will fail trivially). This is the M15 risk deferred to M17.
+
+**Phase 3 — Three-condition experiment run:**
+
+Run each condition as a separate experiment, recording its `experiment_id` in `config.yaml`. For each condition:
+- Start with a short pilot (3 series × 5 turns) to validate the pipeline end-to-end before committing to a full run.
+- After the pilot passes, run the full planned N series.
+- After each series: call `POST /admin/reports/generate-series` to confirm the series report generates without error.
+
+**Learned condition** (`experiment_id: exp-learned-YYYY-MM-DD`):
+- Weight updates enabled (`WEIGHT_UPDATES_ENABLED=true` in config)
+- Feedback loop active (researcher provides thumbs-up/thumbs-down via admin UI after each turn)
+- Probe battery at series_index 0, 2, 4 (start, mid, end of each series)
+- Target: 5 series
+
+**Static-weight control** (`experiment_id: exp-static-YYYY-MM-DD`):
+- Weight updates disabled (`WEIGHT_UPDATES_ENABLED=false`)
+- Same probe set, same series count
+- After run: `SELECT COUNT(*) FROM analytics WHERE experiment_id = :static_eid AND json_array_length(weight_updates) > 0` must return 0 (M16 sanity check)
+
+**Random-weight control** (`experiment_id: exp-random-YYYY-MM-DD`):
+- Weights re-randomized at the start of each series (reset to uniform random in [0, 1])
+- Same probe set, same series count
+- After run: verify edge weight variance across series is > `reporting.random_control_variance_floor: 0.05`
+
+**Phase 4 — Full report generation and validation:**
+1. `POST /admin/reports/generate-experiment` for the learned condition — verify `learning_measures` key is not null in the response JSON.
+2. `POST /admin/reports/generate-experiment` for learned condition WITH `control_experiment_ids` body parameter — verify `control_shadow` key is populated for both static and random controls.
+3. Check all three control shadow sanity checks:
+   - `zero_weight_changes`: true for static control
+   - `weights_rerandomized`: true for random control
+   - `zero_feedback_edge_correlation`: 0 violations for both controls
+4. Open the Admin UI Reports tab — verify:
+   - All generated reports appear in the list
+   - "View" renders the Markdown content (headers, tables, code blocks)
+   - "↓JSON" downloads the raw JSON correctly
+   - Comparison table renders with the correct values from the control shadow
+5. Verify GFM table rendering specifically: the report Markdown uses pipe-delimited tables throughout. If `react-markdown` without `remark-gfm` renders them as plain text, add the `remark-gfm` plugin (this is the M16 risk deferred to real data).
+
+**Phase 5 — Integration tests:**
+
+New file: `tests/integration/test_e2e_pipeline.py`
+
+This file covers the full pipeline with real database writes (not mocks). It requires the Docker stack to be running and targets `localhost:8000`:
+- `test_chat_turn_creates_memory_units`: POST to `/chat`, verify ≥ 2 MUs appear in graph store (user_input + agent_output at minimum).
+- `test_feedback_event_triggers_weight_update`: POST a thumbs-up feedback event, verify a `feedback_events` row exists and at least one edge has a non-empty `weight_updates` JSON array.
+- `test_series_report_generates_all_sections`: Generate a series report for a completed series, verify all §5 subsection keys are present and non-null in the JSON.
+- `test_experiment_report_learning_measures_populated`: Generate an experiment report for a completed experiment, verify `learning_measures` key is not null and contains at least `probe_pass_rates` and `state_transitions`.
+- `test_control_shadow_sanity_checks_pass`: Generate an experiment report with control shadow for matching static and random conditions, verify all three sanity checks return expected values.
+
+Mark the integration test file with `pytest.mark.integration` and exclude from the default test run (add `--ignore=tests/integration` to `pytest.ini` default args). Run integration tests explicitly: `pytest tests/integration/ -m integration`.
+
+**Phase 6 — Hardening + documentation:**
+1. Fix any bugs discovered in phases 1-5. For each bug: write a regression unit test before fixing.
+2. Verify Docker healthcheck for the backend correctly reflects database availability (not just process up).
+3. Add comprehensive inline comments to `config.yaml` for all hyperparameters — document the default value, the reasoning behind it, and valid range (this is a research artifact and must be self-explaining).
+4. Write `docs/experiment_protocol.md` (new): step-by-step guide for running a three-condition experiment from scratch (seed → probe setup → learned run → static run → random run → generate reports). Include the exact API calls and expected outputs at each step.
+5. Update PROGRESS.md with: research outcomes, probe pass-rate results across conditions, any anomalies observed, and open questions for future work.
+
+**Tests:**
+- `tests/integration/test_e2e_pipeline.py` (new) — integration tests described in Phase 5 above
+- Regression unit tests for any bugs found during the integration run
+- All 218+ existing tests must still pass
+
+**Done when:**
+- All pending PRs (M9–M16) merged to main, no merge conflicts outstanding
+- `docker-compose up` starts all three services cleanly (backend, chat UI, admin UI)
+- Full test suite (218+ tests) passes
+- Three-condition experiment run completed: ≥ 3 series per condition with probe batteries at start/mid/end
+- Full report suite generated: series reports for each condition + experiment report with control shadow
+- All three control shadow sanity checks pass on real data
+- Admin UI Reports tab renders reports with correct Markdown and comparison table
+- Integration test suite passes (`pytest tests/integration/`)
+- `config.yaml` has inline comments on all hyperparameter fields
+- `docs/experiment_protocol.md` exists and covers the full run procedure
+- PROGRESS.md updated with research outcomes
+
+**Risks:**
+- ⚠ Pending PRs (M9–M15 still show "PR pending merge" in the Status section). These must be merged before M17 begins — merge conflicts between M9 and M15 are likely since they all touch the analytics and graph store layers. Resolve in milestone order (M9 first, M10 second, etc.) to minimize conflict surface.
+- ⚠ `pass_rank_threshold` default of 3 (from M15): if the actual config has K2 = 1 (default), every probe will trivially fail against this threshold since only 1 MU is returned. Check `config.yaml` immediately in Phase 2 and correct before running.
+- ⚠ The full three-condition experiment requires real Ollama inference time: 3 conditions × 5 series × ~10 turns = ~150 Ollama calls. At typical Gemma 4 E4B inference speeds on the RTX 5060, this may take 2-4 hours of wall-clock time. Plan for an uninterrupted run.
+- ⚠ GFM table rendering: `react-markdown` does not render pipe-delimited tables by default. The M16 build plan deferred this risk to M17. If tables render as plain text, add `remark-gfm` to the admin package dependencies.
+- ? `cluster_id` on seed MUs: if `cluster_id` was not populated during seed graph initialization, cross-cluster transfer analysis will produce "cluster_id unknown" results throughout. This is acceptable — document the gap rather than retroactively patching the seed fixture.
+- ? Docker resource limits under sustained load: 150 Ollama calls in sequence may trigger OOM if the GPU is also running other processes. Monitor GPU memory during the pilot run.
+
+**Estimate:** 3-5 sessions
+
+---
+
 ## Status
 
 ```
-Current milestone: 16 — Experiment Report Control Shadow + Admin UI — COMPLETE
+Current milestone: 17 — End-to-End Integration + Hardening — NOT STARTED
 Last updated: 2026-06-27
 ```
 
@@ -2128,3 +2272,7 @@ Last updated: 2026-06-27
 **Milestone 14:** Complete — branch `milestone-14-experiment-report-nonlearning`, PR pending merge.
 
 **Milestone 15:** Complete — branch `milestone-15-experiment-report-learning`, PR pending merge.
+
+**Milestone 16:** Complete — branch `milestone-16-control-shadow-admin-ui`, PR merged to main.
+
+**Milestone 17:** Not started — branch TBD.

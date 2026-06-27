@@ -11,6 +11,8 @@ build/
 memory/graph.db
 memory/audit.log
 memory/snapshots/
+memory/workspace/
+memory/reports/
 node_modules/
 .DS_Store
 *.log

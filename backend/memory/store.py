@@ -146,7 +146,6 @@ CREATE INDEX IF NOT EXISTS idx_generated_reports_type ON generated_reports(repor
 
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_mu_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_mu_id);
-CREATE INDEX IF NOT EXISTS idx_analytics_series ON analytics(series_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON analytics(timestamp);
 CREATE INDEX IF NOT EXISTS idx_feedback_events_run ON feedback_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_events_probe ON feedback_events(is_probe_turn);
@@ -205,15 +204,19 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
     try:
         await db.execute("ALTER TABLE analytics RENAME COLUMN session_id TO series_id")
         await db.commit()
-        # Recreate the index under the new name (old index updated in-place by SQLite,
-        # but the name would remain idx_analytics_session — add the new one too)
+        logger.info("store: migrated analytics.session_id → series_id")
+    except Exception:
+        # Column already renamed (fresh install uses series_id directly)
+        pass
+
+    # Create the series index regardless of path (removed from _INIT_SQL because Python 3.12
+    # executescript raises OperationalError when the column doesn't yet exist in old DBs)
+    try:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_analytics_series ON analytics(series_id)"
         )
         await db.commit()
-        logger.info("store: migrated analytics.session_id → series_id")
     except Exception:
-        # Column already renamed (fresh install uses series_id directly)
         pass
 
     # --- M13: generated_reports table (created via _INIT_SQL on fresh install; ---

@@ -446,6 +446,24 @@ async def generate_experiment_report_endpoint(body: GenerateExperimentReportRequ
     }
 
 
+@router.post("/edges/randomize")
+async def randomize_edge_weights():
+    """
+    Set all edge weights to uniform random values in [0.0, 1.0].
+
+    Called before each series in the random-weight control condition.
+    Returns the count of edges updated.
+    """
+    logger.info("admin/edges/randomize: randomizing all edge weights")
+    try:
+        count = await graph_store.randomize_all_edge_weights()
+    except Exception as exc:
+        logger.error("admin/edges/randomize: failed — %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+    logger.info("admin/edges/randomize: updated %d edges", count)
+    return {"edges_randomized": count}
+
+
 @router.get("/reports")
 async def list_reports(
     report_type: Optional[str] = Query(default=None, description="Filter by type: 'series' or 'experiment'"),

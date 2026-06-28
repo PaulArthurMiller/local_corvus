@@ -257,6 +257,14 @@ class GraphStore:
     platform.
     """
 
+    async def ping(self) -> None:
+        """Lightweight DB availability check — executes SELECT 1."""
+        db = await _open_db()
+        try:
+            await db.execute("SELECT 1")
+        finally:
+            await db.close()
+
     async def create_mu(
         self,
         mu_id: str,

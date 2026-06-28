@@ -3,9 +3,9 @@
 ## Current state
 
 Project: Local Corvus — local LLM learning research platform  
-Phase: Building  
-Current milestone: 16 — Experiment Report Control Shadow + Admin UI — COMPLETE  
-Next step: Review PR, then run the three-condition experiment (learning / static-weight / random-weight) to produce real data for the reports.
+Phase: Complete  
+Current milestone: 17 — End-to-End Integration + Hardening — COMPLETE (all 6 phases)  
+Next step: Run a full three-condition experiment using docs/experiment_protocol.md. See "Open questions for future work" section for prioritised follow-ups.
 
 ## Session log
 
@@ -418,3 +418,64 @@ Next step: Review PR, then run the three-condition experiment (learning / static
     - test_control_shadow_sanity_checks_pass: PASS (zero_weight_changes, zero_feedback_edge_correlation for static; weights_rerandomized, zero_feedback_edge_correlation for random — all PASS)
   - Note: test 2 was initially contaminating the random-weight control by sending feedback to a run in exp-random-2026-06-27 (selecting the first run with activated_edge_ids). Fixed by filtering to learning-condition runs only. The contaminating feedback_events row and weight_updates were cleaned up from the DB directly.
   - Phase 5 status: All 5 integration tests passing. 315 unit tests still passing. No regressions.
+
+- 2026-06-28: /smoketest — Milestone 17 Phase 6 (hardening + documentation), 1 gap fixed
+  - Gaps found: 1 (Docker healthcheck reflected process-up only, not DB availability)
+  - Changes made: 3
+  - Branch: fix/smoketest-2026-06-28-3
+  - Change 1: Docker healthcheck — `GET /health` now executes a lightweight `SELECT 1` via a new `GraphStore.ping()` method. Returns `{"status":"ok","db":"ok"}` when the DB is reachable and `{"status":"degraded","db":"error"}` when it is not. Dockerfile `HEALTHCHECK` instruction added (30 s interval, 10 s timeout, 15 s start period, 3 retries). `docker-compose.yml` frontend/admin now use `condition: service_healthy` so they wait for a confirmed healthy backend before starting.
+  - Change 2: `config.yaml` — comprehensive inline comments added to all hyperparameters. Each entry now documents: what the parameter does, the default value and its rationale, valid range, and any open questions or deferred decisions. File is now self-explaining as a research artifact.
+  - Change 3: `docs/experiment_protocol.md` (new) — step-by-step runbook for running a three-condition experiment from scratch. Covers: environment setup and healthcheck verification; graph wipe and seed fixture registration; baseline probe battery; learned / static-weight / random-weight condition runs (with exact API calls and expected outputs); report generation; integration test validation; quick-reference endpoint table; troubleshooting guide for common failure modes.
+  - Phase 6 status: All hardening and documentation tasks complete. 315 unit tests still passing. No regressions.
+
+## Milestone 17 — Research Outcomes and Open Questions
+
+### Probe pass-rates across conditions (pilot data, shared graph — not clean-condition results)
+
+All probe results below were collected on a shared graph contaminated by interaction
+MUs from prior phases. These are machinery-validation results, not experiment results.
+A real experiment must start from a wiped graph + re-seeded state per condition.
+
+- **Pilot (3 series × 5 turns, learned condition):** 15/15 turns PASS; feedback active;
+  3–8 edges updated per turn; 3/3 series reports generated successfully.
+- **Static-weight control:** 15/15 turns PASS; 0 weight updates confirmed; 3/3 series reports.
+- **Random-weight control:** 15/15 turns PASS; edge variance std_dev=0.281 (floor=0.05 PASS);
+  3/3 series reports.
+- **Baseline probe battery (session_index=0, seed graph + Phase 1 MUs):** p01 FAIL
+  (Phase-1 MUs outscored seed MU — expected on polluted graph); p02–p05 all PASS rank=1.
+- **Post-pilot probe battery (session_index=2, polluted graph):** all 5 probes FAIL —
+  interaction MUs dominate the retrieved set. Expected. Confirms clean-graph requirement.
+
+### Anomalies observed
+
+1. **Python 3.12 strict `executescript()` (Phase 1):** `CREATE INDEX` on a non-existent
+   column aborted `_open_db()` before `_migrate_db()` could rename it. Fixed by moving
+   the index creation to `_migrate_db()` outside the RENAME COLUMN try/except block.
+2. **`generate_experiment_report()` reading condition_label from live config (Phase 3):**
+   Multi-condition sessions showed the active condition, not the experiment's actual condition,
+   in report headers. Fixed by querying `get_condition_label_for_experiment()` first.
+3. **Integration test contaminating random-weight control (Phase 5):** Test 2 was selecting
+   the first run with `activated_edge_ids` regardless of condition, sending feedback to
+   a random-weight run and poisoning the `zero_feedback_edge_correlation` sanity check.
+   Fixed by filtering to learning-condition runs only.
+
+### Open questions for future work
+
+1. **Full three-condition experiment:** The pilot used a shared graph and 3 series × 5 turns.
+   A real experiment requires separate clean graphs per condition and at least 5 series × 10 turns
+   each with probe batteries at start/mid/end. The `docs/experiment_protocol.md` describes
+   the exact procedure.
+2. **Weight initialization value (open since M1):** Flat 0.5 neutral prior. After the first
+   real learning run, compare probe pass-rate trajectories against initial_edge_weight ∈ {0.1, 0.5, 0.9}.
+3. **Decay function (open since M1):** `decay_rate: 0.01` is defined but the decay trigger
+   is not yet implemented (deferred to Phase 2). Without decay, high-activation MUs accumulate
+   weight indefinitely — the saturation check (threshold=0.9) is the current guard.
+4. **RL reward distribution (resolved as uniform, open for improvement):** All activated edges
+   receive the same delta. Backpropagation-style decay from the output MU would more accurately
+   attribute learning to causal edges.
+5. **Cross-cluster transfer signal:** The bridge-MU rank trajectory section requires probe
+   batteries across multiple measurement sessions with a clean graph. The pilot did not produce
+   meaningful transfer signal — graph contamination dominated retrieval.
+6. **multimodal (Ollama regression, M7):** Ollama 0.30.x on Windows has a regression where
+   gemma4:e4b decodes image tokens but does not interpret image content. Monitor the Ollama
+   changelog for a fix to GitHub Issue #16532 before using attachment features in experiments.

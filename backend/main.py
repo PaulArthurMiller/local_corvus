@@ -59,7 +59,17 @@ app.include_router(admin_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Process-up check + lightweight DB availability check."""
+    try:
+        from memory.store import store as graph_store
+        await graph_store.ping()
+        db_status = "ok"
+    except Exception as exc:
+        logger.warning("health: DB check failed — %s", exc)
+        db_status = "error"
+
+    status = "ok" if db_status == "ok" else "degraded"
+    return {"status": status, "db": db_status}
 
 
 @app.get("/ollama-health")

@@ -28,7 +28,8 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   admin:
     build: ./admin
@@ -37,4 +38,5 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy

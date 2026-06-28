@@ -389,3 +389,15 @@ Next step: Review PR, then run the three-condition experiment (learning / static
     - `zero_feedback_edge_correlation` for random control: PASS
   - Probe results: all probes FAIL at session_index=2 (after pilot turns) because the shared graph is contaminated — interaction MUs from prior turns outrank seed MUs. Expected: real experiments must start from a wiped graph + re-seeded state per condition.
   - Phase 3 status: All pilot machinery verified end-to-end. 315 tests passing. Config restored to neutral (experiment_id="", condition_label="learning").
+
+- 2026-06-28: /smoketest — Milestone 17 Phase 4 (full report generation and validation), 0 bugs found
+  - Bugs found: 0
+  - Bugs fixed: 0
+  - Branch: fix/smoketest-2026-06-28
+  - Phase 4 checks (all PASS):
+    - Check 1: `POST /admin/reports/generate-experiment` for learned condition → `learning_measures` not null (11 keys populated: state_transitions, edge_delta_ledger, bridge_mu_analysis, saturation_analysis, etc.)
+    - Check 2: Same endpoint with `control_experiment_ids: {static_weight: ..., random_weight: ...}` → `control_shadow` populated with both controls. Note: UI and code use `static_weight` / `random_weight` as key names (not `static` / `random`).
+    - Check 3: All 4 sanity checks PASS — `zero_weight_changes` (static_weight, 0 violations), `zero_feedback_edge_correlation` (static_weight, 0 violations), `weights_rerandomized` (random_weight, std_dev=0.281, floor=0.05), `zero_feedback_edge_correlation` (random_weight, 0 violations).
+    - Check 4: Admin UI Reports tab verified via API + code inspection: 17 reports appear in list (8 experiment + 9 series), Markdown endpoint returns full content with all sections (§5.1/§5.3/§5.5–§5.8, §6.1, §6.2, §6.3, §6.4), ↓JSON download implemented via Blob in ReportsList.jsx, ExperimentComparison.jsx reads control_shadow and renders comparative deltas. Browser extension unavailable — visual confirmation to be done by user.
+    - Check 5: GFM table rendering — `remark-gfm` v4.0.1 installed in admin/package.json and wired up in ReportViewer.jsx with `remarkPlugins={[remarkGfm]}`. Markdown report contains 48 GFM table rows. M16 risk resolved.
+  - Phase 4 status: All report generation machinery verified end-to-end. 315 tests passing. No code changes required.

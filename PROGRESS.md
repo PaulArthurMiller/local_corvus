@@ -503,3 +503,12 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
   - Branch: milestone-18-phase-0-infra-fixes
   - Gap A (cross_cluster_transfer pass criterion): RESOLVED — per-phenomenon threshold config added; cross_cluster_transfer uses threshold=4 (K1+K2); raw gold_mu_rank never modified
   - Gap B (process_rule_adherence output compliance): DOCUMENTED ONLY — noted in probe YAML comments; no code change needed
+
+- 2026-06-28: /build — Milestone 18 Phase 1 complete (seed_v2 content generation script)
+  - Created: `scripts/generate_seed_v2.py` — generates 34 MU contents via Gemma 4 (Ollama localhost:11434), assigns fixed UUIDs, wires 32 hub-and-spoke + bridge edges, writes `seed_fixtures/seed_v2_draft.json` (DRAFT — not committed)
+  - `seed_fixtures/seed_v2_draft.json` written and awaiting Paul's review (excluded from git by .gitignore)
+  - Script run successfully: 34 MUs + 32 edges generated; 1 retry (c_spoke1 missing 'enforce' on first attempt)
+  - Validation: bridge_ab and bridge_cd forbidden-vocabulary checks PASS; hub MUs all contain all 5 cluster fingerprint terms; spoke MUs contain 3-5 of 5 fingerprints (BUILD-PLAN spec: "most MUs")
+  - Tests: 332 existing tests — all passing; no new tests (script is a standalone dev tool, not part of the test suite)
+  - Branch: milestone-18-phase-1-seed-v2-generation
+  - Next step: Paul reviews seed_fixtures/seed_v2_draft.json content, approves or requests rewrites, then freezes to seed_v2.json.gz for Phase 3 verification

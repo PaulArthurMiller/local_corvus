@@ -2880,4 +2880,4 @@ Last updated: 2026-06-28
 
 **Milestone 17:** Complete — branch `fix/smoketest-2026-06-28-3`, PR merged to main.
 
-**Milestone 18:** Phase 0 complete — branch `milestone-18-phase-0-infra-fixes`, PR pending. Phases 1–4 (content generation, review, verification, probe set) not started.
+**Milestone 18:** Phase 0 complete — branch `milestone-18-phase-0-infra-fixes`, PR merged. Phase 1 complete — branch `milestone-18-phase-1-seed-v2-generation`, PR pending. Phases 2–4 (Paul review, verification, probe set) awaiting review of `seed_fixtures/seed_v2_draft.json`.

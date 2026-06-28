@@ -1354,6 +1354,34 @@ class GraphStore:
             result.append(r)
         return result
 
+    async def randomize_all_edge_weights(self) -> int:
+        """
+        Set every edge weight to a uniform random value in [0.0, 1.0].
+
+        Used by the random-weight control condition: called before each series
+        to ensure weights vary across series, satisfying the `weights_rerandomized`
+        sanity check in §6.2.
+
+        Returns the number of edges updated.
+        """
+        import random as _random
+        db = await _open_db()
+        try:
+            async with db.execute("SELECT edge_id FROM edges") as cursor:
+                rows = await cursor.fetchall()
+            edge_ids = [row["edge_id"] for row in rows]
+            for edge_id in edge_ids:
+                new_w = round(_random.uniform(0.0, 1.0), 6)
+                await db.execute(
+                    "UPDATE edges SET weight = ? WHERE edge_id = ?",
+                    (new_w, edge_id),
+                )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info("store: randomized weights for %d edges", len(edge_ids))
+        return len(edge_ids)
+
     async def get_mu_info_batch(self, mu_ids: list[str]) -> dict[str, dict]:
         """
         Return {mu_id: {series_id, cluster_id, source_type}} for a list of MU IDs.

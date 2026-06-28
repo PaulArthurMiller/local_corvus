@@ -370,3 +370,22 @@ Next step: Review PR, then run the three-condition experiment (learning / static
     - p05 (process_rule_adherence): PASS rank=1
   - Note: 47 non-seed MUs from Phase 1 lack cluster_id (NULL). These are regular interaction MUs. Cross-cluster analysis will correctly exclude them (they have no cluster_id). Real experiment conditions start from a wiped graph + seed fixture only.
   - Phase 2 status: All Phase 2 steps verified. Seed graph operational. Probe machinery confirmed working. 315 tests still passing.
+
+- 2026-06-27: /smoketest — Milestone 17 Phase 3 (three-condition pilot), 2 bugs found and fixed
+  - Bugs found: 2
+  - Bugs fixed: 2
+  - Branch: fix/smoketest-2026-06-27-3
+  - PR: (see GitHub after push)
+  - Fix 1: `POST /admin/edges/randomize` was missing — added to admin.py; `GraphStore.randomize_all_edge_weights()` added to store.py. Required for the random-weight control condition: sets all edge weights to uniform random [0, 1] before each series. Edge counts grew correctly (179 → 209 → 239 across 3 series).
+  - Fix 2: `generate_experiment_report()` read `condition_label` from the CURRENT runtime config.yaml instead of querying the DB. In a multi-condition session (or when reports are generated after a config switch), all experiment report headers incorrectly showed the active condition rather than the experiment's actual condition. Fixed: now queries `get_condition_label_for_experiment()` first; falls back to config.yaml only when no runs exist.
+  - Pilot results (3 series × 5 turns per condition, shared graph — no wipe between conditions):
+    - Learned condition (exp-learned-2026-06-27): 15/15 turns PASS, 15 feedback events (+1), edges_updated active (0–8 per turn), 3/3 series reports generated
+    - Static-weight control (exp-static-2026-06-27): 15/15 turns PASS, no feedback, 3/3 series reports generated
+    - Random-weight control (exp-random-2026-06-27): 15/15 turns PASS, 3 edge randomizations (179/209/239 edges), no feedback, 3/3 series reports generated
+  - Control shadow (all 4 sanity checks PASS on real data):
+    - `zero_weight_changes` for static control: PASS (0 runs with weight_updates)
+    - `zero_feedback_edge_correlation` for static control: PASS
+    - `weights_rerandomized` for random control: PASS (std_dev > 0.05 floor)
+    - `zero_feedback_edge_correlation` for random control: PASS
+  - Probe results: all probes FAIL at session_index=2 (after pilot turns) because the shared graph is contaminated — interaction MUs from prior turns outrank seed MUs. Expected: real experiments must start from a wiped graph + re-seeded state per condition.
+  - Phase 3 status: All pilot machinery verified end-to-end. 315 tests passing. Config restored to neutral (experiment_id="", condition_label="learning").

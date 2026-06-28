@@ -1029,7 +1029,17 @@ async def generate_experiment_report(
     Returns the report as a dict (caller writes JSON + Markdown to disk).
     """
     config = _load_config()
-    condition_label = config.get("experiment", {}).get("condition_label")
+    # Condition label comes from the DB (the runs stamped when the experiment
+    # was actually run). Falling back to config.yaml is wrong when reports are
+    # generated after a config switch (e.g. multi-condition smoketest sessions).
+    condition_label = await store.get_condition_label_for_experiment(experiment_id)
+    if condition_label is None:
+        condition_label = config.get("experiment", {}).get("condition_label")
+        logger.warning(
+            "experiment_report: no runs found for experiment_id=%s, "
+            "using config condition_label=%s",
+            experiment_id, condition_label,
+        )
     logger.info(
         "experiment_report: starting generation experiment_id=%s condition=%s control_ids=%s",
         experiment_id, condition_label, list(control_experiment_ids.keys()) if control_experiment_ids else None,

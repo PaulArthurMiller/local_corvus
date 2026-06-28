@@ -401,3 +401,20 @@ Next step: Review PR, then run the three-condition experiment (learning / static
     - Check 4: Admin UI Reports tab verified via API + code inspection: 17 reports appear in list (8 experiment + 9 series), Markdown endpoint returns full content with all sections (§5.1/§5.3/§5.5–§5.8, §6.1, §6.2, §6.3, §6.4), ↓JSON download implemented via Blob in ReportsList.jsx, ExperimentComparison.jsx reads control_shadow and renders comparative deltas. Browser extension unavailable — visual confirmation to be done by user.
     - Check 5: GFM table rendering — `remark-gfm` v4.0.1 installed in admin/package.json and wired up in ReportViewer.jsx with `remarkPlugins={[remarkGfm]}`. Markdown report contains 48 GFM table rows. M16 risk resolved.
   - Phase 4 status: All report generation machinery verified end-to-end. 315 tests passing. No code changes required.
+
+- 2026-06-28: /smoketest — Milestone 17 Phase 5 (integration test suite), 3 gaps fixed
+  - Gaps found: 3
+  - Gaps fixed: 3
+  - Branch: fix/smoketest-2026-06-28-2
+  - PR: https://github.com/PaulArthurMiller/local_corvus/pull/26
+  - Fix 1: `probe_pass_rates` missing from `learning_measures` — BUILD-PLAN §6.1 required it; added to `_section_61_learning_measures()` in `experiment_report.py`. Computed from `state_transitions.per_probe`, fraction of non-flagged outcomes that are "pass", rounded to 4 decimal places.
+  - Fix 2: `tests/integration/test_e2e_pipeline.py` — created full integration test suite with 5 `pytest.mark.integration` tests using stdlib urllib only (no extra deps). Tests call real HTTP endpoints at `localhost:8000`. Tests 3 and 4 correctly call `GET /admin/reports/{report_id}` after the generate POST (the generate endpoints return only metadata). `_find_experiment_ids()` reads condition_label from `/admin/runs` (ground truth) not stale report metadata.
+  - Fix 3: `pytest.ini` — added `--ignore=tests/integration` and registered `integration` marker so integration tests are excluded from the default `pytest` run.
+  - Phase 5 integration test results (5/5 PASS):
+    - test_chat_turn_creates_memory_units: PASS (run_id, input_mu_id, output_mu_id all distinct, run visible in /admin/runs)
+    - test_feedback_event_triggers_weight_update: PASS (12 weight_updates returned, each with feedback_event_id; learning-condition run used to avoid contaminating control sanity checks)
+    - test_series_report_generates_all_sections: PASS (all 8 §5 section keys present and non-null)
+    - test_experiment_report_learning_measures_populated: PASS (probe_pass_rates + state_transitions present in learning_measures)
+    - test_control_shadow_sanity_checks_pass: PASS (zero_weight_changes, zero_feedback_edge_correlation for static; weights_rerandomized, zero_feedback_edge_correlation for random — all PASS)
+  - Note: test 2 was initially contaminating the random-weight control by sending feedback to a run in exp-random-2026-06-27 (selecting the first run with activated_edge_ids). Fixed by filtering to learning-condition runs only. The contaminating feedback_events row and weight_updates were cleaned up from the DB directly.
+  - Phase 5 status: All 5 integration tests passing. 315 unit tests still passing. No regressions.

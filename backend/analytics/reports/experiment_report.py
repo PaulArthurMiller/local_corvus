@@ -996,12 +996,27 @@ async def _section_61_learning_measures(
 
     saturation_analysis = _compute_saturation_analysis(all_runs, saturation_threshold)
 
+    # Per-probe pass rate: fraction of non-flagged sessions where the probe passed.
+    # Derived from state_transitions so it stays in sync with pass/fail classification.
+    probe_pass_rates: dict[str, Optional[float]] = {}
+    for probe_data in state_transitions.get("per_probe", []):
+        pid = probe_data["probe_id"]
+        outcomes = probe_data.get("outcome_sequence", [])
+        non_flagged = [o for o in outcomes if o != "negative_flagged"]
+        if non_flagged:
+            probe_pass_rates[pid] = round(
+                sum(1 for o in non_flagged if o == "pass") / len(non_flagged), 4
+            )
+        else:
+            probe_pass_rates[pid] = None
+
     return {
         "pass_rank_threshold": pass_rank_threshold,
         "saturation_threshold": saturation_threshold,
         "condition_label": condition_label,
         "probe_count": len(probes),
         "run_count": len(all_runs),
+        "probe_pass_rates": probe_pass_rates,
         "state_transitions": state_transitions,
         "mus_by_probe_outcome": mus_by_probe_outcome,
         "edge_delta_ledger": edge_delta_ledger,

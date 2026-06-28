@@ -44,6 +44,7 @@ class SeedFixtureManifest(BaseModel):
     fixture_version: str
     manifest_hash: str                     # SHA-256 of the fixture file's raw bytes
     mu_count: int
+    edge_count: int = 0                    # number of edges inserted from this fixture
     type_distribution: dict[str, int]      # {source_type: count}
     generation_date: str
     generation_record: list[dict]          # [{mu_id, source_type}] per seed MU
@@ -116,10 +117,34 @@ async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManif
                     "seed_fixture: MU mu_id=%s already in DB (skipping): %s", mu_id, exc
                 )
 
+    edges = data.get("edges", [])
+    edge_count = 0
+    for edge in edges:
+        edge_id = edge.get("edge_id")
+        if not edge_id:
+            continue
+        try:
+            await graph_store.create_edge(
+                edge_id=edge_id,
+                source_mu_id=edge["source_mu_id"],
+                target_mu_id=edge["target_mu_id"],
+                weight=float(edge.get("weight", 0.5)),
+                direction=edge.get("direction", "forward"),
+                creation_run_id=None,
+                creation_trigger="seed",
+            )
+            edge_count += 1
+        except Exception as exc:
+            # Edge already exists (idempotent re-registration) — skip
+            logger.debug(
+                "seed_fixture: edge %s already in DB (skipping): %s", edge_id, exc
+            )
+
     manifest = SeedFixtureManifest(
         fixture_version=version,
         manifest_hash=manifest_hash,
         mu_count=mu_count,
+        edge_count=edge_count,
         type_distribution=type_distribution,
         generation_date=datetime.now(timezone.utc).isoformat(),
         generation_record=generation_record,
@@ -127,10 +152,11 @@ async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManif
 
     await graph_store.insert_seed_fixture_manifest(manifest.model_dump())
     logger.info(
-        "seed_fixture: registered version=%s hash=%s mu_count=%d series_id=%s",
+        "seed_fixture: registered version=%s hash=%s mu_count=%d edge_count=%d series_id=%s",
         version,
         manifest_hash[:16],
         mu_count,
+        edge_count,
         series_id,
     )
     return manifest

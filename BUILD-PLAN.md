@@ -2234,11 +2234,614 @@ Mark the integration test file with `pytest.mark.integration` and exclude from t
 
 ---
 
+---
+
+### Milestone 18 — Seed Fixture v2 + Probe Set v2 (Experiment Pilot Prep)
+
+**Why this milestone exists:** seed_v1 (6 MUs, 1 bridge, 5 probes) was built to smoke-test the pipeline machinery. It cannot produce a measurable cross-cluster transfer signal — the clusters share only 2–3 MUs each, the lexical separation is minimal, and the graph has no edges at all (edges are empty in the fixture). seed_v2 expands to 34 MUs across 4 conceptual clusters plus 2 bridge MUs, with explicit hub-and-spoke graph wiring, to give the 100+ prompt pilot a fixture rich enough to produce a signal. seed_v1 stays unchanged; it remains the smoke-test fixture.
+
+**Pre-build inspection results (all four required inspections completed):**
+
+**1. seed_v1.json.gz schema (confirmed):**
+```json
+{
+  "timestamp": "ISO-8601",
+  "mu_count": 6,
+  "edge_count": 0,
+  "memory_units": [
+    {
+      "mu_id": "UUID",
+      "source_type": "agent_output",
+      "raw_content": "...",
+      "created_at": "ISO-8601",
+      "cluster_id": "cluster_a | cluster_b | bridge_ab"
+    }
+  ],
+  "edges": []
+}
+```
+`edges` is an empty list — seed_v1 has zero graph edges. The bridge concept in v1 was purely lexical (bridge MU content straddled both vocabularies). No graph traversal was needed or possible.
+
+**2. register_fixture() genericity:**
+`POST /admin/seed-graph {"version": "v2"}` works today with zero code changes — the endpoint constructs `fixture_path = seed_fixtures/seed_{version}.json.gz` and passes `version` through. **However**, `register_fixture()` processes only `memory_units`; it reads `data.get("edges", [])` but never acts on it. Since seed_v1 has no edges this was never an issue. For seed_v2 the hub-and-spoke + bridge wiring must be stored in the fixture and applied on registration. This is a small, clearly-flagged infrastructure change (Phase 0 below).
+
+**3. probe_set_v1.yaml schema (confirmed):**
+Top-level: `{version, phenomenon_map, probes: [...]}`.
+Per probe: `{probe_id, phenomenon_type, prompt_text, gold_mu_ids: [], is_bridge_probe, bridge_pair_id}`.
+`probe_set_version` is added by `load_probe_set()` at load time from the top-level `version` key.
+
+Two v1 hardcodes require fixing before v2 probes are accessible:
+- `backend/main.py:32` — `load_probe_set(version="v1")` at startup
+- `backend/api/admin.py:237` — `load_probe_set(version="v1")` inside `run_probe`
+
+**4. Bridge MU wiring (v1 has no pattern — v2 introduces this concept):**
+v1's bridge_ab MU has no edges. The traversal funnel follows outgoing directed edges from K1 MUs (`source_mu_id` → `target_mu_id`). For the bridge to appear as K2 via graph traversal:
+- The hub must be a K1 entry point (it must surface via BM25 + high edge_weight_sum)
+- The hub must have an OUTGOING edge to the bridge: `source=hub, target=bridge, direction="forward"`
+- Spokes boost the hub's edge_weight_sum: `source=spoke, target=hub, direction="forward"` × 7 per cluster
+- With initial_edge_weight=0.5: hub edge_weight_sum = 4.0 (8 edges), bridge edge_weight_sum = 0.5 (1 edge), spokes = 0.5 each. Hub dominates K1.
+
+**Two design gaps — resolutions decided:**
+
+> **Gap A — cross_cluster_transfer pass criterion (RESOLVED: per-phenomenon thresholds, in scope for Phase 0):**
+> With K1=3 and K2=1, the bridge MU can only appear at rank 4 (the single K2 slot). A global `pass_rank_threshold: 1` would make cross-cluster probes permanently FAIL regardless of training. **Resolution:** Make pass criteria phenomenon-aware. `ranking_improvement` keeps rank ≤ 1. `cross_cluster_transfer` passes on presence in the retrieved set at rank ≤ 4 (K1+K2 = 3+1), since the bridge structurally occupies the K2 slot. `process_rule_adherence` keeps rank ≤ 1. Raw `gold_mu_rank` is always stored unchanged in `probe_results` — report sections always have full data regardless of which threshold applies. Code change is Phase 0.4 below.
+
+> **Gap B — process_rule_adherence output compliance (DOCUMENT ONLY, deferred):**
+> The current probe evaluation only measures `gold_mu_rank` (retrieval rank). It cannot verify that the agent's actual output complied with the rule in the retrieved MU. The 2 process_rule_adherence probes in v2 are valid retrieval probes — they measure whether the rule MU is surfaced. The compliance check is a human review step, not a machine check. Noted in probe_set_v2.yaml comments and added to PROGRESS.md "Open questions for future work" as a candidate for a future automation-focused milestone (output-compliance grading via judge/evaluator). No code change in this milestone.
+
+---
+
+**Structure:**
+
+| cluster_id | concept | MU count |
+|---|---|---|
+| cluster_a | structured file output / format discipline | 8 |
+| cluster_b | schema and data-shape reasoning | 8 |
+| cluster_c | rule-following under constraint | 8 |
+| cluster_d | self-sourcing / provenance discipline | 8 |
+| bridge_ab | "structure is a contract" | 1 |
+| bridge_cd | "constraint over fluency" | 1 |
+| **Total** | | **34** |
+
+**Graph wiring (per cluster):**
+```
+spoke_1 ──▶ hub ──▶ bridge
+spoke_2 ──▶ hub
+spoke_3 ──▶ hub
+spoke_4 ──▶ hub
+spoke_5 ──▶ hub
+spoke_6 ──▶ hub
+spoke_7 ──▶ hub
+
+cluster_a + cluster_b: connect to bridge_ab
+cluster_c + cluster_d: connect to bridge_cd
+NO edges between cluster_a/b content and cluster_c/d content
+```
+
+Each edge: `direction="forward"`, `weight=initial_edge_weight (0.5)`, `creation_trigger="seed"`.
+Total edges: 4 clusters × 8 edges (7 spoke→hub + 1 hub→bridge) = 32 edges.
+
+---
+
+**Phase 0 — Infrastructure fixes (small, clearly-flagged code changes; committed separately before any fixture work):**
+
+**0.1: Extend `register_fixture()` to insert edges**
+
+In `backend/analytics/seed_fixture.py`, after the `memory_units` loop, add:
+
+```python
+edges = data.get("edges", [])
+for edge in edges:
+    edge_id = edge.get("edge_id")
+    if not edge_id:
+        continue
+    try:
+        await graph_store.create_edge(
+            edge_id=edge_id,
+            source_mu_id=edge["source_mu_id"],
+            target_mu_id=edge["target_mu_id"],
+            weight=float(edge.get("weight", 0.5)),
+            direction=edge.get("direction", "forward"),
+            creation_run_id=None,
+            creation_trigger="seed",
+        )
+    except Exception as exc:
+        # Edge already exists (idempotent re-registration) — skip
+        logger.debug(
+            "seed_fixture: edge %s already in DB (skipping): %s", edge_id, exc
+        )
+
+# Update generation_record to include edge count
+generation_record.append_count: tracked separately — add edge_count to manifest
+```
+
+Also update `SeedFixtureManifest` to add `edge_count: int = 0` field, and update the manifest construction to count edges from the fixture.
+
+**0.2: Add `probe_set_version` parameter to `POST /admin/run-probe`**
+
+In `backend/api/admin.py`, extend `RunProbeRequest`:
+
+```python
+class RunProbeRequest(BaseModel):
+    probe_id: str
+    measurement_session_index: int
+    condition_label: str
+    probe_set_version: str = "v1"   # NEW — default "v1" preserves backward compat
+```
+
+Replace the hardcoded `load_probe_set(version="v1")` call with `load_probe_set(version=body.probe_set_version)`.
+
+**0.3: Extend startup probe sync in `backend/main.py`**
+
+Replace the single `load_probe_set(version="v1")` call with a loop over known versions:
+
+```python
+for version in ["v1", "v2"]:
+    try:
+        probes = load_probe_set(version=version)
+        await graph_store.sync_probes([p.model_dump() for p in probes])
+        logger.info("startup: synced %d probe definitions (version=%s)", len(probes), version)
+    except FileNotFoundError:
+        logger.info("startup: probe_set_%s.yaml not found — skipping", version)
+    except Exception as exc:
+        logger.warning("startup: probe sync version=%s failed (non-fatal) — %s", version, exc)
+```
+
+This is non-fatal and degrades gracefully when `probe_set_v2.yaml` doesn't yet exist.
+
+**Phase 0.4: Phenomenon-aware pass criteria in `experiment_report.py` (Gap A fix)**
+
+The pass/fail classification currently uses a single global `reporting.pass_rank_threshold`. The fix adds per-phenomenon overrides while keeping the raw `gold_mu_rank` field untouched in every `probe_results` row.
+
+**`config.yaml` — add under `reporting:`:**
+```yaml
+reporting:
+  pass_rank_threshold: 1         # global default
+  pass_rank_thresholds:          # per-phenomenon overrides; missing keys fall back to global
+    ranking_improvement: 1
+    cross_cluster_transfer: 4    # K1(3) + K2(1); bridge structurally occupies K2 slot
+    process_rule_adherence: 1
+```
+
+**`backend/analytics/reports/experiment_report.py` — change `_classify_probe_outcome`:**
+
+```python
+def _classify_probe_outcome(
+    result: dict,
+    default_threshold: int,
+    phenomenon_type: str = "",
+    phenomenon_thresholds: Optional[dict] = None,
+) -> str:
+    """Classify a single probe result as 'pass', 'fail', or 'negative_flagged'.
+
+    threshold is looked up per phenomenon_type first, then falls back to default_threshold.
+    gold_mu_rank in the result is always the raw rank — never modified here.
+    """
+    if result.get("outcome_override") == "negative_flagged":
+        return "negative_flagged"
+    rank = result.get("gold_mu_rank")
+    threshold = (phenomenon_thresholds or {}).get(phenomenon_type, default_threshold)
+    if rank is not None and rank <= threshold:
+        return "pass"
+    return "fail"
+```
+
+Update all four call sites in `experiment_report.py` to pass `phenomenon_type` from the enclosing probe definition and `phenomenon_thresholds` from the loaded config. In `_section_61_learning_measures()`:
+
+```python
+reporting_cfg = config.get("reporting", {})
+pass_rank_threshold = reporting_cfg.get("pass_rank_threshold", 1)
+phenomenon_thresholds = reporting_cfg.get("pass_rank_thresholds", {})
+```
+
+Thread both through to each `_classify_probe_outcome` call.
+
+**`backend/analytics/reports/control_shadow.py`** — update `_compute_final_probe_pass_rate()` to read `phenomenon_thresholds` from the `measures` dict and pass it to `_classify_probe_outcome`. Store `phenomenon_thresholds` in the `learning_measures` return dict so control_shadow can read it without reloading config.
+
+**`backend/analytics/reports/markdown_renderer.py`** — update the §6.1 header line from `"**Pass-rank threshold:** top-{N}"` to show per-phenomenon thresholds:
+```
+**Pass-rank thresholds:** ranking_improvement=1, cross_cluster_transfer=4, process_rule_adherence=1
+```
+
+**Tests for Phase 0:**
+- Extend `test_seed_fixture.py`: `register_fixture()` with a fixture containing edges inserts those edges into the graph store; a second call (idempotent) does not duplicate edges.
+- `test_admin.py` (new or extend): `POST /admin/run-probe` with `probe_set_version="v2"` loads v2 probes and returns 404 for a probe_id that only exists in v1; `probe_set_version="v1"` (default) still works.
+- Startup sync test: mock both yaml files; verify both are loaded; verify missing v2 file logs INFO and doesn't crash.
+- Extend `test_learning_measures.py`: `_classify_probe_outcome` with `phenomenon_type="cross_cluster_transfer"` and `rank=4` → PASS; same with `rank=5` → FAIL. With `phenomenon_type="ranking_improvement"` and `rank=2` → FAIL even with cross-cluster threshold present. With no `phenomenon_thresholds` arg → falls back to `default_threshold`. Verify `gold_mu_rank` in probe_results row is untouched (raw rank, not capped at threshold).
+
+---
+
+**Phase 1 — Content generation (Gemma 4 via script; output is a DRAFT for Paul's review):**
+
+**New file: `scripts/generate_seed_v2.py`**
+
+This script generates the MU content via Gemma 4 (through Ollama at `localhost:11434`). It does NOT commit anything — it writes a draft JSON to `seed_fixtures/seed_v2_draft.json` for review.
+
+```python
+"""
+Generate seed_v2 MU content via Gemma 4 (local Ollama).
+Output: seed_fixtures/seed_v2_draft.json — review before freezing.
+
+Usage: python scripts/generate_seed_v2.py
+Requires: Ollama running at localhost:11434 with gemma4:e4b loaded
+"""
+```
+
+Script responsibilities:
+1. Define 34 MU prompts (4 clusters × 8 MUs + 2 bridge MUs) as constants in the script.
+2. For each in-cluster MU: send a generation prompt to Gemma 4 asking for a short (2–3 sentence) self-contained statement about the cluster's concept, using the cluster's vocabulary fingerprint terms. Each cluster has 3–5 "fingerprint" terms that must appear in most MUs; these are fixed constants in the script.
+3. For each bridge MU: send a generation prompt explicitly instructing Gemma 4 to write a statement that connects both clusters' concepts WITHOUT using either cluster's fingerprint vocabulary. This instruction is the load-bearing constraint.
+4. Assign stable MU IDs (fixed UUIDs, not randomly generated) so that `gold_mu_ids` in probe_set_v2.yaml can be filled in at write time, not after DB insertion.
+5. Wire the hub-and-spoke + bridge edges using these fixed IDs.
+6. Write the draft to `seed_fixtures/seed_v2_draft.json` (uncompressed, for readability during review). This file is NOT `seed_v2.json.gz` — the compressed fixture is created manually after Paul's review and approval.
+
+**Cluster vocabulary fingerprints (fixed in script constants):**
+
+| cluster_id | concept | required fingerprint terms |
+|---|---|---|
+| cluster_a | structured file output / format discipline | "format", "structure", "output", "field", "delimiter" |
+| cluster_b | schema and data-shape reasoning | "schema", "data", "shape", "type", "validation" |
+| cluster_c | rule-following under constraint | "rule", "constraint", "violation", "enforce", "comply" |
+| cluster_d | self-sourcing / provenance discipline | "source", "provenance", "cite", "origin", "traceable" |
+| bridge_ab | "structure is a contract" | ← must avoid ALL cluster_a and cluster_b fingerprints |
+| bridge_cd | "constraint over fluency" | ← must avoid ALL cluster_c and cluster_d fingerprints |
+
+**Stable MU ID scheme (fixed UUIDs in script):**
+
+```
+cluster_a:
+  a0000001-aaaa-4aaa-8aaa-000000000001  (hub)
+  a0000002-aaaa-4aaa-8aaa-000000000002  (spoke 1)
+  ...
+  a0000008-aaaa-4aaa-8aaa-000000000008  (spoke 7)
+
+cluster_b:
+  b0000001-bbbb-4bbb-8bbb-000000000001  (hub)
+  ...
+  b0000008-bbbb-4bbb-8bbb-000000000008  (spoke 7)
+
+cluster_c:
+  c0000001-cccc-4ccc-8ccc-000000000001  (hub)
+  ...
+  c0000008-cccc-4ccc-8ccc-000000000008  (spoke 7)
+
+cluster_d:
+  d0000001-dddd-4ddd-8ddd-000000000001  (hub)
+  ...
+  d0000008-dddd-4ddd-8ddd-000000000008  (spoke 7)
+
+bridge_ab:
+  ab000001-abab-4aba-8aba-000000000001
+
+bridge_cd:
+  cd000001-cdcd-4cdc-8cdc-000000000001
+```
+
+**Edge IDs (fixed):**
+
+```python
+# cluster_a: 7 spoke→hub + 1 hub→bridge_ab
+edges_cluster_a = [
+  {"edge_id": "ea0000X2", "source": "a000000X", "target": "a0000001"}  # spoke→hub
+  ...  # × 7
+  {"edge_id": "eab00001", "source": "a0000001", "target": "ab000001"}  # hub→bridge_ab
+]
+# Same pattern for cluster_b, cluster_c, cluster_d
+```
+
+**Draft output format** (`seed_v2_draft.json`):
+```json
+{
+  "timestamp": "ISO-8601",
+  "mu_count": 34,
+  "edge_count": 32,
+  "fixture_version": "v2",
+  "notes": "DRAFT — review before freezing to seed_v2.json.gz",
+  "memory_units": [ ... ],
+  "edges": [ ... ]
+}
+```
+
+Note: `seed_v2_draft.json` is NOT compressed and NOT `seed_v2.json.gz`. It exists solely for Paul's review.
+
+---
+
+**Phase 2 — Paul review + freeze (human step, no code):**
+
+Paul reads `seed_fixtures/seed_v2_draft.json` and checks:
+1. Each in-cluster MU is self-contained and uses the cluster's fingerprint vocabulary.
+2. Bridge MUs contain no fingerprint vocabulary from either adjacent cluster.
+3. The topic and tone are appropriate for the experiment (sufficiently distinct, not trivially separable or overlapping).
+4. MU content is free of factual errors that would confuse the model.
+
+Paul may request specific MU rewrites. The script can be rerun for individual MUs if needed. Once Paul approves, the freeze step is:
+```bash
+python -c "
+import gzip, json
+with open('seed_fixtures/seed_v2_draft.json') as f:
+    data = json.load(f)
+# Remove the draft notes field before freezing
+data.pop('notes', None)
+with gzip.open('seed_fixtures/seed_v2.json.gz', 'wt', encoding='utf-8') as f:
+    json.dump(data, f)
+print('Frozen seed_fixtures/seed_v2.json.gz')
+"
+```
+
+The frozen `seed_v2.json.gz` is committed to the repo. The draft `seed_v2_draft.json` is NOT committed (add to `.gitignore`).
+
+---
+
+**Phase 3 — Lexical-distinctness verification script:**
+
+**New file: `scripts/verify_seed_v2.py`**
+
+This script runs before probe_set_v2.yaml is written. It implements the lexical-distinctness check (Gap A mitigation) and the connectivity check from Deliverable 3.
+
+```python
+"""
+Verification checks for seed_v2 fixture.
+Run BEFORE registering the fixture in the DB.
+
+Checks:
+  1. All 34 MUs present with correct cluster_id
+  2. All 32 edges present with correct wiring
+  3. Connectivity: hub→bridge edge exists for each bridge
+  4. Lexical-distinctness: bridge MUs share no non-stopword terms with adjacent clusters
+  5. Baseline probe sanity: cross-cluster probes should NOT trivially surface bridge at rank 1
+
+Usage: python scripts/verify_seed_v2.py
+"""
+```
+
+**Check 1 — MU count and cluster distribution:**
+```python
+assert mu_count == 34
+assert cluster_distribution == {
+    "cluster_a": 8, "cluster_b": 8,
+    "cluster_c": 8, "cluster_d": 8,
+    "bridge_ab": 1, "bridge_cd": 1,
+}
+```
+
+**Check 2 — Edge count and wiring:**
+```python
+assert edge_count == 32
+# For each cluster, verify:
+#   hub has 7 incoming spoke→hub edges
+#   hub has 1 outgoing hub→bridge edge
+#   no edges connect cluster_a/b to cluster_c/d content
+```
+
+**Check 3 — Connectivity (reachability):**
+For each cluster, confirm the hub has an outgoing edge to its bridge MU. Walk the edge list in-memory; this check does NOT require a running DB.
+
+**Check 4 — Lexical-distinctness (correctness gate, not a warning):**
+```python
+STOPWORDS = {...}  # same as retrieval.py _STOPWORDS
+
+def cluster_vocab(mus, cluster_id):
+    tokens = set()
+    for mu in mus:
+        if mu["cluster_id"] == cluster_id:
+            tokens |= set(mu["raw_content"].lower().split()) - STOPWORDS
+    return tokens
+
+# bridge_ab must share no terms with cluster_a vocab OR cluster_b vocab
+bridge_ab_tokens = tokenize(bridge_ab_mu["raw_content"])
+cluster_a_tokens = cluster_vocab(mus, "cluster_a")
+cluster_b_tokens = cluster_vocab(mus, "cluster_b")
+
+shared_a = bridge_ab_tokens & cluster_a_tokens
+shared_b = bridge_ab_tokens & cluster_b_tokens
+if shared_a or shared_b:
+    print(f"FAIL: bridge_ab shares terms with cluster_a={shared_a} cluster_b={shared_b}")
+    sys.exit(1)
+
+# Same for bridge_cd / cluster_c / cluster_d
+```
+
+**Check 5 — Baseline probe sanity (simulated retrieval):**
+Implement a stripped-down BM25 retrieval simulation (same logic as retrieval.py) against the draft fixture. For each planned cross-cluster probe's `prompt_text`, verify the bridge MU does NOT surface at K1 (rank ≤ 3). Bridge at rank 4 (K2) is expected and correct. Bridge at rank 1–3 would mean BM25 alone surfaces it — a lexical-distinctness failure not caught by Check 4 (BM25 scoring differs from raw term overlap).
+
+**All checks must PASS before proceeding to Phase 4.** If any fail, rerun the generation script for the failing MU and repeat verification.
+
+---
+
+**Phase 4 — Probe set + final verification:**
+
+**New file: `probes/probe_set_v2.yaml`**
+
+```yaml
+version: "v2"
+
+# NOTE on pass criterion for cross_cluster_transfer probes:
+#   With K1=3 and K2=1, the bridge MU can only appear at rank 4 (K2 position).
+#   pass_rank_threshold=1 means these probes measure "bridge at rank 1", which
+#   cannot occur unless lexical-distinctness is violated. The intended signal is
+#   "bridge appears in the retrieved set at any position" (hop_depth > 0 in
+#   traversal_path). At baseline (measurement_session_index=0), bridge IS
+#   expected to appear as K2 (rank 4) because hub→bridge edge exists with
+#   initial_edge_weight=0.5. The cross-cluster measurement tracks bridge_mu_rank
+#   trajectory over sessions, not a binary PASS/FAIL at rank 1.
+#   See BUILD-PLAN.md Gap A for resolution options.
+#
+# NOTE on process_rule_adherence probes:
+#   Gold MU retrieval rank is measured. Output compliance is not machine-checked.
+#   Manual review is required to verify the model's response actually complied
+#   with the rule described in the gold MU. See BUILD-PLAN.md Gap B.
+
+phenomenon_map:
+  ranking_improvement:
+    description: "Gold MU rank should decrease over sessions within the primary cluster"
+  cross_cluster_transfer:
+    description: "Bridge MU should surface on adjacent-cluster probes via edge traversal (hop_depth > 0)"
+  process_rule_adherence:
+    description: "Gold MU is a rule/constraint MU from cluster_c; output compliance is a human review step"
+
+probes:
+  # 4× ranking_improvement — one per cluster, gold is an in-cluster MU
+  - probe_id: "p06"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "..."   # FILL IN: cluster_a vocabulary query
+    gold_mu_ids:
+      - "a0000001-aaaa-4aaa-8aaa-000000000001"   # cluster_a hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p07"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "..."   # FILL IN: cluster_b vocabulary query
+    gold_mu_ids:
+      - "b0000001-bbbb-4bbb-8bbb-000000000001"   # cluster_b hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p08"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "..."   # FILL IN: cluster_c vocabulary query
+    gold_mu_ids:
+      - "c0000001-cccc-4ccc-8ccc-000000000001"   # cluster_c hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p09"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "..."   # FILL IN: cluster_d vocabulary query
+    gold_mu_ids:
+      - "d0000001-dddd-4ddd-8ddd-000000000001"   # cluster_d hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  # 4× cross_cluster_transfer — one per direction per bridge
+  - probe_id: "p10"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "..."   # FILL IN: cluster_a vocab only; gold is bridge_ab
+    gold_mu_ids:
+      - "ab000001-abab-4aba-8aba-000000000001"
+    is_bridge_probe: true
+    bridge_pair_id: "p11"
+
+  - probe_id: "p11"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "..."   # FILL IN: cluster_b vocab only; gold is bridge_ab
+    gold_mu_ids:
+      - "ab000001-abab-4aba-8aba-000000000001"
+    is_bridge_probe: true
+    bridge_pair_id: "p10"
+
+  - probe_id: "p12"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "..."   # FILL IN: cluster_c vocab only; gold is bridge_cd
+    gold_mu_ids:
+      - "cd000001-cdcd-4cdc-8cdc-000000000001"
+    is_bridge_probe: true
+    bridge_pair_id: "p13"
+
+  - probe_id: "p13"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "..."   # FILL IN: cluster_d vocab only; gold is bridge_cd
+    gold_mu_ids:
+      - "cd000001-cdcd-4cdc-8cdc-000000000001"
+    is_bridge_probe: true
+    bridge_pair_id: "p12"
+
+  # 2× process_rule_adherence — gold MU is a rule/constraint MU from cluster_c
+  - probe_id: "p14"
+    phenomenon_type: "process_rule_adherence"
+    prompt_text: "..."   # FILL IN: query that should surface a cluster_c rule MU
+    gold_mu_ids:
+      - "c0000003-cccc-4ccc-8ccc-000000000003"   # a spoke in cluster_c (rule-heavy content)
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p15"
+    phenomenon_type: "process_rule_adherence"
+    prompt_text: "..."   # FILL IN: second cluster_c rule query
+    gold_mu_ids:
+      - "c0000005-cccc-4ccc-8ccc-000000000005"   # another cluster_c spoke
+    is_bridge_probe: false
+    bridge_pair_id: null
+```
+
+Note: `prompt_text` fields are filled in after the fixture is generated and verified, using vocabulary from the actual MU content (not from the ID scheme). The probe IDs are p06–p15 to avoid collisions with v1 probes (p01–p05).
+
+**Final verification (all 7 checks — run against a freshly wiped + re-seeded graph):**
+
+Before calling this milestone done, document each check as PASS with actual numbers:
+
+| # | Check | Expected | Pass? |
+|---|---|---|---|
+| 1 | `POST /admin/seed-graph {"version":"v2"}` | `mu_count: 34` | ? |
+| 2 | `GET /admin/graph/stats` | cluster_distribution matches table above; `mu_without_cluster_id: 0` | ? |
+| 3 | Connectivity: for each cluster, hub has outgoing edge to its bridge | 4 edges confirmed | ? |
+| 4 | Lexical-distinctness: bridge MUs share no non-stopword terms with adjacent clusters | 0 shared terms | ? |
+| 5a | Baseline probe run (session_index=0, clean v2 graph): ranking_improvement probes | PASS (rank 1) for p06–p09 | ? |
+| 5b | Baseline probe run: cross_cluster_transfer probes p10–p13 | bridge at rank 4 (K2), NOT rank 1 | ? |
+| 6 | Idempotency: second `POST /admin/seed-graph {"version":"v2"}` | no duplicate MUs | ? |
+| 7 | probe_set_v2.yaml loads at startup with no errors; all 10 probes visible in Admin UI Probe Results | 10 probes synced | ? |
+
+These verification results are documented in PROGRESS.md with actual numbers, following the M17 phase log format.
+
+---
+
+**File changes summary for Milestone 18:**
+
+*New files:*
+- `seed_fixtures/seed_v2.json.gz` — frozen fixture (34 MUs, 32 edges)
+- `seed_fixtures/seed_v2_draft.json` — NOT committed (add to .gitignore)
+- `probes/probe_set_v2.yaml` — 10 probes (p06–p15)
+- `scripts/generate_seed_v2.py` — generation script (Gemma 4 via Ollama)
+- `scripts/verify_seed_v2.py` — connectivity + lexical-distinctness checks
+
+*Modified files:*
+- `backend/analytics/seed_fixture.py` — Phase 0.1: insert edges on registration; add `edge_count` to manifest
+- `backend/api/admin.py` — Phase 0.2: `probe_set_version` param on `RunProbeRequest`
+- `backend/main.py` — Phase 0.3: multi-version probe sync at startup
+- `config.yaml` — add `seed.fixture_version: "v2"` and any new v2-specific constants under a `seed_v2:` block (MU counts, cluster names)
+- `.gitignore` — add `seed_fixtures/*_draft.json` and `scripts/__pycache__/`
+
+*Tests:*
+- Extend `tests/test_analytics/test_seed_fixture.py` — edge insertion + idempotency
+- New `tests/test_api/test_run_probe_versioned.py` — probe_set_version param
+- New `tests/test_startup/test_probe_sync.py` — multi-version startup sync
+
+**Existing tests:** All 315 unit + 5 integration tests must still pass. No regressions.
+
+**Done when:**
+1. `seed_v2.json.gz` committed, reviewed and approved by Paul, 34 MUs + 32 edges, all verification checks in the table above documented as PASS with actual numbers
+2. `probe_set_v2.yaml` committed, 10 probes (p06–p15), loads cleanly at startup
+3. Gap A decision documented in PROGRESS.md (pass criterion for cross_cluster_transfer probes confirmed or adjusted)
+4. Gap B noted in probe YAML comments — no code change needed
+5. All 7 verification checks documented as PASS with numbers in PROGRESS.md
+6. Full existing test suite (315 unit + 5 integration) still passing
+7. PROGRESS.md updated with new session-log entry following M17 phase log format
+
+**Out of scope:**
+- No changes to experiment_protocol.md or pilot structure
+- No changes to learning algorithm, decay, or saturation logic
+- No new probe_type enum values
+
+**Risks:**
+- ⚠ **Gap A (cross_cluster_transfer pass criterion):** Resolution is required before probe_set_v2.yaml is frozen. If the decision is to add per-phenomenon pass thresholds (threshold=4 for cross_cluster_transfer), that is a code change in `backend/analytics/reports/experiment_report.py` (the state-transition classifier). Scope it as part of this milestone if needed; do not leave it unresolved.
+- ⚠ **Gemma 4 content quality:** The script prompts Gemma 4 to generate MU content. The output may be too verbose (needs trimming to 2–3 sentences), too similar across MUs (needs fingerprint enforcement), or may accidentally include bridge vocabulary. Budget one review-and-rerun cycle in the estimate.
+- ⚠ **Lexical-distinctness check may be strict:** Raw term overlap (tokenized lowercased words) versus BM25 scoring are different. A term that appears once in a bridge MU might have a BM25 score near zero for the cluster query. Run Check 5 (simulated retrieval) to confirm BM25 behavior, not just term overlap.
+- ? **probe_set_v2 probe_ids p06–p15:** These are probe IDs, not a continuation of the v1 probe sequence. The DB `probes` table uses `probe_id` as a primary key — p06–p15 will coexist with p01–p05 without conflict.
+
+**Estimate:** 3-4 sessions (content generation + review + verification)
+  - Phase 0 (infrastructure): 0.5 session
+  - Phase 1 (generation script + run): 1 session
+  - Phase 2 (Paul review): async / no code time
+  - Phase 3 (verification script + checks): 0.5 session
+  - Phase 4 (probe set + final verification): 1 session
+
+---
+
 ## Status
 
 ```
-Current milestone: 17 — End-to-End Integration + Hardening — NOT STARTED
-Last updated: 2026-06-27
+Current milestone: 18 — Seed Fixture v2 + Probe Set v2 — NOT STARTED
+Last updated: 2026-06-28
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -2275,4 +2878,6 @@ Last updated: 2026-06-27
 
 **Milestone 16:** Complete — branch `milestone-16-control-shadow-admin-ui`, PR merged to main.
 
-**Milestone 17:** Not started — branch TBD.
+**Milestone 17:** Complete — branch `fix/smoketest-2026-06-28-3`, PR merged to main.
+
+**Milestone 18:** Phase 0 complete — branch `milestone-18-phase-0-infra-fixes`, PR pending. Phases 1–4 (content generation, review, verification, probe set) not started.

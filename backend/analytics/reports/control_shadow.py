@@ -210,6 +210,9 @@ def _compute_comparative_deltas(
             return None
         # Group by probe_id, get last session for each
         from collections import defaultdict
+        from analytics.reports.experiment_report import _classify_probe_outcome
+        default_threshold = measures.get("pass_rank_threshold", 3)
+        phenomenon_thresholds = measures.get("phenomenon_thresholds") or {}
         by_probe: dict[str, list] = defaultdict(list)
         for r in results_by_probe:
             by_probe[r.get("probe_id", "")].append(r)
@@ -221,9 +224,13 @@ def _compute_comparative_deltas(
                 continue
             last = sorted_r[-1]
             total += 1
-            rank = last.get("gold_mu_rank")
-            threshold = measures.get("pass_rank_threshold", 3)
-            if rank is not None and rank <= threshold:
+            # phenomenon_type is not available in the flat result — falls back to default
+            outcome = _classify_probe_outcome(
+                last, default_threshold,
+                phenomenon_type="",
+                phenomenon_thresholds=phenomenon_thresholds,
+            )
+            if outcome == "pass":
                 pass_count += 1
         return pass_count / total if total > 0 else None
 

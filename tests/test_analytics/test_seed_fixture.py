@@ -31,26 +31,32 @@ def run(coro):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _write_fixture(path: Path, memory_units: list = None) -> Path:
+def _write_fixture(path: Path, memory_units: list = None, edges: list = None) -> Path:
     """Write a gzip-JSON fixture file in graph snapshot format."""
+    mus = memory_units or []
+    eds = edges or []
     data = {
         "timestamp": "2026-06-22T00:00:00Z",
-        "mu_count": len(memory_units or []),
-        "edge_count": 0,
-        "memory_units": memory_units or [],
-        "edges": [],
+        "mu_count": len(mus),
+        "edge_count": len(eds),
+        "memory_units": mus,
+        "edges": eds,
     }
     with gzip.open(path, "wt", encoding="utf-8") as f:
         json.dump(data, f)
     return path
 
 
-def _make_fixture(tmp_path: Path, version: str = "v1", mus: list = None) -> Path:
+def _make_fixture(tmp_path: Path, version: str = "v1", mus: list = None, edges: list = None) -> Path:
     fixture_path = tmp_path / f"seed_{version}.json.gz"
-    _write_fixture(fixture_path, mus or [
-        {"mu_id": "mu-001", "source_type": "user_input", "raw_content": "hello"},
-        {"mu_id": "mu-002", "source_type": "agent_output", "raw_content": "world"},
-    ])
+    _write_fixture(
+        fixture_path,
+        mus or [
+            {"mu_id": "mu-001", "source_type": "user_input", "raw_content": "hello"},
+            {"mu_id": "mu-002", "source_type": "agent_output", "raw_content": "world"},
+        ],
+        edges or [],
+    )
     return fixture_path
 
 
@@ -202,3 +208,83 @@ def test_load_and_verify_fixture_raises_when_file_missing(tmp_path):
                 run(load_and_verify_fixture(version="v1"))
 
     print("[PASS] FileNotFoundError raised when fixture file is missing from disk")
+
+
+# ---------------------------------------------------------------------------
+# Phase 0.1: edge insertion tests
+# ---------------------------------------------------------------------------
+
+def test_register_fixture_inserts_edges(tmp_path):
+    """register_fixture() inserts edges from the fixture file into the graph store."""
+    edges = [
+        {
+            "edge_id": "edge-001",
+            "source_mu_id": "mu-001",
+            "target_mu_id": "mu-002",
+            "weight": 0.5,
+            "direction": "forward",
+        },
+        {
+            "edge_id": "edge-002",
+            "source_mu_id": "mu-002",
+            "target_mu_id": "mu-001",
+            "weight": 0.8,
+            "direction": "forward",
+        },
+    ]
+    fixture_path = _make_fixture(tmp_path, edges=edges)
+
+    with patch("analytics.seed_fixture.graph_store") as mock_store:
+        mock_store.create_mu = AsyncMock()
+        mock_store.create_edge = AsyncMock()
+        mock_store.insert_seed_fixture_manifest = AsyncMock()
+
+        manifest = run(register_fixture(fixture_path=fixture_path, version="v1"))
+
+    assert manifest.edge_count == 2
+    assert mock_store.create_edge.call_count == 2
+    call_args = [call.kwargs for call in mock_store.create_edge.call_args_list]
+    edge_ids = {a["edge_id"] for a in call_args}
+    assert "edge-001" in edge_ids
+    assert "edge-002" in edge_ids
+    # Verify creation_trigger is "seed" for all edges
+    for args in call_args:
+        assert args["creation_trigger"] == "seed"
+        assert args["creation_run_id"] is None
+    print(f"[PASS] {manifest.edge_count} edges inserted with creation_trigger='seed'")
+
+
+def test_register_fixture_edge_count_zero_for_no_edges(tmp_path):
+    """register_fixture() sets edge_count=0 when fixture has no edges."""
+    fixture_path = _make_fixture(tmp_path, edges=[])
+
+    with patch("analytics.seed_fixture.graph_store") as mock_store:
+        mock_store.create_mu = AsyncMock()
+        mock_store.create_edge = AsyncMock()
+        mock_store.insert_seed_fixture_manifest = AsyncMock()
+
+        manifest = run(register_fixture(fixture_path=fixture_path, version="v1"))
+
+    assert manifest.edge_count == 0
+    mock_store.create_edge.assert_not_called()
+    print("[PASS] edge_count=0 and create_edge not called when fixture has no edges")
+
+
+def test_register_fixture_edge_idempotent_on_duplicate(tmp_path):
+    """register_fixture() skips duplicate edges without raising (idempotent re-registration)."""
+    edges = [{"edge_id": "edge-dup", "source_mu_id": "mu-001", "target_mu_id": "mu-002", "weight": 0.5, "direction": "forward"}]
+    fixture_path = _make_fixture(tmp_path, edges=edges)
+
+    with patch("analytics.seed_fixture.graph_store") as mock_store:
+        mock_store.create_mu = AsyncMock()
+        # Simulate duplicate constraint violation on the second call
+        mock_store.create_edge = AsyncMock(side_effect=Exception("UNIQUE constraint failed"))
+        mock_store.insert_seed_fixture_manifest = AsyncMock()
+
+        # Should not raise — duplicate edges are logged at DEBUG and skipped
+        manifest = run(register_fixture(fixture_path=fixture_path, version="v1"))
+
+    # edge_count is 0 because create_edge raised (edge was skipped, not counted)
+    assert manifest.edge_count == 0
+    mock_store.create_edge.assert_called_once()
+    print("[PASS] duplicate edge skipped without raising; edge_count correctly 0")

@@ -223,6 +223,16 @@ reporting:
   # Range: 1–K1+K2. Adjust if K1/K2 values change.
   pass_rank_threshold: 1
 
+  # Per-phenomenon pass-rank threshold overrides. Missing keys fall back to
+  # pass_rank_threshold (the global default above). raw gold_mu_rank values
+  # in probe_results are always stored unchanged — only classification uses these.
+  # cross_cluster_transfer uses 4 because the bridge MU structurally occupies the
+  # K2 slot (rank 4 = K1(3) + K2(1)) and cannot surface at rank 1 by design.
+  pass_rank_thresholds:
+    ranking_improvement: 1
+    cross_cluster_transfer: 4    # K1(3) + K2(1); bridge structurally occupies K2 slot
+    process_rule_adherence: 1
+
   # §6.1: edge weight above this value is flagged as a saturation risk —
   # further positive feedback will have diminishing effect (approaching 1.0).
   # Range: 0.7–0.99.

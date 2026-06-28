@@ -21,3 +21,5 @@ venv/
 env/
 .vscode/
 backend/config.yaml
+seed_fixtures/*_draft.json
+scripts/__pycache__/

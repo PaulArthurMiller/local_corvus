@@ -230,10 +230,20 @@ def _render_s61(section: dict) -> str:
     if section is None:
         return "## §6.1 Learning Measures\n\n_Not yet computed._"
 
+    # Build threshold display: per-phenomenon if available, else global
+    phenomenon_thresholds = section.get("phenomenon_thresholds") or {}
+    if phenomenon_thresholds:
+        threshold_parts = ", ".join(
+            f"{ph}={t}" for ph, t in sorted(phenomenon_thresholds.items())
+        )
+        threshold_str = f"**Pass-rank thresholds:** {threshold_parts}  "
+    else:
+        threshold_str = f"**Pass-rank threshold:** top-{section.get('pass_rank_threshold', 3)}  "
+
     lines = [
         "## §6.1 Learning Measures\n",
         f"**Condition:** `{section.get('condition_label', '—')}`  ",
-        f"**Pass-rank threshold:** top-{section.get('pass_rank_threshold', 3)}  ",
+        threshold_str,
         f"**Probes:** {section.get('probe_count', 0)}  ",
         f"**Runs with weight updates:** {section.get('run_count', 0)}\n",
     ]

@@ -215,6 +215,7 @@ class RunProbeRequest(BaseModel):
     probe_id: str
     measurement_session_index: int
     condition_label: str
+    probe_set_version: str = "v1"   # default "v1" preserves backward compat
 
 
 @router.post("/run-probe")
@@ -235,7 +236,7 @@ async def run_probe(body: RunProbeRequest):
 
     # Load probe definitions from YAML to find the requested probe
     try:
-        probes = load_probe_set(version="v1")
+        probes = load_probe_set(version=body.probe_set_version)
     except Exception as exc:
         logger.error("admin/run-probe: could not load probe set — %s", exc)
         raise HTTPException(status_code=500, detail=f"Could not load probe set: {exc}")
@@ -244,7 +245,7 @@ async def run_probe(body: RunProbeRequest):
     if probe is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Probe '{body.probe_id}' not found in probe set",
+            detail=f"Probe '{body.probe_id}' not found in probe set version '{body.probe_set_version}'",
         )
 
     # Load config for retrieval hyperparameters

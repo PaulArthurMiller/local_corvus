@@ -170,6 +170,69 @@ class TestClassifyProbeOutcome:
         result = _make_probe_result("p1", 1, gold_mu_rank=None, outcome_override="negative_flagged")
         assert _classify_probe_outcome(result, pass_rank_threshold=3) == "negative_flagged"
 
+    # --- Phase 0.4: phenomenon-aware pass criteria ---
+
+    def test_cross_cluster_transfer_passes_at_rank4_with_threshold4(self):
+        """cross_cluster_transfer with rank=4 should PASS when phenomenon threshold is 4."""
+        result = _make_probe_result("p10", 0, gold_mu_rank=4)
+        thresholds = {"cross_cluster_transfer": 4, "ranking_improvement": 1}
+        outcome = _classify_probe_outcome(
+            result, pass_rank_threshold=1,
+            phenomenon_type="cross_cluster_transfer",
+            phenomenon_thresholds=thresholds,
+        )
+        assert outcome == "pass", f"Expected pass, got {outcome}"
+        print("[PASS] cross_cluster_transfer rank=4 → PASS with threshold=4")
+
+    def test_cross_cluster_transfer_fails_at_rank5_with_threshold4(self):
+        """cross_cluster_transfer with rank=5 should FAIL when phenomenon threshold is 4."""
+        result = _make_probe_result("p10", 0, gold_mu_rank=5)
+        thresholds = {"cross_cluster_transfer": 4, "ranking_improvement": 1}
+        outcome = _classify_probe_outcome(
+            result, pass_rank_threshold=1,
+            phenomenon_type="cross_cluster_transfer",
+            phenomenon_thresholds=thresholds,
+        )
+        assert outcome == "fail", f"Expected fail, got {outcome}"
+        print("[PASS] cross_cluster_transfer rank=5 → FAIL with threshold=4")
+
+    def test_ranking_improvement_fails_at_rank2_even_with_cross_cluster_threshold(self):
+        """ranking_improvement with rank=2 should FAIL even when cross_cluster threshold is 4."""
+        result = _make_probe_result("p06", 0, gold_mu_rank=2)
+        thresholds = {"cross_cluster_transfer": 4, "ranking_improvement": 1}
+        outcome = _classify_probe_outcome(
+            result, pass_rank_threshold=1,
+            phenomenon_type="ranking_improvement",
+            phenomenon_thresholds=thresholds,
+        )
+        assert outcome == "fail", f"Expected fail, got {outcome}"
+        print("[PASS] ranking_improvement rank=2 → FAIL with threshold=1")
+
+    def test_falls_back_to_default_when_no_phenomenon_thresholds(self):
+        """No phenomenon_thresholds arg → falls back to pass_rank_threshold."""
+        result = _make_probe_result("p01", 0, gold_mu_rank=3)
+        outcome = _classify_probe_outcome(
+            result, pass_rank_threshold=3,
+            phenomenon_type="ranking_improvement",
+            phenomenon_thresholds=None,
+        )
+        assert outcome == "pass", f"Expected pass, got {outcome}"
+        print("[PASS] fallback to default threshold when phenomenon_thresholds=None")
+
+    def test_gold_mu_rank_not_modified_by_classify(self):
+        """gold_mu_rank in probe_results row is untouched by _classify_probe_outcome."""
+        result = _make_probe_result("p10", 0, gold_mu_rank=4)
+        original_rank = result["gold_mu_rank"]
+        thresholds = {"cross_cluster_transfer": 4}
+        _classify_probe_outcome(
+            result, pass_rank_threshold=1,
+            phenomenon_type="cross_cluster_transfer",
+            phenomenon_thresholds=thresholds,
+        )
+        # The raw rank must remain unchanged
+        assert result["gold_mu_rank"] == original_rank
+        print(f"[PASS] gold_mu_rank={original_rank} unchanged after classification")
+
 
 # ---------------------------------------------------------------------------
 # §6.1 — _compute_state_transitions

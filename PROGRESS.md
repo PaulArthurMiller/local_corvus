@@ -3,9 +3,9 @@
 ## Current state
 
 Project: Local Corvus — local LLM learning research platform  
-Phase: Complete  
-Current milestone: 17 — End-to-End Integration + Hardening — COMPLETE (all 6 phases)  
-Next step: Run a full three-condition experiment using docs/experiment_protocol.md. See "Open questions for future work" section for prioritised follow-ups.
+Phase: Active — M18 planned, not started  
+Current milestone: 18 — Seed Fixture v2 + Probe Set v2 (PLANNED — see BUILD-PLAN.md)  
+Next step: Build M18 Phase 0 infrastructure fixes, then generate seed_v2 fixture (34 MUs, 32 edges) and probe_set_v2.yaml (10 probes) to enable the real three-condition experiment.
 
 ## Session log
 
@@ -479,3 +479,27 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
 6. **multimodal (Ollama regression, M7):** Ollama 0.30.x on Windows has a regression where
    gemma4:e4b decodes image tokens but does not interpret image content. Monitor the Ollama
    changelog for a fix to GitHub Issue #16532 before using attachment features in experiments.
+7. **Output-compliance grading for `process_rule_adherence` probes:** The current probe pass
+   criterion checks only retrieval rank (gold MU appears in top-K). It does not verify whether
+   the agent's generated response actually follows the process rule described in the seed MU.
+   A full compliance check would require a judge/evaluator step (LLM-as-judge or structured
+   output parsing) that goes beyond rank-checking. Deferred as a candidate for a future
+   automation-focused milestone — not addressed in M18.
+
+- 2026-06-28: /build — Milestone 18 Phase 0 complete (infrastructure fixes)
+  - Modified: `backend/analytics/seed_fixture.py` (Phase 0.1: `register_fixture()` now inserts edges from fixture; `SeedFixtureManifest` gains `edge_count: int = 0`; idempotent — duplicate edges are skipped with DEBUG log)
+  - Modified: `backend/api/admin.py` (Phase 0.2: `RunProbeRequest` gains `probe_set_version: str = "v1"`; hardcoded "v1" replaced with `body.probe_set_version` in `run_probe`)
+  - Modified: `backend/main.py` (Phase 0.3: startup probe sync now loops over ["v1", "v2"]; missing yaml logs INFO and continues; exceptions log WARNING and continue)
+  - Modified: `config.yaml` (Phase 0.4: added `reporting.pass_rank_thresholds` dict with per-phenomenon overrides: `cross_cluster_transfer: 4`, `ranking_improvement: 1`, `process_rule_adherence: 1`)
+  - Modified: `backend/analytics/reports/experiment_report.py` (Phase 0.4: `_classify_probe_outcome` gains `phenomenon_type` and `phenomenon_thresholds` optional params; `_compute_state_transitions` and `_compute_mus_by_probe_outcome` thread phenomenon-aware thresholds; `_section_61_learning_measures` reads and stores `phenomenon_thresholds` in return dict)
+  - Modified: `backend/analytics/reports/control_shadow.py` (Phase 0.4: `_final_pass_rate` uses `_classify_probe_outcome` with thresholds from measures dict)
+  - Modified: `backend/analytics/reports/markdown_renderer.py` (Phase 0.4: §6.1 header shows per-phenomenon thresholds when `phenomenon_thresholds` is non-empty)
+  - Modified: `.gitignore` (added `seed_fixtures/*_draft.json` and `scripts/__pycache__/`)
+  - Added: `tests/test_analytics/test_seed_fixture.py` extensions (3 new tests: edge insertion, edge_count=0 for no edges, idempotent duplicate)
+  - Added: `tests/test_api/test_run_probe_versioned.py` (5 new tests: default version, v2 accepted, FileNotFoundError for missing version, v1 loads for v1, v2 loads for v2)
+  - Added: `tests/test_startup/test_probe_sync.py` (4 new tests: both synced, missing v2, missing v1, exception non-fatal)
+  - Added: `tests/test_analytics/test_learning_measures.py` extensions (6 new tests: phenomenon-aware classify — cross_cluster pass/fail, ranking_improvement override, fallback to default, gold_mu_rank untouched)
+  - Tests: 17 new, 332 total — all passing
+  - Branch: milestone-18-phase-0-infra-fixes
+  - Gap A (cross_cluster_transfer pass criterion): RESOLVED — per-phenomenon threshold config added; cross_cluster_transfer uses threshold=4 (K1+K2); raw gold_mu_rank never modified
+  - Gap B (process_rule_adherence output compliance): DOCUMENTED ONLY — noted in probe YAML comments; no code change needed

@@ -458,17 +458,27 @@ async def _section_63_integrity_checks(
 # ---------------------------------------------------------------------------
 
 
-def _classify_probe_outcome(result: dict, pass_rank_threshold: int) -> str:
+def _classify_probe_outcome(
+    result: dict,
+    pass_rank_threshold: int,
+    phenomenon_type: str = "",
+    phenomenon_thresholds: Optional[dict] = None,
+) -> str:
     """
     Classify a single probe result as 'pass', 'fail', or 'negative_flagged'.
 
+    threshold is looked up per phenomenon_type first, then falls back to
+    pass_rank_threshold (the global default). gold_mu_rank is always the raw
+    rank — never modified here.
+
     'negative_flagged' requires an explicit outcome_override on the result.
-    'pass' requires gold_mu_rank to be set and within the threshold.
+    'pass' requires gold_mu_rank to be set and within the effective threshold.
     """
     if result.get("outcome_override") == "negative_flagged":
         return "negative_flagged"
     rank = result.get("gold_mu_rank")
-    if rank is not None and rank <= pass_rank_threshold:
+    threshold = (phenomenon_thresholds or {}).get(phenomenon_type, pass_rank_threshold)
+    if rank is not None and rank <= threshold:
         return "pass"
     return "fail"
 
@@ -477,6 +487,7 @@ def _compute_state_transitions(
     probes: list[dict],
     results_by_probe: dict[str, list[dict]],
     pass_rank_threshold: int,
+    phenomenon_thresholds: Optional[dict] = None,
 ) -> dict:
     """
     For each probe, classify results as pass/fail/negative_flagged, derive a
@@ -495,7 +506,14 @@ def _compute_state_transitions(
             key=lambda r: r.get("measurement_session_index", 0),
         )
 
-        outcomes = [_classify_probe_outcome(r, pass_rank_threshold) for r in results]
+        outcomes = [
+            _classify_probe_outcome(
+                r, pass_rank_threshold,
+                phenomenon_type=phenomenon,
+                phenomenon_thresholds=phenomenon_thresholds,
+            )
+            for r in results
+        ]
         session_indices = [r.get("measurement_session_index") for r in results]
         gold_ranks = [r.get("gold_mu_rank") for r in results]
 
@@ -562,6 +580,7 @@ def _compute_mus_by_probe_outcome(
     results_by_probe: dict[str, list[dict]],
     pass_rank_threshold: int,
     mu_info: dict[str, dict],
+    phenomenon_thresholds: Optional[dict] = None,
 ) -> list[dict]:
     """
     For each probe, group retrieved MUs by classified outcome (pass/fail/negative_flagged).
@@ -572,6 +591,7 @@ def _compute_mus_by_probe_outcome(
 
     for probe in probes:
         probe_id = probe["probe_id"]
+        phenomenon = probe.get("phenomenon_type", "unknown")
         results = sorted(
             results_by_probe.get(probe_id, []),
             key=lambda r: r.get("measurement_session_index", 0),
@@ -579,7 +599,11 @@ def _compute_mus_by_probe_outcome(
 
         by_outcome: dict[str, list[dict]] = {"pass": [], "fail": [], "negative_flagged": []}
         for result in results:
-            outcome = _classify_probe_outcome(result, pass_rank_threshold)
+            outcome = _classify_probe_outcome(
+                result, pass_rank_threshold,
+                phenomenon_type=phenomenon,
+                phenomenon_thresholds=phenomenon_thresholds,
+            )
             retrieved_mus = []
             for mu_id in result.get("retrieved_mu_ids") or []:
                 info = mu_info.get(mu_id) or {}
@@ -930,13 +954,14 @@ async def _section_61_learning_measures(
     """
     reporting_cfg = config.get("reporting", {})
     pass_rank_threshold = reporting_cfg.get("pass_rank_threshold", 3)
+    phenomenon_thresholds = reporting_cfg.get("pass_rank_thresholds", {})
     saturation_threshold = reporting_cfg.get("saturation_threshold", 0.9)
 
     condition_label = await store.get_condition_label_for_experiment(experiment_id)
     logger.info(
         "experiment_report §6.1: experiment_id=%s condition=%s "
-        "pass_rank_threshold=%d saturation_threshold=%.2f",
-        experiment_id, condition_label, pass_rank_threshold, saturation_threshold,
+        "pass_rank_threshold=%d phenomenon_thresholds=%s saturation_threshold=%.2f",
+        experiment_id, condition_label, pass_rank_threshold, phenomenon_thresholds, saturation_threshold,
     )
 
     # All runs for this experiment (weight_updates, feedback_signal, turn_index)
@@ -977,9 +1002,11 @@ async def _section_61_learning_measures(
     logger.info("experiment_report §6.1: %d unique MU IDs looked up", len(mu_info))
 
     # --- Sub-sections ---
-    state_transitions = _compute_state_transitions(probes, results_by_probe, pass_rank_threshold)
+    state_transitions = _compute_state_transitions(
+        probes, results_by_probe, pass_rank_threshold, phenomenon_thresholds
+    )
     mus_by_probe_outcome = _compute_mus_by_probe_outcome(
-        probes, results_by_probe, pass_rank_threshold, mu_info
+        probes, results_by_probe, pass_rank_threshold, mu_info, phenomenon_thresholds
     )
 
     all_updates = _collect_all_weight_updates(all_runs, mu_info)
@@ -1012,6 +1039,7 @@ async def _section_61_learning_measures(
 
     return {
         "pass_rank_threshold": pass_rank_threshold,
+        "phenomenon_thresholds": phenomenon_thresholds,
         "saturation_threshold": saturation_threshold,
         "condition_label": condition_label,
         "probe_count": len(probes),

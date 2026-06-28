@@ -25,16 +25,19 @@ app = FastAPI(title="Local Corvus Backend")
 
 @app.on_event("startup")
 async def _sync_probes_on_startup():
-    """Upsert probe definitions from YAML into the DB on every startup."""
-    try:
-        from analytics.probes import load_probe_set
-        from memory.store import store as graph_store
-        probes = load_probe_set(version="v1")
-        await graph_store.sync_probes([p.model_dump() for p in probes])
-        logger.info("startup: synced %d probe definitions to DB", len(probes))
-    except Exception as exc:
-        # Probe sync failure is non-fatal — log and continue
-        logger.warning("startup: probe sync failed (non-fatal) — %s", exc)
+    """Upsert probe definitions from all known YAML versions into the DB on every startup."""
+    from analytics.probes import load_probe_set
+    from memory.store import store as graph_store
+    for version in ["v1", "v2"]:
+        try:
+            probes = load_probe_set(version=version)
+            await graph_store.sync_probes([p.model_dump() for p in probes])
+            logger.info("startup: synced %d probe definitions (version=%s)", len(probes), version)
+        except FileNotFoundError:
+            logger.info("startup: probe_set_%s.yaml not found — skipping", version)
+        except Exception as exc:
+            # Probe sync failure is non-fatal — log and continue
+            logger.warning("startup: probe sync version=%s failed (non-fatal) — %s", version, exc)
 
 app.add_middleware(
     CORSMiddleware,

@@ -1,20 +1,60 @@
+# =============================================================================
+# Local Corvus — Hyperparameter Registry
+#
+# This file is the single source of truth for all configurable values.
+# Everything uncertain or tunable lives here; nothing is hardcoded in Python.
+# Change a value here and restart the backend to apply it.
+# =============================================================================
+
 model:
+  # Ollama model tag to use for all LLM calls.
+  # Default: "gemma4:e4b" — Gemma 4 4-bit quantized, fits in 8 GB VRAM.
+  # Change to any Ollama-hosted model; the tool-call schema must be compatible.
   name: "gemma4:e4b"
+
+  # Ollama API base URL. Inside Docker, use host.docker.internal to reach
+  # the native Ollama process on the Windows host.
+  # If running locally (no Docker), change to "http://localhost:11434".
   ollama_host: "http://host.docker.internal:11434"
+
+  # Per-request timeout in seconds. Gemma 4 E4B on an RTX 5060 typically
+  # completes in 5–20 s; 60 s gives headroom for long context or slow turns.
+  # Range: 10–300. Below 10 s risks spurious timeouts on complex prompts.
   timeout_seconds: 60
+
+  # Context window size in tokens for the loaded model.
+  # Used by §5.8 of the series report to flag turns approaching the ceiling.
+  # Gemma 4 E4B: 8192 tokens. Update if you switch models.
   context_window_tokens: 8192
 
 gate:
+  # Hard character limit on user input before sanitization.
+  # Inputs exceeding this are truncated and flagged "input_truncated".
+  # Range: 512–16384. Keep below context_window_tokens to leave room for
+  # memory context and system prompt.
   max_input_length: 4096
+
+  # MIME types accepted for image attachments (M7 multimodal support).
+  # Any other type is rejected with flag "attachment_mime_rejected".
   allowed_attachment_mimetypes:
     - "image/jpeg"
     - "image/png"
     - "image/gif"
     - "image/webp"
+
+  # Maximum decoded byte size per attachment.
+  # 5 MB decoded → ~6.7 MB base64 payload. Acceptable for local use.
+  # Range: 1048576 (1 MB) – 20971520 (20 MB).
   max_attachment_size_bytes: 5242880  # 5 MB decoded; base64 payload is ~33% larger
+
+  # Maximum number of image attachments per chat message.
+  # Ollama processes each image independently; more images = more latency.
+  # Range: 1–8.
   max_attachments_per_message: 4
+
   # Deterministic regex patterns for prompt injection detection.
-  # These are evaluated in order; any match raises a flag.
+  # Evaluated case-insensitively; any match raises flag "injection_attempt".
+  # Add patterns as the threat model evolves. Each entry is a Python regex.
   injection_patterns:
     - "ignore (previous|all|prior) instructions"
     - "forget (everything|what|your)"
@@ -32,32 +72,113 @@ gate:
     - "###\\s*(instruction|system|prompt)"
 
 hyperparameters:
+  # ---------------------------------------------------------------------------
   # Retrieval
+  # ---------------------------------------------------------------------------
+
+  # BM25 index query: maximum candidate MUs per keyword token.
+  # Larger pools improve recall but increase ranking latency.
+  # Range: 5–100. Default 20 is sufficient for corpora up to ~10,000 MUs.
   retrieval_keyword_pool_size: 20
+
+  # K1: number of MUs to select after BM25 multi-hit filtering and edge-weight
+  # scoring. These are the "entry points" into the graph traversal.
+  # Range: 1–10. Lower values are more selective; higher values admit more
+  # candidates to the traversal hop.
   retrieval_level1_top_k: 3
+
+  # K2: number of MUs to return after one-hop graph traversal from K1.
+  # With K2=1 and K1=3, at most 4 MUs reach the context (3 K1 + 1 K2).
+  # Range: 1–5. Keep small; each retrieved MU consumes context budget.
   retrieval_level2_top_k: 1
+
+  # Weight multiplier applied to edges traversed in the "forward" direction
+  # vs. "bidirectional" edges. Forward edges (causal direction) are favoured.
+  # Range: 1.0–3.0. 1.0 = no directional bias; 2.0 = forward edges 2× heavier.
   directional_edge_weight_multiplier: 1.5
+
+  # Number of top BM25 tokens to use as retrieval keywords per query.
+  # Higher values broaden the candidate set; lower values stay focused.
+  # Range: 3–15.
   retrieval_keyword_count: 5
 
+  # ---------------------------------------------------------------------------
   # Context
+  # ---------------------------------------------------------------------------
+
+  # Soft token budget for the condensed memory context injected into the
+  # system role. The extractor truncates or summarises to stay within this.
+  # Range: 256–4096. Must leave room for system prompt + user message within
+  # context_window_tokens.
   context_token_budget: 2048
+
+  # Token count above which the extractor triggers a Gemma summarisation call
+  # (Mode 3) instead of returning the raw extracted sentences.
+  # Range: 500–context_token_budget. Should be lower than context_token_budget
+  # to guarantee the summary fits before being passed to the next Ollama call.
   summarization_trigger_tokens: 1500
+
+  # Approximate token count of session history beyond which the history is
+  # compressed before being injected (future feature — not yet implemented).
+  # Deferred to Phase 2.
   session_compression_threshold: 8000
+
+  # Minimum sentences the extractor must return in Mode 1 before falling back
+  # to Mode 2 (first + last sentence per MU).
+  # Range: 1–5.
   extractor_min_sentences: 2
 
+  # ---------------------------------------------------------------------------
   # Learning
-  initial_edge_weight: 0.5        # OPEN — see open questions in BUILD-PLAN.md
+  # ---------------------------------------------------------------------------
+
+  # Starting weight for all newly created edges.
+  # 0.5 = neutral prior (neither retrieval-favoured nor retrieval-penalised).
+  # OPEN QUESTION: should this be source-type-dependent? See BUILD-PLAN.md.
+  # Range: 0.0–1.0.
+  initial_edge_weight: 0.5
+
+  # Delta applied to edge weights on each thumbs-up or thumbs-down feedback
+  # event (SimpleRL algorithm). New weight is clamped to [0.0, 1.0].
+  # Range: 0.01–0.5. Smaller values = slower convergence; larger = noisier.
   weight_update_rate: 0.1
-  decay_rate: 0.01                 # OPEN — see open questions in BUILD-PLAN.md
+
+  # Per-interaction weight decay rate (not yet implemented — deferred to Phase 2).
+  # OPEN QUESTION: linear / exponential / sigmoid? See BUILD-PLAN.md.
+  # Range: 0.0–0.1.
+  decay_rate: 0.01
+
+  # Edges with weight below this threshold are candidates for pruning.
+  # Pruning is not yet active in the live loop (deferred to Phase 2).
+  # Range: 0.0–0.2.
   pruning_threshold: 0.05
+
+  # Learning algorithm class to use. Must match a registered class name in
+  # backend/learning/. Currently only "simple_rl" is implemented.
   algorithm: "simple_rl"
 
+  # ---------------------------------------------------------------------------
   # System
+  # ---------------------------------------------------------------------------
+
+  # Maximum number of tool-call iterations before the orchestrator abandons
+  # the tool loop and returns an empty-output failure.
+  # Range: 1–20. 5 is sufficient for the file_read + file_write task suite.
   tool_loop_max_iterations: 5
+
+  # How often to write a full graph snapshot to /app/memory/snapshots/.
+  # "every_interaction" = one snapshot per /chat call (storage-intensive).
+  # Future values: "every_n_interactions", "on_feedback_only".
   snapshot_frequency: "every_interaction"
-  dreaming_cycle_interval_minutes: 60  # deferred to Phase 2
+
+  # Interval (minutes) between dreaming-cycle offline consolidation runs.
+  # Dreaming is deferred to Phase 2; this value is not yet read by any code.
+  dreaming_cycle_interval_minutes: 60
 
 tools:
+  # Registered tools are loaded at startup by the ToolRegistry.
+  # Each entry maps a tool name (as the LLM sees it) to a Python class.
+  # To add a new tool: create a class in backend/tools/, add an entry here.
   registered:
     - name: "file_read"
       module: "tools.file_tool"
@@ -69,12 +190,45 @@ tools:
       operation: "write"
 
 experiment:
-  experiment_id: ""  # set explicitly before each experiment run; auto-generated if empty
-  condition_label: "learning"              # change to "static-weight" or "random-weight" for control runs
-  use_session_context: false               # set true to restore multi-turn history injection; restart required
+  # Unique identifier for the current experiment run.
+  # Set explicitly before starting each condition (e.g. "exp-learned-2026-07-01").
+  # If empty at startup, auto-generated as "{condition_label}-{YYYY-MM-DD}"
+  # and logged at WARNING level — set it explicitly for reproducibility.
+  experiment_id: ""
+
+  # Condition label for the current run. Controls which experiment_id prefix
+  # is used in auto-generation and is stamped on every run record and MU.
+  # Values: "learning" | "static-weight" | "random-weight"
+  # Can also be set via CONDITION_LABEL environment variable (takes priority).
+  condition_label: "learning"
+
+  # Whether to inject prior session turns into each Ollama call.
+  # false (default): each turn receives only retrieved memory context + current
+  #   user message — isolates the graph retrieval signal from conversational bias.
+  # true: restores multi-turn history injection (behaviour from before M10).
+  # Requires a backend restart to take effect; also settable via
+  # USE_SESSION_CONTEXT env var.
+  use_session_context: false
 
 reporting:
-  mode3_min_expected_length: 100    # §5.7: system MUs shorter than this are flagged as anomalous
-  pass_rank_threshold: 1            # §6.1: gold MU in top-N retrieved counts as a pass (K2=1 → max retrieved=4; threshold=1 requires gold at rank 1)
-  saturation_threshold: 0.9         # §6.1: edge weight above this value is flagged as saturation risk
-  random_control_variance_floor: 0.05  # §6.2: random-control edge weight std-dev below this is flagged as possibly static
+  # §5.7: Mode-3 summarisation MUs shorter than this byte count are flagged
+  # as anomalously short (possible truncation or empty-output failure).
+  # Range: 50–500.
+  mode3_min_expected_length: 100
+
+  # §6.1: gold MU must appear at or above this rank in the retrieved set to
+  # count as a "pass" for probe evaluation.
+  # With K2=1 the maximum retrieved set is 4 MUs (K1=3 + K2=1); threshold=1
+  # requires the gold MU to be the top-ranked result.
+  # Range: 1–K1+K2. Adjust if K1/K2 values change.
+  pass_rank_threshold: 1
+
+  # §6.1: edge weight above this value is flagged as a saturation risk —
+  # further positive feedback will have diminishing effect (approaching 1.0).
+  # Range: 0.7–0.99.
+  saturation_threshold: 0.9
+
+  # §6.2: random-control edge weight standard deviation below this floor is
+  # flagged as "possibly static" — the re-randomisation may not have fired.
+  # Range: 0.01–0.2.
+  random_control_variance_floor: 0.05

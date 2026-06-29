@@ -512,3 +512,19 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
   - Tests: 332 existing tests — all passing; no new tests (script is a standalone dev tool, not part of the test suite)
   - Branch: milestone-18-phase-1-seed-v2-generation
   - Next step: Paul reviews seed_fixtures/seed_v2_draft.json content, approves or requests rewrites, then freezes to seed_v2.json.gz for Phase 3 verification
+
+- 2026-06-28: M18 Phase 2 complete — Paul reviewed seed_v2_draft.json and froze to seed_fixtures/seed_v2.json.gz (commit 951d69f)
+
+- 2026-06-29: /smoketest — Milestone 18 Phase 3 (verification script), 0 bugs found
+  - Bugs found: 0
+  - Gaps fixed: 0 (all verification checks passed on first run)
+  - Branch: fix/smoketest-2026-06-29
+  - Created: `scripts/verify_seed_v2.py` — 5-check verification script against the frozen seed_v2.json.gz
+  - Phase 3 verification results (all PASS against seed_fixtures/seed_v2.json.gz):
+    - Check 1 — MU count: 34 MUs, cluster_distribution exactly as specified (cluster_a/b/c/d×8 each, bridge_ab/cd×1 each): PASS
+    - Check 2 — Edge wiring: 32 edges; each hub has 7 incoming spoke->hub edges and 1 outgoing hub->bridge edge; no edges between {a,b} group and {c,d} group: PASS
+    - Check 3 — Connectivity: hub->bridge edge confirmed for all 4 clusters (cluster_a->bridge_ab, cluster_b->bridge_ab, cluster_c->bridge_cd, cluster_d->bridge_cd): PASS
+    - Check 4 — Lexical-distinctness: bridge_ab contains none of CLUSTER_A_FP+CLUSTER_B_FP; bridge_cd contains none of CLUSTER_C_FP+CLUSTER_D_FP: PASS
+    - Check 5 — BM25 probe sanity (simulated retrieval): for all 4 cross-cluster queries (p10–p13), K1=[3 in-cluster MUs], K2=[correct bridge]; bridge never at K1: PASS
+  - Tests: 332 existing tests — all passing; no regressions
+  - Note: seed_v2.json.gz is verified and ready for Phase 4 (probe_set_v2.yaml)

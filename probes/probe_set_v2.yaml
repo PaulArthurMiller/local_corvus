@@ -1,0 +1,122 @@
+version: "v2"
+
+# NOTE on pass criterion for cross_cluster_transfer probes:
+#   With K1=3 and K2=1, the bridge MU can only appear at rank 4 (K2 position).
+#   pass_rank_threshold=1 means these probes measure "bridge at rank 1", which
+#   cannot occur unless lexical-distinctness is violated. The intended signal is
+#   "bridge appears in the retrieved set at any position" (hop_depth > 0 in
+#   traversal_path). At baseline (measurement_session_index=0), bridge IS
+#   expected to appear as K2 (rank 4) because hub→bridge edge exists with
+#   initial_edge_weight=0.5. The cross-cluster measurement tracks bridge_mu_rank
+#   trajectory over sessions, not a binary PASS/FAIL at rank 1.
+#   Per-phenomenon threshold: cross_cluster_transfer uses threshold=4 (K2 position).
+#   See BUILD-PLAN.md M18 Phase 0.4 and Gap A resolution.
+#
+# NOTE on process_rule_adherence probes:
+#   Gold MU retrieval rank is measured. Output compliance is not machine-checked.
+#   Manual review is required to verify the model's response actually complied
+#   with the rule described in the gold MU. See BUILD-PLAN.md Gap B and
+#   PROGRESS.md open questions #7.
+
+phenomenon_map:
+  ranking_improvement:
+    description: "Gold MU rank should decrease over sessions within the primary cluster"
+  cross_cluster_transfer:
+    description: "Bridge MU should surface on adjacent-cluster probes via edge traversal (hop_depth > 0)"
+  process_rule_adherence:
+    description: "Gold MU is a rule/constraint MU from cluster_c; output compliance is a human review step"
+
+probes:
+  # 4× ranking_improvement — one per cluster, gold is the in-cluster hub MU.
+  # Prompt text uses only fingerprint vocabulary from the target cluster so
+  # the hub MU (which contains all 5 cluster fingerprint terms) scores highest.
+
+  - probe_id: "p06"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "What rules must be followed when designing the field ordering and delimiter in a structured output format to ensure consistent parsing of every output record?"
+    gold_mu_ids:
+      - "a0000001-aaaa-4aaa-8aaa-000000000001"   # cluster_a hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p07"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "How does a well-defined schema specify the expected data shape and type for each element to ensure incoming data passes validation correctly?"
+    gold_mu_ids:
+      - "b0000001-bbbb-4bbb-8bbb-000000000001"   # cluster_b hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p08"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "Every rule exists to enforce a constraint; detecting violations and reporting them is never optional — a system must not silently tolerate non-compliance."
+    gold_mu_ids:
+      - "c0000001-cccc-4ccc-8ccc-000000000001"   # cluster_c hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p09"
+    phenomenon_type: "ranking_improvement"
+    prompt_text: "Why must every analytical claim cite its source, and how does tracking provenance ensure that conclusions remain traceable back to their identified origin?"
+    gold_mu_ids:
+      - "d0000001-dddd-4ddd-8ddd-000000000001"   # cluster_d hub
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  # 4× cross_cluster_transfer — one per cluster-to-bridge direction.
+  # Each prompt uses ONLY the fingerprint vocabulary of the source cluster.
+  # At baseline (session_index=0), the bridge MU is expected at rank 4 (K2)
+  # via hub→bridge edge traversal, never at ranks 1–3 (K1, lexical retrieval).
+  # Expected pass criterion: gold_mu_rank <= 4 (threshold=4 per Phase 0.4 config).
+
+  - probe_id: "p10"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "How should an output format define its field delimiter and structural record layout so that a parser can reliably identify each field within an output file?"
+    gold_mu_ids:
+      - "ab000001-abab-4aba-8aba-000000000001"   # bridge_ab
+    is_bridge_probe: true
+    bridge_pair_id: "p11"
+
+  - probe_id: "p11"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "How does a well-defined schema ensure that incoming records conform to the expected shape, with each element matching the correct type during validation?"
+    gold_mu_ids:
+      - "ab000001-abab-4aba-8aba-000000000001"   # bridge_ab
+    is_bridge_probe: true
+    bridge_pair_id: "p10"
+
+  - probe_id: "p12"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "Why does every rule enforce a constraint, and how does detecting each violation and requiring components to comply prevent silent tolerance of non-compliance?"
+    gold_mu_ids:
+      - "cd000001-cdcd-4cdc-8cdc-000000000001"   # bridge_cd
+    is_bridge_probe: true
+    bridge_pair_id: "p13"
+
+  - probe_id: "p13"
+    phenomenon_type: "cross_cluster_transfer"
+    prompt_text: "Why must every derived artifact cite its original source, and how does recording full provenance ensure that all conclusions remain traceable back to their origin?"
+    gold_mu_ids:
+      - "cd000001-cdcd-4cdc-8cdc-000000000001"   # bridge_cd
+    is_bridge_probe: true
+    bridge_pair_id: "p12"
+
+  # 2× process_rule_adherence — gold MU is a specific rule-bearing spoke in cluster_c.
+  # Retrieval rank of the gold MU is the measurable signal; output compliance
+  # requires human review (see note at top of file).
+
+  - probe_id: "p14"
+    phenomenon_type: "process_rule_adherence"
+    prompt_text: "What is idempotency as an operational rule in distributed systems, and why is it a critical constraint that must be enforced when designing resilient APIs and message queues?"
+    gold_mu_ids:
+      - "c0000003-cccc-4ccc-8ccc-000000000003"   # cluster_c spoke: idempotency rule
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "p15"
+    phenomenon_type: "process_rule_adherence"
+    prompt_text: "In a multi-tenant architecture, how should access control rules act as security constraints to enforce that tenants cannot observe or manipulate resources belonging to others?"
+    gold_mu_ids:
+      - "c0000005-cccc-4ccc-8ccc-000000000005"   # cluster_c spoke: multi-tenant access control rule
+    is_bridge_probe: false
+    bridge_pair_id: null

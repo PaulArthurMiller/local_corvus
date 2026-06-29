@@ -563,3 +563,30 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
   - Tests: 332 unit tests — all passing; no regressions
   - Gap A: RESOLVED (Phase 0.4) — cross_cluster_transfer uses threshold=4 (bridge structurally at K2/rank 4)
   - Gap B: DOCUMENTED in probe_set_v2.yaml comments — process_rule_adherence output compliance requires human review
+
+- 2026-06-29: /smoketest — Milestone 18 Final Verification (all 7 checks, freshly wiped + re-seeded graph)
+  - Bugs found: 0
+  - Branch: fix/smoketest-2026-06-29
+  - Setup: Deleted memory/graph.db, started backend fresh, backend health confirmed ({"status":"ok","db":"ok"})
+  - Final verification results (all 7 checks PASS against freshly wiped + v2-seeded graph):
+    - Check 1: POST /admin/seed-graph {"version":"v2"} → mu_count=34, edge_count=32: PASS
+    - Check 2: GET /admin/graph/stats → {cluster_a:8, cluster_b:8, cluster_c:8, cluster_d:8, bridge_ab:1, bridge_cd:1}, mu_without_cluster_id=0: PASS
+    - Check 3: Connectivity — hub→bridge edges confirmed for all 4 clusters (cluster_a→bridge_ab, cluster_b→bridge_ab, cluster_c→bridge_cd, cluster_d→bridge_cd): PASS
+    - Check 4: Lexical-distinctness — bridge_ab contains none of CLUSTER_A_FP+CLUSTER_B_FP; bridge_cd contains none of CLUSTER_C_FP+CLUSTER_D_FP (verify_seed_v2.py PASS): PASS
+    - Check 5a: Baseline probe run (session_index=0, clean v2 graph, ranking_improvement probes p06-p09): all PASS rank=1
+      - p06 (cluster_a hub): rank=1, retrieved=[a0000001, ab000001, a0000006] ✓
+      - p07 (cluster_b hub): rank=1, retrieved=[b0000001, b0000005, b0000004, ab000001] ✓
+      - p08 (cluster_c hub): rank=1, retrieved=[c0000001, c0000007, c0000008, cd000001] ✓
+      - p09 (cluster_d hub): rank=1, retrieved=[d0000001, a0000001, c0000001, cd000001] ✓
+    - Check 5b: Baseline probe run (cross_cluster_transfer probes p10-p13): bridge at rank=4 (K2), NOT rank 1
+      - p10 (cluster_a vocab, gold=bridge_ab): rank=4, K1=[a0000001, a0000005, a0000004], K2=[ab000001] ✓
+      - p11 (cluster_b vocab, gold=bridge_ab): rank=4, K1=[b0000001, b0000005, b0000004], K2=[ab000001] ✓
+      - p12 (cluster_c vocab, gold=bridge_cd): rank=4, K1=[c0000001, c0000007, c0000008], K2=[cd000001] ✓
+      - p13 (cluster_d vocab, gold=bridge_cd): rank=4, K1=[d0000004, d0000001, a0000001], K2=[cd000001] ✓
+    - Check 5c: Process rule adherence probes p14-p15: PASS rank=1
+      - p14 (idempotency rule, c0000003): rank=1, retrieved=[c0000003, c0000007, c0000004, c0000001] ✓
+      - p15 (multi-tenant access control, c0000005): rank=1, retrieved=[c0000005, c0000001] ✓
+    - Check 6: Idempotency — second POST /admin/seed-graph {"version":"v2"} → mu_count=34 (no duplicates): PASS
+    - Check 7: probe_set_v2.yaml loads at startup with no errors; 10 probes synced; GET /admin/probe-results returns 10 results for p06-p15: PASS
+  - Tests: 332 unit tests — all passing; no regressions
+  - Milestone 18 status: COMPLETE — all Done criteria met (seed_v2.json.gz committed, probe_set_v2.yaml committed, all 7 checks PASS with actual numbers, full test suite passing)

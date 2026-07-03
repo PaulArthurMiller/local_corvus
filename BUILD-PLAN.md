@@ -2840,8 +2840,8 @@ These verification results are documented in PROGRESS.md with actual numbers, fo
 ## Status
 
 ```
-Current milestone: 18 — Seed Fixture v2 + Probe Set v2 — NOT STARTED
-Last updated: 2026-06-28
+Current milestone: 18 — Seed Fixture v2 + Probe Set v2 — COMPLETE
+Last updated: 2026-06-29
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -2880,4 +2880,4 @@ Last updated: 2026-06-28
 
 **Milestone 17:** Complete — branch `fix/smoketest-2026-06-28-3`, PR merged to main.
 
-**Milestone 18:** Phase 0 complete — branch `milestone-18-phase-0-infra-fixes`, PR merged. Phase 1 complete — branch `milestone-18-phase-1-seed-v2-generation`, PR pending. Phases 2–4 (Paul review, verification, probe set) awaiting review of `seed_fixtures/seed_v2_draft.json`.
+**Milestone 18:** Complete — all 7 verification checks PASS with actual numbers on a freshly wiped + re-seeded graph (see PROGRESS.md 2026-06-29 entry), 332 unit tests passing, no regressions. Branches: `milestone-18-phase-0-infra-fixes` (PR #28), `milestone-18-phase-1-seed-v2-generation` (PR #29), `fix/smoketest-2026-06-29` phases 2–4 and final verification (PR #30, #31, #32) — all merged to main.

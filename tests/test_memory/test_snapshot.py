@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
-from memory.snapshot import take_battery_snapshot, take_pre_pruning_snapshot, take_snapshot
+from memory.snapshot import (
+    take_archive_snapshot,
+    take_battery_snapshot,
+    take_pre_pruning_snapshot,
+    take_snapshot,
+)
 
 
 def run(coro):
@@ -164,3 +169,69 @@ def test_take_pre_pruning_snapshot_payload(tmp_path):
     assert data["mu_count"] == 2
     assert data["edge_count"] == 1
     print(f"[PASS] pre-pruning snapshot has snapshot_type=pre_prune mu_count=2 edge_count=1")
+
+
+# ---------------------------------------------------------------------------
+# take_archive_snapshot tests (Milestone 19 Phase 0)
+# ---------------------------------------------------------------------------
+
+def test_take_archive_snapshot_writes_correct_filename(tmp_path):
+    """take_archive_snapshot() names the file archive_{experiment_id}_{ts}.json.gz."""
+    mock_store = _mock_store()
+    snapshots_dir = tmp_path / "snapshots"
+
+    with patch("memory.snapshot.graph_store", mock_store):
+        with patch("memory.snapshot._SNAPSHOTS_DIR", snapshots_dir):
+            result_path = run(take_archive_snapshot(experiment_id="exp-learned-2026-07-01"))
+
+    filename = Path(result_path).name
+    assert filename.startswith("archive_exp-learned-2026-07-01_")
+    assert filename.endswith(".json.gz")
+    print(f"[PASS] archive snapshot filename: {filename}")
+
+
+def test_take_archive_snapshot_sanitizes_unsafe_experiment_id(tmp_path):
+    """Experiment IDs with filesystem-unsafe characters are sanitized in the filename."""
+    mock_store = _mock_store()
+    snapshots_dir = tmp_path / "snapshots"
+
+    with patch("memory.snapshot.graph_store", mock_store):
+        with patch("memory.snapshot._SNAPSHOTS_DIR", snapshots_dir):
+            result_path = run(take_archive_snapshot(experiment_id="exp/weird:id "))
+
+    filename = Path(result_path).name
+    assert "/" not in filename.split("archive_", 1)[1].split("_2", 1)[0]
+    assert Path(result_path).exists()
+    print(f"[PASS] sanitized archive filename: {filename}")
+
+
+def test_take_archive_snapshot_with_none_experiment_id_uses_unlabeled(tmp_path):
+    mock_store = _mock_store()
+    snapshots_dir = tmp_path / "snapshots"
+
+    with patch("memory.snapshot.graph_store", mock_store):
+        with patch("memory.snapshot._SNAPSHOTS_DIR", snapshots_dir):
+            result_path = run(take_archive_snapshot(experiment_id=None))
+
+    filename = Path(result_path).name
+    assert filename.startswith("archive_unlabeled_")
+    print(f"[PASS] unlabeled archive filename: {filename}")
+
+
+def test_take_archive_snapshot_payload_has_metadata(tmp_path):
+    mock_store = _mock_store(
+        mus=[{"mu_id": "mu-1"}, {"mu_id": "mu-2"}],
+        edges=[{"edge_id": "e-1"}],
+    )
+    snapshots_dir = tmp_path / "snapshots"
+
+    with patch("memory.snapshot.graph_store", mock_store):
+        with patch("memory.snapshot._SNAPSHOTS_DIR", snapshots_dir):
+            result_path = run(take_archive_snapshot(experiment_id="exp-static-2026-07-01"))
+
+    data = _read_gz(result_path)
+    assert data["snapshot_type"] == "archive"
+    assert data["experiment_id"] == "exp-static-2026-07-01"
+    assert data["mu_count"] == 2
+    assert data["edge_count"] == 1
+    print(f"[PASS] archive snapshot payload has correct metadata")

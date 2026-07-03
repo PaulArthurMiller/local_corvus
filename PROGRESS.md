@@ -3,9 +3,9 @@
 ## Current state
 
 Project: Local Corvus — local LLM learning research platform  
-Phase: Active — M18 planned, not started  
-Current milestone: 18 — Seed Fixture v2 + Probe Set v2 (PLANNED — see BUILD-PLAN.md)  
-Next step: Build M18 Phase 0 infrastructure fixes, then generate seed_v2 fixture (34 MUs, 32 edges) and probe_set_v2.yaml (10 probes) to enable the real three-condition experiment.
+Phase: Active — M19 Phase 0 complete  
+Current milestone: 19 Phase 0 — Experiment Harness: Run Plan Schema + Skeleton + Dry-Run Mode — COMPLETE  
+Next step: M19 Phase 1 — Sonnet-based generation/validation of the ~100+ bulk interaction prompts; conceptual-fields "auto" mode becomes real.
 
 ## Session log
 
@@ -590,3 +590,44 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
     - Check 7: probe_set_v2.yaml loads at startup with no errors; 10 probes synced; GET /admin/probe-results returns 10 results for p06-p15: PASS
   - Tests: 332 unit tests — all passing; no regressions
   - Milestone 18 status: COMPLETE — all Done criteria met (seed_v2.json.gz committed, probe_set_v2.yaml committed, all 7 checks PASS with actual numbers, full test suite passing)
+
+- 2026-07-03: /build — Milestone 19 Phase 0 complete (Experiment Harness: Run Plan Schema + Skeleton + Dry-Run Mode)
+  - Created: `scripts/harness/__init__.py`, `scripts/harness/schema.py` (RunPlan pydantic model + all sub-schemas: ConceptualFields, DifficultyConfig, JudgeConfig, NotificationConfig; `format_validation_error()` for field-identifying CLI errors)
+  - Created: `scripts/harness/turn_resolution.py` (`resolve_turn_sequence()` — deterministic probe/bulk resolution from probe_ratio + probe_placement + random_seed; supports `random`/`end`/`fixed_checkpoints`)
+  - Created: `scripts/harness/manifest.py` (`compute_config_hash()`, `compute_run_id()` — deterministic run_id from plan_id + hash prefix, enabling resume; `RunManifest` persistence)
+  - Created: `scripts/harness/checkpoint.py` (`CheckpointState`/`TurnCheckpoint` — atomic per-turn checkpoint writes via temp-file + `os.replace`; `is_turn_done()` for resume-skip logic)
+  - Created: `scripts/harness/notify.py` (`notify()` stub — console + JSONL file, no network calls; `build_notification_payload()` for the `{run_id, status, error_summary, report_path}` shape)
+  - Created: `scripts/harness/client.py` (`BackendClient` — httpx wrapper distinguishing `BackendConnectivityError` (hard-stop default) from `BackendTurnError` (soft-continue default); chat calls get a separate 120s timeout since Ollama inference can exceed a generic HTTP timeout on cold model loads)
+  - Created: `scripts/harness/elicit.py` (`elicit_plan()` — full interactive walkthrough of every schema field with defaults, injectable `input_fn` for testing; `offer_to_save_plan()`)
+  - Created: `scripts/harness/runner.py` (`execute_run()` — the testable core orchestration: manifest → resume detection → per-condition wipe+seed → turn loop → checkpoint → error policy → notify; injectable `BackendClient` and `resume_input_fn` so it's fully unit-testable without Docker)
+  - Created: `scripts/run_experiment_harness.py` (CLI entrypoint: `--plan`, `--dry-run`, `--backend-url`; loads-or-elicits, validates, delegates to `execute_run()`)
+  - Created: `tests/test_harness/` (44 tests: schema validation, turn-resolution determinism, elicitation with scripted input, checkpoint persistence/interrupt-simulation, and runner orchestration against a fake `BackendClient` — hard-stop, soft-continue, error-policy override, resume/decline-resume, wipe-before-seed ordering, probe placeholder content)
+  - Modified: `.gitignore` (added `harness_runs/` — runtime manifests/checkpoints/notification logs)
+  - Tests: 44 new (harness), 376 total at that point — all passing
+
+  **Gap found and closed: no real "wipe" existed.** The plan's own text (§1, §3.2) assumed `POST /admin/seed-graph` already performed a combined wipe+seed. It doesn't — `register_fixture()` only ever does an idempotent merge (duplicate MUs/edges are silently skipped on re-registration; confirmed via M17/M18's own idempotency checks). The only prior "wipe" mechanism was manually deleting `memory/graph.db` and restarting the container (see M18 final-verification log, 2026-06-29). Without a real wipe, every condition in the future three-condition pilot would inherit MUs/edges from the previous condition — exactly the cross-condition graph contamination already flagged as a known issue in the M17 research-outcomes section. Asked Paul how to proceed; decision: **add a real wipe endpoint, with automatic pre-wipe archiving keyed by experiment_id** (not silent, irreversible deletion).
+  - Modified: `backend/memory/store.py` — added `GraphStore.wipe_graph()`: deletes all rows from `edges` and `memory_units`, returns `{mus_deleted, edges_deleted}`. Leaves `analytics`, `probe_results`, `feedback_events`, `generated_reports`, `seed_fixture_manifest` untouched — the experimental audit trail survives a graph wipe.
+  - Modified: `backend/memory/snapshot.py` — added `take_archive_snapshot(experiment_id)`: dumps the full pre-wipe graph to `archive_{experiment_id}_{ts}.json.gz` (sanitizes unsafe filename characters; `experiment_id=None` → `unlabeled`).
+  - Modified: `backend/api/admin.py` — added `POST /admin/graph/wipe` (`WipeGraphRequest{experiment_id}`): archives first, then wipes; if archiving fails, the wipe is aborted (never wipes without a successful archive first) — verified by test.
+  - Modified: `scripts/harness/client.py` / `scripts/harness/runner.py` — harness now calls `wipe_graph(experiment_id=f"{plan.plan_id}_{condition}")` before `seed_graph()` for every condition.
+  - Added: 11 more tests (3 in `tests/test_memory/test_store.py::TestWipeGraph`, 4 in `tests/test_memory/test_snapshot.py` archive tests, 4 in new `tests/test_api/test_graph_wipe.py`) plus 2 more in `tests/test_harness/test_runner.py` (wipe-before-seed ordering, hard-stop-when-wipe-fails) — 55 new tests total this milestone.
+  - Incidental fix while editing `tests/test_memory/test_store.py`: an `Edit` call misjudged the file's true last line (a truncated `Read` hid it) and orphaned the migration test's final assertion outside its function body — caught immediately by the failing test, corrected in the same session.
+  - Tests: 55 new, 387 total — all passing. Integration suite (`tests/integration`, requires live Docker stack): 4 passed, 1 skipped (unrelated — no random-weight control experiment_id present this session), consistent with prior runs.
+
+  **§3.4 verification protocol — all 7 checks PASS, run against the live Docker backend + real Ollama (gemma4:e4b) at `localhost:8000` / `localhost:11434`:**
+  1. **Interactive elicitation → save → confirm match:** ran `python scripts/run_experiment_harness.py` with no `--plan`, scripted stdin answers through every field. Saved plan JSON matches every entered value exactly (plan_id, plan_name, conceptual_fields, series_count=1, turns_per_series=2, probe_ratio=0.0, hop_distance_levels=[0,1], judge fields, conditions=["learned"], notification.enabled=false, dry_run=false, random_seed=99). PASS.
+  2. **Valid plan file loads cleanly, hash logged:** `--plan check2_plan.json` → `Plan loaded: plan_id='verify-check2' config_hash=b5bfe43aef34d4f31ec4e08a07e84fd2c1c39211f6b49aac607dcdaeeaa8a3c7`. PASS.
+  3. **Malformed plan fails fast:** plan with `conditions=["bogus_condition"]`, `probe_placement="sometimes"` → exits 1 with two specific, field-identifying errors (`probe_placement: ... must be one of (...)`, `conditions: ... must be from (...)`) and zero HTTP calls made (graph untouched). PASS.
+  4. **Dry-run scoping (real backend):** plan with `series_count=2, turns_per_series=5, conditions=["learned","static_weight"], dry_run=true, dry_run_n=2` → manifest's `resolved_turn_sequence` holds the full 10 turns (audit trail), but only 2 turns actually executed, only under `=== Condition: learned ===` (static_weight never ran). Checkpoint: exactly 2 entries, both `status="ok"`, `final_status="complete"`. `notifications.log`: `{"event": "harness_run_complete", "run_id": "verify-check4_cf96fb09c5da", "status": "complete", "error_summary": null, "report_path": null}`. PASS.
+  5. **Simulated hard-stop:** `--backend-url http://localhost:59999` (unreachable) → `ABORTED: connectivity: health check failed: [WinError 10061] No connection could be made because the target machine actively refused it`, exit code 1. `checkpoint.json`: `{"turns": [], "final_status": "aborted"}`; `manifest.json` present. Clean abort before any graph mutation (health check runs before wipe/seed). PASS.
+  6. **Simulated soft-continue:** `tests/test_harness/test_runner.py::test_soft_continue_on_ambiguous_turn_result_logs_and_proceeds -v -s` → turn checkpoints `[(0, 'ok', 'run-0'), (1, 'error_soft_continue', 'missing run_id'), (2, 'ok', 'run-2')]`, final status `complete` — the run logs the ambiguous turn and proceeds rather than aborting. PASS.
+  7. **Full test suite:** 387 passed, 0 failed, no regressions (confirmed both before and after the wipe-gap fix). PASS.
+
+  - Side effect of live verification: the shared dev graph now has 34 seed MUs + 9 interaction MUs from verification chat turns (expected — every wipe archived the prior state first; archives at `memory/snapshots/archive_*.json.gz`). Nothing was lost; re-seed or wipe again at any time.
+  - Key decisions:
+    - `error_policy: dict[str, str]` added to the RunPlan schema as a minor, documented deviation from the original field list — required by §3.2's "must be overridable from the run plan" language, which named the mechanism but not a schema field for it.
+    - `run_id` is deterministic (`{plan_id}_{config_hash[:12]}`), not random — re-running the same plan file naturally resumes the same checkpoint; a materially different plan gets a fresh run directory rather than silently colliding with an unrelated one.
+    - A checkpoint is resumable whenever `final_status != "complete"` (covers both a crash mid-run with no final_status, and a previously aborted run) — only a fully complete run has nothing left to do.
+    - Turn content in Phase 0 is placeholder-only by design: probe turns cycle through `probe_set_v2.yaml` prompts; bulk turns get a labeled stub message. Real bulk-prompt generation is Phase 1's job.
+  - Branch: `milestone-19-phase-0-harness-skeleton`
+  - Milestone 19 Phase 0 status: COMPLETE — all Done criteria met (all deliverables built, all 7 §3.4 checks PASS with real recorded output, no regressions, wipe-gap closed with tests)

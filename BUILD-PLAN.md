@@ -2837,11 +2837,254 @@ These verification results are documented in PROGRESS.md with actual numbers, fo
 
 ---
 
+# Local Corvus — Milestone 19, Phase 0
+## Experiment Harness: Run Plan Schema + Skeleton + Dry-Run Mode
+
+**Branch:** `milestone-19-phase-0-harness-skeleton`
+
+---
+
+### 1. Context
+
+M18 is complete: `seed_fixtures/seed_v2.json.gz` and `probes/probe_set_v2.yaml` are
+frozen, verified, and committed. The platform is now ready for the formal 100+
+prompt, three-condition pilot (learned / static-weight / random-weight).
+
+M19 builds the **experiment harness** that drives that pilot — and future pilots
+— end to end: wipe/seed, run turns across conditions, judge responses, and
+generate reports. M19 is split into phases so each layer can be smoketested
+before the next depends on it. **This planner covers Phase 0 only.**
+
+#### Design decisions already made (binding context, not open questions)
+
+- **Judge model:** starts as Gemma (the same local model being studied — a
+  deliberate "contained self-improvement" framing), but must be config-swappable
+  (`judge.model`) since this will likely change. Pin model identity, temperature,
+  and snapshot per run; log all three. *Judge integration itself is Phase 2 —
+  Phase 0 only needs the config field and pinning mechanism to exist in the
+  schema.*
+- **Judge scope:** the judge runs (and its verdict is logged) for **all three
+  conditions**, but only the learned condition uses the verdict to update edge
+  weights. Static/random conditions log verdicts for comparative analysis only.
+- **Feedback verdicts:** up / down / none. Down is reserved for a named,
+  closed-vocabulary criterion violation (confabulation or stated-rule
+  violation) — never a vague "bad response." None is the default whenever the
+  judge can't cleanly determine a verdict; ambiguity should never be forced
+  into up or down.
+- **Manual judging:** the harness must support an occasional human-override
+  judgment during a real run, but this is a sometimes-used override, not the
+  standing mechanism (human-in-the-loop-as-default was explicitly rejected for
+  consistency reasons). Every turn's judgment must be tagged with
+  `judge_source` (`model:<model_name>` or `human`) so manually-judged turns
+  are never silently analyzed as if model-judged. *Phase 0 only needs the
+  schema field for this — no judging logic yet.*
+- **Difficulty mechanism (Phase 0 in-scope):** hop-distance only — number of
+  graph hops between the BM25 entry point and the gold MU. This maps onto the
+  existing spoke→hub→bridge topology already in seed_v2.
+- **Difficulty mechanism explicitly NOT built:** a "lexically-independent
+  transfer" mechanism was considered and rejected as something to seed
+  deliberately. Decision: no new fixture content, no new edges, no change to
+  seed_v2 or the existing bridge MUs. Any cross-series lexical connections
+  that arise will do so organically from unconstrained model response content
+  (responses are never lexically restricted — only seed MUs and certain
+  deliberately-constructed prompts are). This is being left as a future
+  **observational/instrumentation** target (detecting when an MU from one
+  series gets retrieved into a different series' context), not a Phase 0
+  build item. Do not add anything for this in Phase 0.
+- **Probe ratio/placement:** two independent config axes — `probe_ratio`
+  (fraction of total turns that are measurement probes) and `probe_placement`
+  (`random` / `end` / `fixed_checkpoints` with explicit checkpoint
+  positions). Regardless of placement strategy, each turn's type (`probe` vs
+  `bulk`) must be resolved deterministically from the run plan *before*
+  execution begins (given a fixed random seed), and probe turns must never be
+  eligible for feedback/weight updates.
+- **Notification:** stub only. Channel-agnostic interface, default
+  implementation logs to console/file and makes no network calls. Structured
+  payload: `{run_id, status, error_summary, report_path}`.
+- **Run plan philosophy:** the harness executes plans; it does not design
+  them. If a plan file is supplied, load and validate it. If not, walk the
+  user through an interactive elicitation flow and offer to save the result
+  as a reusable plan file.
+- **Tuning knobs (e.g. `initial_edge_weight`, `decay_rate`,
+  `saturation_threshold`):** manually specified via the plan for now. Full
+  automated tuning ("run an experiment, evaluate, adjust, rerun until
+  plateau") is an explicit future milestone, not part of M19.
+
+#### Explicitly out of scope for Phase 0 (later M19 phases)
+
+- Sonnet-based prompt generation/validation for the ~100+ bulk interaction
+  prompts — **Phase 1**.
+- Gemma judge integration (criteria storage, judge calls, verdict + rationale
+  logging) — **Phase 2**.
+- Full pilot execution against real bulk-turn content, final report
+  generation wiring, and real notification channel wiring — **Phase 3**.
+- Any new seed fixture content — not needed (see decision above).
+
+---
+
+### 2. Goal of Phase 0
+
+Build the skeleton that every later phase will sit inside, and prove it works
+end-to-end using only infrastructure that already exists today
+(`/admin/seed-graph`, existing probe/report endpoints). Concretely:
+
+1. Define and validate the full **Experiment Run Plan schema** (all fields,
+   even ones not yet acted on by Phase 0).
+2. Build the harness CLI: load-a-plan or elicit-a-plan, resolve turn
+   types, wipe+seed per condition, run a turn loop, checkpoint per turn,
+   apply an explicit error-handling policy, call the notification stub.
+3. Implement **dry-run mode**: a tiny, cheap, fast end-to-end pass that
+   exercises the whole skeleton without needing Phase 1/2 components.
+
+---
+
+### 3. Deliverables
+
+#### 3.1 Experiment Run Plan schema
+
+A validated schema (pydantic model recommended, consistent with existing
+codebase patterns) covering:
+
+- `plan_id`, `plan_name`
+- `conceptual_fields`: `{ count: int, subjects: list[str] | "auto" }`
+  *(Phase 0 only stores/validates this — "auto" generation is Phase 1.)*
+- `total_prompts: int`, `series_count: int`, `turns_per_series: int`
+  (derive one from the others if only two are given; validate consistency)
+- `probe_ratio: float` (0–1), `probe_placement: "random" | "end" |
+  "fixed_checkpoints"`, `probe_checkpoint_positions: list[int] | None`
+- `difficulty: { hop_distance_levels: list[int] }`
+- `judge: { model: str, temperature: float, pinned_snapshot: str | None }`
+- `conditions: list["learned" | "static_weight" | "random_weight"]`,
+  `condition_order: list[str]` (must be a permutation of `conditions`)
+- `tuning_knobs: dict[str, float]` (manual overrides; absent = config
+  defaults)
+- `notification: { enabled: bool }`
+- `budget_cap: float | None`
+- `dry_run: bool`, `dry_run_n: int` (default small, e.g. 2)
+- `random_seed: int` (for deterministic turn-type resolution)
+
+Validation must fail fast with a specific, field-identifying error message —
+not a raw stack trace — for any malformed or inconsistent plan.
+
+#### 3.2 Harness CLI skeleton
+
+New file, e.g. `scripts/run_experiment_harness.py`, following the same
+execution pattern as `scripts/generate_seed_v2.py` /
+`scripts/verify_seed_v2.py` (host-side Python script calling the Dockerized
+backend's API — not running inside the container).
+
+Required behavior:
+
+- `--plan <path>` optional argument.
+  - **If provided:** load, validate against the schema above. On failure,
+    print the specific error and exit non-zero without touching the graph.
+  - **If absent:** run an interactive elicitation flow (stdlib `input()` is
+    fine) that walks through every schema field with sensible defaults
+    offered. At the end, offer to save the collected plan to a file.
+- Persist the **resolved plan + a computed config hash** as a run manifest
+  (reuse the existing config-hash pattern already used elsewhere in the
+  codebase, or implement an equivalent local hash if that's not directly
+  reusable from a standalone script).
+- **Per-condition wipe + seed:** call the existing `POST /admin/seed-graph`
+  flow before each condition begins (not once per experiment — once per
+  condition). Confirm via `/admin/graph/stats` that the wipe+seed succeeded
+  before proceeding.
+- **Turn-type resolution:** before any turns run, deterministically resolve
+  each turn's type (`probe` / `bulk`) from `probe_ratio`, `probe_placement`,
+  and `random_seed`. Persist this resolved sequence as part of the run
+  manifest so it's auditable after the fact.
+- **Turn loop skeleton:** iterate series → turns per the resolved plan. Phase
+  0 does not need real prompt content or real judging yet — see dry-run mode
+  below for what Phase 0 actually exercises here.
+- **Per-turn checkpointing:** after each turn, write progress (condition,
+  series index, turn index, turn type, status) to a local checkpoint
+  file/table. On startup, if a checkpoint from an incomplete run is found,
+  surface it and ask whether to resume or start fresh (resume logic can be
+  minimal — the requirement is that progress is never silently lost, not
+  full crash-resume automation).
+- **Error-handling policy:** implement a config-driven mapping of error type
+  → `hard_stop` or `soft_continue`. Default policy: connectivity/DB failures
+  → hard stop (abort cleanly, preserve manifest/checkpoint state, surface a
+  clear message); any single ambiguous/missing per-turn result → soft
+  continue (log and proceed). This mapping must be overridable from the run
+  plan, not hardcoded.
+- **Notification stub:** a `notify(event: str, payload: dict)` function.
+  Default implementation logs the payload (console + file); must not require
+  any credential or make any network call. Payload shape:
+  `{run_id, status, error_summary, report_path}`.
+- **Dry-run mode:** triggered by `--dry-run` or `dry_run: true` in the plan.
+  Limits execution to `dry_run_n` turns (default 2), 1 series, learned
+  condition only by default. Since Phase 1/2 don't exist yet, dry-run should
+  use 1–2 of the existing `probe_set_v2.yaml` prompts as placeholder content
+  purely to validate that wipe → seed → turn loop → checkpoint → notify
+  completes without error against the real backend.
+
+#### 3.3 Tests
+
+- Schema validation: valid plan loads; several distinct invalid plans each
+  produce a specific, identifiable error (not a generic exception).
+- Interactive elicitation flow: scripted/mocked input, confirm the saved plan
+  file matches what was entered.
+- Turn-type resolution: same `random_seed` + plan → same resolved sequence
+  (determinism); changing `probe_ratio` changes the proportion as expected.
+- Dry-run end-to-end: against the real (or test-mode) backend, confirms the
+  full wipe→seed→loop→checkpoint→notify sequence completes for `dry_run_n`
+  turns.
+- Error-handling policy: simulate a hard-stop condition (e.g. point at an
+  unreachable backend) → clean abort, manifest/checkpoint preserved. Simulate
+  a soft-continue condition → logged, run proceeds, final checkpoint reflects
+  the anomaly.
+- Checkpoint persistence: interrupt mid-run, confirm the checkpoint file
+  accurately reflects the last completed turn.
+
+#### 3.4 Verification / inspection protocol (mandatory — report actual output, not just "PASS")
+
+1. Run harness with no plan → interactive flow completes → plan saved →
+   confirm saved file contents match entries.
+2. Run harness with a valid plan file → loads cleanly → config hash logged.
+3. Run harness with a deliberately malformed plan file → fails fast with a
+   specific, field-identifying error message.
+4. Dry-run (`dry_run_n=2`, 1 series, learned condition) against the real
+   backend → graph wiped+seeded, 2 turns processed, checkpoint shows 2/2
+   complete, `notify()` stub logs final status with the correct payload
+   shape.
+5. Simulated hard-stop (unreachable backend) → harness aborts cleanly,
+   checkpoint/manifest preserved, clear error surfaced.
+6. Simulated soft-continue condition → harness logs and continues; final
+   checkpoint reflects the logged anomaly.
+7. Full existing test suite (332+ tests) still passing — no regressions.
+
+---
+
+### 4. Done criteria
+
+- All deliverables in §3 created and committed.
+- All 7 checks in §3.4 PASS with actual recorded output (numbers/messages,
+  not just a checkmark).
+- No regressions in the existing test suite.
+- `PROGRESS.md` updated with the same level of detail as prior milestone
+  entries (files created/modified, decisions made, verification results).
+
+---
+
+### 5. What comes after Phase 0 (for context only — not part of this build)
+
+- **Phase 1:** Sonnet-based generation/validation of the ~100+ bulk
+  interaction prompts from cluster MU content; conceptual-fields "auto" mode
+  becomes real.
+- **Phase 2:** Judge integration — criteria storage per prompt, real Gemma
+  judge calls, verdict + rationale logging, `judge_source` tagging, manual
+  override path.
+- **Phase 3:** Full pilot execution mode wired to real report generation and
+  a real notification channel (if one is ever wanted beyond the stub).
+
+---
+
 ## Status
 
 ```
-Current milestone: 18 — Seed Fixture v2 + Probe Set v2 — COMPLETE
-Last updated: 2026-06-29
+Current milestone: 19 Phase 0 — Experiment Harness Skeleton — COMPLETE
+Last updated: 2026-07-03
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -2881,3 +3124,5 @@ Last updated: 2026-06-29
 **Milestone 17:** Complete — branch `fix/smoketest-2026-06-28-3`, PR merged to main.
 
 **Milestone 18:** Complete — all 7 verification checks PASS with actual numbers on a freshly wiped + re-seeded graph (see PROGRESS.md 2026-06-29 entry), 332 unit tests passing, no regressions. Branches: `milestone-18-phase-0-infra-fixes` (PR #28), `milestone-18-phase-1-seed-v2-generation` (PR #29), `fix/smoketest-2026-06-29` phases 2–4 and final verification (PR #30, #31, #32) — all merged to main.
+
+**Milestone 19 Phase 0:** Complete — Run Plan schema, harness CLI skeleton (elicit/load, turn resolution, manifest, checkpoint, error policy, notification stub), and dry-run mode, all built and verified against the real Docker backend. Discovered and closed a real infrastructure gap along the way: `/admin/seed-graph` only ever did an idempotent merge, never a wipe — added `POST /admin/graph/wipe` (archive-then-delete) so per-condition graph resets are now real. All 7 §3.4 checks PASS with actual recorded output (see PROGRESS.md 2026-07-03 entry). 387 tests passing (332 baseline + 55 new), no regressions. Branch: `milestone-19-phase-0-harness-skeleton`.

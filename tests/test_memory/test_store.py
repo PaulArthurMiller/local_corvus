@@ -533,3 +533,56 @@ class TestMilestone12MuFields:
         print(f"[test] migrated series_id: {row['series_id']}")
         assert row is not None
         assert row["series_id"] == "series-old-value"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 19 Phase 0 — wipe_graph
+# ---------------------------------------------------------------------------
+
+
+class TestWipeGraph:
+
+    def test_wipe_graph_deletes_all_mus_and_edges(self):
+        with TempDBStore() as s:
+            mu1 = str(uuid.uuid4())
+            mu2 = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+            run(s.create_mu(mu_id=mu2, source_type="agent_output", raw_content="b"))
+            run(s.create_edge(source_mu_id=mu1, target_mu_id=mu2, weight=0.5))
+
+            result = run(s.wipe_graph())
+            print(f"[test] wipe_graph result: {result}")
+            assert result == {"mus_deleted": 2, "edges_deleted": 1}
+
+            assert run(s.get_all_mus()) == []
+            assert run(s.get_all_edges()) == []
+
+    def test_wipe_graph_on_empty_graph_returns_zero_counts(self):
+        with TempDBStore() as s:
+            result = run(s.wipe_graph())
+            print(f"[test] wipe_graph on empty DB: {result}")
+            assert result == {"mus_deleted": 0, "edges_deleted": 0}
+
+    def test_wipe_graph_leaves_analytics_table_untouched(self):
+        with TempDBStore() as s:
+            mu1 = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+
+            async def _insert_run():
+                import memory.store as sm
+                db = await sm._open_db()
+                try:
+                    await db.execute(
+                        "INSERT INTO analytics (run_id, series_id, timestamp) VALUES (?, ?, ?)",
+                        ("run-preserved", "series-1", "2026-01-01T00:00:00Z"),
+                    )
+                    await db.commit()
+                finally:
+                    await db.close()
+            run(_insert_run())
+
+            run(s.wipe_graph())
+
+            preserved_run = run(s.get_run("run-preserved"))
+            print(f"[test] analytics row survives wipe: {preserved_run is not None}")
+            assert preserved_run is not None

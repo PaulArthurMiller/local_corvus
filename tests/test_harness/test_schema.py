@@ -1,0 +1,123 @@
+"""Tests for scripts/harness/schema.py — Run Plan validation."""
+
+import os
+import sys
+
+import pytest
+from pydantic import ValidationError
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+
+from harness.schema import RunPlan, format_validation_error
+
+
+def _base_kwargs(**overrides):
+    kwargs = dict(
+        plan_id="p1",
+        plan_name="Test plan",
+        conceptual_fields={"count": 4, "subjects": "auto"},
+        series_count=5,
+        turns_per_series=10,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_valid_plan_loads_and_derives_total_prompts():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.total_prompts == 50
+    assert plan.condition_order == plan.conditions
+
+
+def test_valid_plan_with_all_three_turn_counts_consistent():
+    plan = RunPlan(**_base_kwargs(total_prompts=50))
+    assert plan.total_prompts == 50
+
+
+def test_inconsistent_turn_counts_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(total_prompts=999))
+    message = format_validation_error(exc_info.value)
+    assert "total_prompts" in message
+
+
+def test_only_one_turn_count_field_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(series_count=5, turns_per_series=None))
+    message = format_validation_error(exc_info.value)
+    assert "total_prompts" in message or "turns_per_series" in message
+
+
+def test_invalid_condition_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(conditions=["bogus_condition"]))
+    message = format_validation_error(exc_info.value)
+    assert "conditions" in message
+
+
+def test_condition_order_not_a_permutation_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(
+            conditions=["learned", "static_weight"],
+            condition_order=["learned"],
+        ))
+    message = format_validation_error(exc_info.value)
+    assert "condition_order" in message
+
+
+def test_invalid_probe_placement_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(probe_placement="sometimes"))
+    message = format_validation_error(exc_info.value)
+    assert "probe_placement" in message
+
+
+def test_fixed_checkpoints_without_positions_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(probe_placement="fixed_checkpoints"))
+    message = format_validation_error(exc_info.value)
+    assert "probe_checkpoint_positions" in message
+
+
+def test_fixed_checkpoints_out_of_range_position_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(
+            probe_placement="fixed_checkpoints",
+            probe_checkpoint_positions=[999],
+        ))
+    message = format_validation_error(exc_info.value)
+    assert "probe_checkpoint_positions" in message
+
+
+def test_invalid_subjects_string_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(conceptual_fields={"count": 4, "subjects": "not_auto"}))
+    message = format_validation_error(exc_info.value)
+    assert "subjects" in message
+
+
+def test_probe_ratio_out_of_range_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(probe_ratio=1.5))
+    message = format_validation_error(exc_info.value)
+    assert "probe_ratio" in message
+
+
+def test_invalid_error_policy_action_raises_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(error_policy={"connectivity": "shrug"}))
+    message = format_validation_error(exc_info.value)
+    assert "error_policy" in message
+
+
+def test_error_policy_valid_override_accepted():
+    plan = RunPlan(**_base_kwargs(error_policy={"turn_ambiguous": "hard_stop"}))
+    assert plan.error_policy == {"turn_ambiguous": "hard_stop"}
+
+
+def test_format_validation_error_is_not_a_raw_stack_trace():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(conditions=[]))
+    message = format_validation_error(exc_info.value)
+    assert "Traceback" not in message
+    assert "conditions" in message

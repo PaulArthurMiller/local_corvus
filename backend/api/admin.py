@@ -5,6 +5,7 @@ GET  /admin/runs                           — paginated run log
 GET  /admin/graph                          — all MUs and edges (for memory inspector)
 GET  /admin/graph/stats                   — MU count summary with cluster_id coverage
 GET  /admin/config                         — current hyperparameter registry
+POST /admin/graph/wipe                    — archive the current graph, then delete all MUs/edges
 POST /admin/seed-graph                    — register a seed fixture and load MUs into the graph
 POST /admin/run-probe                      — run a probe through retrieval (read-only; no MU creation)
 GET  /admin/probe-results                  — query probe results with optional filters
@@ -36,7 +37,7 @@ from analytics.reports.series_report import generate_series_report, write_series
 from analytics.run_log import query_runs
 from analytics.seed_fixture import register_fixture
 from memory.retrieval import retrieve
-from memory.snapshot import take_battery_snapshot
+from memory.snapshot import take_archive_snapshot, take_battery_snapshot
 from memory.store import store as graph_store
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,45 @@ async def get_graph_stats():
         "mu_with_cluster_id": with_cluster,
         "mu_without_cluster_id": without_cluster,
         "cluster_distribution": cluster_distribution,
+    }
+
+
+class WipeGraphRequest(BaseModel):
+    experiment_id: Optional[str] = None
+
+
+@router.post("/graph/wipe")
+async def wipe_graph(body: WipeGraphRequest):
+    """
+    Archive the current graph state, then delete all memory_units and edges.
+
+    Used by the experiment harness (M19) to reset the graph between
+    conditions. The pre-wipe graph is always archived first (keyed by
+    experiment_id) so nothing is silently lost — analytics, probe_results,
+    feedback_events, and seed_fixture_manifest are untouched; only the
+    live MU/edge graph resets.
+    """
+    logger.info("admin/graph/wipe: archiving before wipe experiment_id=%s", body.experiment_id)
+    try:
+        archive_path = await take_archive_snapshot(body.experiment_id)
+    except Exception as exc:
+        logger.error("admin/graph/wipe: archive failed, wipe aborted — %s", exc)
+        raise HTTPException(status_code=500, detail=f"Archive failed, wipe aborted: {exc}")
+
+    try:
+        result = await graph_store.wipe_graph()
+    except Exception as exc:
+        logger.error("admin/graph/wipe: wipe failed — %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    logger.info(
+        "admin/graph/wipe: complete mus_deleted=%d edges_deleted=%d archive=%s",
+        result["mus_deleted"], result["edges_deleted"], archive_path,
+    )
+    return {
+        "mus_deleted": result["mus_deleted"],
+        "edges_deleted": result["edges_deleted"],
+        "archive_path": archive_path,
     }
 
 

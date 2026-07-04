@@ -1390,6 +1390,37 @@ class GraphStore:
         logger.info("store: randomized weights for %d edges", len(edge_ids))
         return len(edge_ids)
 
+    async def wipe_graph(self) -> dict:
+        """
+        Delete all rows from memory_units and edges.
+
+        Used by the experiment harness (M19 Phase 0) to reset the live graph
+        between conditions. Analytics, probe_results, feedback_events, and
+        seed_fixture_manifest are untouched — the experimental audit trail
+        survives a graph wipe; only the MU/edge graph itself resets. Callers
+        are expected to archive the pre-wipe state first (see
+        memory/snapshot.py:take_archive_snapshot) since this delete is not
+        reversible from within the DB.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute("SELECT COUNT(*) as c FROM memory_units") as cursor:
+                mu_row = await cursor.fetchone()
+            async with db.execute("SELECT COUNT(*) as c FROM edges") as cursor:
+                edge_row = await cursor.fetchone()
+            mus_deleted = mu_row["c"] if mu_row else 0
+            edges_deleted = edge_row["c"] if edge_row else 0
+
+            await db.execute("DELETE FROM edges")
+            await db.execute("DELETE FROM memory_units")
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info(
+            "store: wiped graph — deleted %d MU(s) and %d edge(s)", mus_deleted, edges_deleted
+        )
+        return {"mus_deleted": mus_deleted, "edges_deleted": edges_deleted}
+
     async def get_mu_info_batch(self, mu_ids: list[str]) -> dict[str, dict]:
         """
         Return {mu_id: {series_id, cluster_id, source_type}} for a list of MU IDs.

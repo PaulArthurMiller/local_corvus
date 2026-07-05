@@ -650,3 +650,122 @@ class TestWipeGraph:
             preserved_run = run(s.get_run("run-preserved"))
             print(f"[test] analytics row survives wipe: {preserved_run is not None}")
             assert preserved_run is not None
+
+
+class TestEdgeEvidenceCounters:
+    """M20 Phase 1 — alpha/beta evidence counters on edges."""
+
+    def test_create_edge_defaults_alpha_beta_to_one(self):
+        with TempDBStore() as s:
+            mu1, mu2 = str(uuid.uuid4()), str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+            run(s.create_mu(mu_id=mu2, source_type="agent_output", raw_content="b"))
+            edge = run(s.create_edge(source_mu_id=mu1, target_mu_id=mu2, weight=0.5))
+            assert edge["alpha"] == 1.0
+            assert edge["beta"] == 1.0
+            assert edge["evidence_updated_at_turn"] is None
+
+    def test_create_edge_accepts_explicit_alpha_beta(self):
+        with TempDBStore() as s:
+            mu1, mu2 = str(uuid.uuid4()), str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+            run(s.create_mu(mu_id=mu2, source_type="agent_output", raw_content="b"))
+            edge = run(s.create_edge(
+                source_mu_id=mu1, target_mu_id=mu2, weight=0.5, alpha=3.0, beta=7.0,
+            ))
+            assert edge["alpha"] == 3.0
+            assert edge["beta"] == 7.0
+
+            fetched = run(s.get_edge(edge["edge_id"]))
+            assert fetched["alpha"] == 3.0
+            assert fetched["beta"] == 7.0
+
+    def test_update_edge_counters_does_not_touch_weight_column(self):
+        with TempDBStore() as s:
+            mu1, mu2 = str(uuid.uuid4()), str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+            run(s.create_mu(mu_id=mu2, source_type="agent_output", raw_content="b"))
+            edge = run(s.create_edge(source_mu_id=mu1, target_mu_id=mu2, weight=0.42))
+
+            updated = run(s.update_edge_counters(
+                edge_id=edge["edge_id"], alpha=5.0, beta=2.0, evidence_updated_at_turn=17,
+            ))
+            assert updated is True
+
+            fetched = run(s.get_edge(edge["edge_id"]))
+            assert fetched["alpha"] == 5.0
+            assert fetched["beta"] == 2.0
+            assert fetched["evidence_updated_at_turn"] == 17
+            assert fetched["weight"] == pytest.approx(0.42)  # untouched
+
+    def test_update_edge_counters_returns_false_for_unknown_edge(self):
+        with TempDBStore() as s:
+            updated = run(s.update_edge_counters(edge_id="does-not-exist", alpha=1.0, beta=1.0))
+            assert updated is False
+
+
+class TestEdgeUpdateEvents:
+    """M20 Phase 1 — append-only edge_update_events log."""
+
+    def _sample_event(self, **overrides) -> dict:
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "run_id": "run-1",
+            "turn_index": 3,
+            "verdict_id": "fb-1",
+            "mu_id": "mu-2",
+            "edge_id": "edge-1",
+            "hop_k": 0,
+            "verdict": "up",
+            "increment": 1.0,
+            "alpha_before": 1.0,
+            "alpha_after": 2.0,
+            "beta_before": 1.0,
+            "beta_after": 1.0,
+            "created_at": "2026-07-06T00:00:00+00:00",
+        }
+        event.update(overrides)
+        return event
+
+    def test_insert_and_fetch_by_edge(self):
+        with TempDBStore() as s:
+            run(s.insert_edge_update_event(self._sample_event()))
+            events = run(s.get_edge_update_events_for_edge("edge-1"))
+            assert len(events) == 1
+            assert events[0]["verdict"] == "up"
+            assert events[0]["alpha_before"] == 1.0
+            assert events[0]["alpha_after"] == 2.0
+
+    def test_insert_and_fetch_by_run(self):
+        with TempDBStore() as s:
+            run(s.insert_edge_update_event(self._sample_event(event_id=str(uuid.uuid4()))))
+            run(s.insert_edge_update_event(self._sample_event(
+                event_id=str(uuid.uuid4()), edge_id="edge-2",
+            )))
+            events = run(s.get_edge_update_events_for_run("run-1"))
+            assert len(events) == 2
+
+    def test_multiple_events_for_same_edge_are_independently_stored(self):
+        """One (edge, verdict) increment per row — additivity, no dedup."""
+        with TempDBStore() as s:
+            run(s.insert_edge_update_event(self._sample_event(
+                event_id=str(uuid.uuid4()), alpha_before=1.0, alpha_after=2.0,
+            )))
+            run(s.insert_edge_update_event(self._sample_event(
+                event_id=str(uuid.uuid4()), alpha_before=2.0, alpha_after=3.0,
+            )))
+            events = run(s.get_edge_update_events_for_edge("edge-1"))
+            assert len(events) == 2
+
+    def test_survives_graph_wipe(self):
+        """Like feedback_events/analytics, edge_update_events is part of the
+        experimental audit trail and must survive wipe_graph()."""
+        with TempDBStore() as s:
+            mu1 = str(uuid.uuid4())
+            run(s.create_mu(mu_id=mu1, source_type="user_input", raw_content="a"))
+            run(s.insert_edge_update_event(self._sample_event()))
+
+            run(s.wipe_graph())
+
+            events = run(s.get_edge_update_events_for_edge("edge-1"))
+            assert len(events) == 1

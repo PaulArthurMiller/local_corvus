@@ -542,9 +542,16 @@ def execute_run(
             # stop (not subject to error_policy override) — nothing
             # downstream is trustworthy if the restart itself fails.
             # docker_project_root=None (the default) skips this entirely.
+            # M20 Phase 1 — RUN_CONDITION rides alongside EXPERIMENT_ID so
+            # the backend's effective_weight() dispatch (learned vs.
+            # static_weight vs. random_weight) matches the condition
+            # actually being run; the backend has no other way to know.
             if docker_project_root is not None:
                 try:
-                    restart_backend_fn(docker_project_root, {"EXPERIMENT_ID": experiment_id})
+                    restart_backend_fn(
+                        docker_project_root,
+                        {"EXPERIMENT_ID": experiment_id, "RUN_CONDITION": condition},
+                    )
                     wait_for_health_fn(client)
                 except DockerLifecycleError as exc:
                     error_summary = f"docker restart failed for condition {condition}: {exc}"

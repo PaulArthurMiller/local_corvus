@@ -14,8 +14,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from analytics.feedback_events import FeedbackEvent, record_feedback_event
-from core.orchestrator import AttachmentInput, run_interaction
+from core.orchestrator import EDGE_UPDATE_CFG, AttachmentInput, run_interaction
 from core.session import get_or_create_session
+from learning import edge_update
 from learning.simple_rl import SimpleRL
 from memory.store import store as graph_store
 
@@ -308,10 +309,26 @@ async def feedback_verdict(request: VerdictRequest) -> VerdictResponse:
 
     weight_updates: list[dict] = []
     if request.apply_weight_update and request.verdict in ("up", "down"):
-        signal = 1 if request.verdict == "up" else -1
-        weight_updates = await _apply_weight_updates(
-            run, signal, feedback_event.feedback_event_id
+        # M20 Phase 1 — path-decayed Beta(alpha, beta) counter updates,
+        # superseding the M4-era SimpleRL scalar-weight delta for this
+        # judge-driven endpoint. process_verdict_for_learning() itself
+        # refuses to write anything unless condition_label == "learned"
+        # (defense in depth — not just trusting the caller's
+        # apply_weight_update flag), so static_weight/random_weight verdicts
+        # are guaranteed to be a no-op here regardless of what the caller
+        # passes. Response shape (edge_id/old_weight/new_weight/
+        # source_mu_id/target_mu_id/feedback_event_id) is unchanged so
+        # existing report generators keep working; old_weight/new_weight are
+        # now the posterior mean before/after the update.
+        weight_updates = await edge_update.process_verdict_for_learning(
+            run, request.verdict, request.condition_label,
+            feedback_event.feedback_event_id, graph_store, EDGE_UPDATE_CFG,
         )
+        if weight_updates:
+            signal = 1 if request.verdict == "up" else -1
+            await graph_store.update_run_feedback(
+                run_id=run["run_id"], feedback_signal=signal, weight_updates=weight_updates,
+            )
 
     await record_feedback_event(feedback_event)
 

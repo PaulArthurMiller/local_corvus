@@ -257,7 +257,7 @@ def test_resume_skips_restart_wipe_seed_for_already_complete_condition(tmp_path)
     assert second_outcome.status == "complete"
     assert healthy_client.wipe_calls == ["p1_static_weight"]  # "learned" skipped entirely
     assert healthy_client.seed_calls == 1
-    assert restart_calls == [{"EXPERIMENT_ID": "p1_static_weight"}]
+    assert restart_calls == [{"EXPERIMENT_ID": "p1_static_weight", "RUN_CONDITION": "static_weight"}]
     assert healthy_client.chat_call_count == 2  # only static_weight's 2 turns
 
 
@@ -390,7 +390,7 @@ def test_resume_mid_series_preserves_graph_and_skips_wipe_seed(tmp_path):
     assert second_outcome.status == "complete"
     assert healthy_client.wipe_calls == []  # graph preserved, not reset
     assert healthy_client.seed_calls == 0
-    assert restart_calls == [{"EXPERIMENT_ID": "p1_learned"}]  # still restarted for correct stamping
+    assert restart_calls == [{"EXPERIMENT_ID": "p1_learned", "RUN_CONDITION": "learned"}]  # still restarted for correct stamping
     assert healthy_client.chat_call_count == 2  # only the 2 remaining turns
 
 
@@ -880,7 +880,9 @@ def test_docker_restart_called_once_per_condition_when_project_root_given(tmp_pa
     )
 
     assert outcome.status == "complete"
-    assert restart_calls == [(Path("/fake/project"), {"EXPERIMENT_ID": "p1_learned"})]
+    assert restart_calls == [
+        (Path("/fake/project"), {"EXPERIMENT_ID": "p1_learned", "RUN_CONDITION": "learned"})
+    ]
     assert len(health_calls) == 1
 
 

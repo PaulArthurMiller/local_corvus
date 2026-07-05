@@ -254,6 +254,43 @@ def test_register_fixture_inserts_edges(tmp_path):
     print(f"[PASS] {manifest.edge_count} edges inserted with creation_trigger='seed'")
 
 
+def test_register_fixture_stamps_seed_prior_alpha_beta(tmp_path):
+    """M20 Phase 1 — seed edges get edge_update.seed_prior_alpha/beta, read
+    from the real config.yaml (not the runtime prior_alpha/beta, though they
+    default equal)."""
+    edges = [{
+        "edge_id": "edge-001", "source_mu_id": "mu-001", "target_mu_id": "mu-002",
+        "weight": 0.5, "direction": "forward",
+    }]
+    fixture_path = _make_fixture(tmp_path, edges=edges)
+
+    with patch("analytics.seed_fixture.graph_store") as mock_store:
+        mock_store.create_mu = AsyncMock()
+        mock_store.create_edge = AsyncMock()
+        mock_store.insert_seed_fixture_manifest = AsyncMock()
+
+        run(register_fixture(fixture_path=fixture_path, version="v1"))
+
+    call_kwargs = mock_store.create_edge.call_args_list[0].kwargs
+    assert call_kwargs["alpha"] == pytest.approx(1.0)
+    assert call_kwargs["beta"] == pytest.approx(1.0)
+    print(f"[PASS] seed edge stamped alpha={call_kwargs['alpha']} beta={call_kwargs['beta']}")
+
+
+def test_load_seed_priors_falls_back_to_uniform_on_bad_config(tmp_path, monkeypatch):
+    """A missing/invalid config.yaml must not crash fixture registration —
+    falls back to the Beta(1,1) uniform prior."""
+    monkeypatch.setenv("CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    import importlib
+    import analytics.seed_fixture as seed_fixture_module
+    importlib.reload(seed_fixture_module)
+    try:
+        assert seed_fixture_module._load_seed_priors() == (1.0, 1.0)
+    finally:
+        monkeypatch.delenv("CONFIG_PATH", raising=False)
+        importlib.reload(seed_fixture_module)
+
+
 def test_register_fixture_edge_count_zero_for_no_edges(tmp_path):
     """register_fixture() sets edge_count=0 when fixture has no edges."""
     fixture_path = _make_fixture(tmp_path, edges=[])

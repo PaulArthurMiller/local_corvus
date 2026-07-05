@@ -23,8 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import yaml
 from pydantic import BaseModel
 
+from learning.edge_update import validate_edge_update_config
 from memory.store import store as graph_store
 
 logger = logging.getLogger(__name__)
@@ -34,10 +36,34 @@ _SEED_FIXTURES_PATH = Path(os.getenv(
     os.path.join(os.path.dirname(__file__), "..", "..", "seed_fixtures"),
 ))
 
+_CONFIG_PATH = os.getenv(
+    "CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml"),
+)
+
 
 def _resolve_experiment_id() -> str:
     """Read EXPERIMENT_ID from env, falling back to empty string."""
     return os.getenv("EXPERIMENT_ID", "").strip()
+
+
+def _load_seed_priors() -> tuple[float, float]:
+    """
+    Read edge_update.seed_prior_alpha/seed_prior_beta from config.yaml.
+
+    Falls back to the Beta(1,1) uniform prior if config.yaml is missing or
+    invalid — register_fixture() is a data-loading path, not the place to
+    hard-fail the whole app on a config problem (backend/core/orchestrator.py
+    already validates and hard-fails at startup for the live request path).
+    """
+    try:
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        resolved = validate_edge_update_config(cfg)
+        return resolved["seed_prior_alpha"], resolved["seed_prior_beta"]
+    except Exception as exc:
+        logger.warning("seed_fixture: could not resolve seed priors from config — %s", exc)
+        return 1.0, 1.0
 
 
 class SeedFixtureManifest(BaseModel):
@@ -117,6 +143,8 @@ async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManif
                     "seed_fixture: MU mu_id=%s already in DB (skipping): %s", mu_id, exc
                 )
 
+    seed_prior_alpha, seed_prior_beta = _load_seed_priors()
+
     edges = data.get("edges", [])
     edge_count = 0
     for edge in edges:
@@ -132,6 +160,8 @@ async def register_fixture(fixture_path: Path, version: str) -> SeedFixtureManif
                 direction=edge.get("direction", "forward"),
                 creation_run_id=None,
                 creation_trigger="seed",
+                alpha=seed_prior_alpha,
+                beta=seed_prior_beta,
             )
             edge_count += 1
         except Exception as exc:

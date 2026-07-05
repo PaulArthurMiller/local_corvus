@@ -9,6 +9,7 @@ Each test uses an isolated in-memory SQLite via TempDBStore.
 
 import asyncio
 import os
+import random
 import sys
 import tempfile
 import uuid
@@ -364,3 +365,66 @@ class TestRetrievalResultNewFields:
             assert result.traversal_path == []
             assert result.hop_depth_per_retrieved_mu == {}
             assert result.edge_contributions == {}
+            assert result.edge_weights_used == {}
+
+
+class TestConditionDispatch:
+    """M20 Phase 1 — effective_weight() dispatch by condition."""
+
+    def test_default_condition_reads_scalar_weight_unchanged(self):
+        """No condition passed -> "static_weight" default -> pre-M20 behavior."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[9], weight=0.9))
+            result = run(retrieve("elephant mammal", s, _minimal_config(level1_k=3, level2_k=2)))
+            # A scalar-weight edge with weight=0.9 should dominate K2 scoring
+            # exactly as before M20 — no alpha/beta involvement at all.
+            assert result.edge_weights_used == {} or all(
+                info["mode"] == "static_weight" for info in result.edge_weights_used.values()
+            )
+
+    def test_learned_condition_derives_weight_from_alpha_beta_not_scalar_column(self):
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            # Scalar `weight` column deliberately misleading (near-zero) —
+            # under "learned" this must be ignored entirely in favor of a
+            # strongly-reinforced alpha/beta posterior.
+            edge = run(s.create_edge(
+                source_mu_id=ids[0], target_mu_id=ids[9], weight=0.01, alpha=99.0, beta=1.0,
+            ))
+            result = run(retrieve(
+                "elephant mammal", s, _minimal_config(level1_k=3, level2_k=2),
+                condition="learned",
+            ))
+            if edge["edge_id"] in result.edge_weights_used:
+                info = result.edge_weights_used[edge["edge_id"]]
+                assert info["mode"] == "mean"
+                assert info["weight_used"] == pytest.approx(99.0 / 100.0)
+
+    def test_edge_weights_used_only_covers_traversal_path_edges(self):
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[9], weight=0.9))
+            result = run(retrieve(
+                "elephant mammal", s, _minimal_config(level1_k=3, level2_k=2),
+                condition="learned",
+            ))
+            path_edge_ids = {hop["edge_id"] for hop in result.traversal_path}
+            assert set(result.edge_weights_used.keys()) == path_edge_ids
+
+    def test_sample_mode_draws_stable_within_one_turn(self):
+        """A Thompson-sampled edge examined at both K1 (edge_weight_sum) and
+        K2 (traversal) scoring sites must use the same drawn value within a
+        single retrieve() call — verified indirectly via a deterministic
+        seeded RNG producing a reproducible result across two identical calls
+        with fresh RNG instances seeded the same way."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[9], weight=0.9, alpha=3.0, beta=3.0))
+            cfg = _minimal_config(level1_k=3, level2_k=2)
+            cfg["edge_update"] = {"weight_mode": "sample"}
+
+            result1 = run(retrieve("elephant mammal", s, cfg, condition="learned", rng=random.Random(123)))
+            result2 = run(retrieve("elephant mammal", s, cfg, condition="learned", rng=random.Random(123)))
+
+            assert result1.edge_weights_used == result2.edge_weights_used

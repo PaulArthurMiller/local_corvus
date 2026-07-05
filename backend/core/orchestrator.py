@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from core.session import append_session_message, get_session_messages
 from gate.audit import append_audit
 from gate.sanitize import AttachmentSanitizeResult, sanitize_attachment, sanitize_in, sanitize_out
 from gate.um import create_um
+from learning.edge_update import resolve_rng_seed, validate_edge_update_config
 from memory.extractor import extract
 from memory.retrieval import retrieve
 from memory.snapshot import take_snapshot
@@ -97,6 +99,45 @@ def _resolve_experiment_id() -> str:
 
 EXPERIMENT_ID: str = _resolve_experiment_id()
 logger.info("orchestrator: EXPERIMENT_ID=%s", EXPERIMENT_ID)
+
+# M20 Phase 1 — edge_update/decay config validation. Hard-fails at import
+# time (before any run state exists) on invalid values or decay.enabled=true.
+EDGE_UPDATE_CFG: dict = validate_edge_update_config(_CONFIG)
+
+# RUN_CONDITION — which of the three harness conditions (learned /
+# static_weight / random_weight) this backend process is currently serving.
+# Distinct from CONDITION_LABEL/experiment.condition_label above (an older,
+# separate axis used by the M9 probe framework and M14-16 reports in a
+# different vocabulary) — this one governs effective_weight() dispatch
+# (backend/learning/edge_update.py) exclusively. Defaults to "static_weight"
+# (the pre-M20 scalar-weight behavior) so plain chat-UI/dev usage without
+# the harness is unaffected; the harness sets RUN_CONDITION="learned"
+# alongside EXPERIMENT_ID when it restarts the backend for that condition.
+_VALID_RUN_CONDITIONS = ("learned", "static_weight", "random_weight")
+
+
+def _resolve_run_condition() -> str:
+    env_val = os.getenv("RUN_CONDITION", "").strip()
+    if not env_val:
+        return "static_weight"
+    if env_val not in _VALID_RUN_CONDITIONS:
+        logger.warning(
+            "orchestrator: RUN_CONDITION=%r not in %s — defaulting to 'static_weight'",
+            env_val, _VALID_RUN_CONDITIONS,
+        )
+        return "static_weight"
+    return env_val
+
+
+RUN_CONDITION: str = _resolve_run_condition()
+logger.info("orchestrator: RUN_CONDITION=%s", RUN_CONDITION)
+
+# Process-scoped seeded RNG for weight_mode: sample — one instance for the
+# process lifetime (not reset per-turn) so Thompson draws legitimately vary
+# turn-to-turn while remaining reproducible given the same EXPERIMENT_ID/seed.
+EDGE_RNG_SEED: int = resolve_rng_seed(EDGE_UPDATE_CFG, EXPERIMENT_ID)
+EDGE_RNG: random.Random = random.Random(EDGE_RNG_SEED)
+logger.info("orchestrator: edge_update rng_seed=%s weight_mode=%s", EDGE_RNG_SEED, EDGE_UPDATE_CFG["weight_mode"])
 
 # --- Failure detection constants ---
 # finish_reason value Ollama returns when the model exhausted its token budget
@@ -264,7 +305,10 @@ async def run_interaction(
     )
 
     # --- Step 2: Retrieve relevant memory ---
-    retrieval = await retrieve(input_result.content, graph_store, _CONFIG)
+    retrieval = await retrieve(
+        input_result.content, graph_store, _CONFIG,
+        condition=RUN_CONDITION, rng=EDGE_RNG,
+    )
     logger.info(
         "orchestrator: retrieved %d MUs keywords=%s",
         len(retrieval.mus),
@@ -333,6 +377,8 @@ async def run_interaction(
         direction="forward",
         creation_run_id=run_id,
         creation_trigger="prompt_construction",
+        alpha=EDGE_UPDATE_CFG["prior_alpha"],
+        beta=EDGE_UPDATE_CFG["prior_beta"],
     )
     # Edges: prompt -> each retrieved contributing MU
     for mu_id in retrieval.activated_mu_ids:
@@ -343,6 +389,8 @@ async def run_interaction(
             direction="forward",
             creation_run_id=run_id,
             creation_trigger="prompt_construction",
+            alpha=EDGE_UPDATE_CFG["prior_alpha"],
+            beta=EDGE_UPDATE_CFG["prior_beta"],
         )
 
     # --- Step 6: Gate prompt before Ollama ---
@@ -423,6 +471,8 @@ async def run_interaction(
         direction="forward",
         creation_run_id=run_id,
         creation_trigger="prompt_construction",
+        alpha=EDGE_UPDATE_CFG["prior_alpha"],
+        beta=EDGE_UPDATE_CFG["prior_beta"],
     )
 
     append_audit(output_um)
@@ -472,6 +522,7 @@ async def run_interaction(
         traversal_path=retrieval.traversal_path,
         hop_depth_per_retrieved_mu=retrieval.hop_depth_per_retrieved_mu,
         edge_contributions=retrieval.edge_contributions,
+        edge_weights_used=retrieval.edge_weights_used,
         assembled_prompt_json=assembled_prompt_json,
         config_hash=_CONFIG_HASH,
         full_config_snapshot=_CONFIG,

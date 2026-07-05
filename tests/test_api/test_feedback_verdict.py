@@ -25,20 +25,34 @@ def run(coro):
 
 
 def _run_record(run_id="run-1", activated_edge_ids=None, activated_mu_ids=None, turn_index=3):
+    # M20 Phase 1: process_verdict_for_learning() credits a MU's *path*
+    # edges (reconstructed from hop_depth_per_retrieved_mu + traversal_path),
+    # not the flat activated_edge_ids list SimpleRL used to iterate over.
+    # "mu-1" here is a K2 (hop_depth=1) MU reached via "edge-1", matching the
+    # single-hop retrieval design (see edge_update.get_path_edge_ids_for_mu).
+    mu_ids = activated_mu_ids if activated_mu_ids is not None else ["mu-1"]
+    edge_ids = activated_edge_ids if activated_edge_ids is not None else ["edge-1"]
     return {
         "run_id": run_id,
-        "activated_edge_ids": activated_edge_ids if activated_edge_ids is not None else ["edge-1"],
-        "activated_mu_ids": activated_mu_ids if activated_mu_ids is not None else ["mu-1"],
+        "activated_edge_ids": edge_ids,
+        "activated_mu_ids": mu_ids,
+        "hop_depth_per_retrieved_mu": {mu_id: 1 for mu_id in mu_ids},
+        "traversal_path": [
+            {"source_mu_id": "mu-src", "edge_id": edge_id, "target_mu_id": mu_id, "hop_depth": 1}
+            for edge_id, mu_id in zip(edge_ids, mu_ids)
+        ],
         "turn_index": turn_index,
     }
 
 
-def _edge(edge_id="edge-1", weight=0.5):
+def _edge(edge_id="edge-1", weight=0.5, alpha=1.0, beta=1.0):
     return {
         "edge_id": edge_id,
         "source_mu_id": "mu-src",
         "target_mu_id": "mu-tgt",
         "weight": weight,
+        "alpha": alpha,
+        "beta": beta,
     }
 
 
@@ -101,9 +115,9 @@ class TestVerdictWeightUpdateGating:
     def test_apply_weight_update_true_up_verdict_updates_weights_with_fk(self):
         request = _verdict_request(verdict="up", apply_weight_update=True, condition_label="learned")
         with patch("api.chat.graph_store.get_run", AsyncMock(return_value=_run_record())), \
-             patch("api.chat.graph_store.get_all_edges", AsyncMock(return_value=[_edge()])), \
-             patch("api.chat.graph_store.get_mu", AsyncMock(return_value={"mu_id": "mu-1"})), \
-             patch("api.chat.graph_store.update_edge_weight", AsyncMock()) as update_mock, \
+             patch("api.chat.graph_store.get_edge", AsyncMock(return_value=_edge())), \
+             patch("api.chat.graph_store.update_edge_counters", AsyncMock()) as update_mock, \
+             patch("api.chat.graph_store.insert_edge_update_event", AsyncMock()), \
              patch("api.chat.graph_store.update_run_feedback", AsyncMock()) as update_run_mock, \
              patch("api.chat.record_feedback_event", AsyncMock()) as record_mock:
             result = run(feedback_verdict(request))
@@ -112,6 +126,7 @@ class TestVerdictWeightUpdateGating:
         assert result.weight_updates[0]["feedback_event_id"] == result.feedback_event_id
         assert result.weight_updates[0]["source_mu_id"] == "mu-src"
         assert result.weight_updates[0]["target_mu_id"] == "mu-tgt"
+        assert result.weight_updates[0]["new_weight"] > result.weight_updates[0]["old_weight"]
         update_mock.assert_called_once()
         update_run_mock.assert_called_once()
         recorded_event = record_mock.call_args[0][0]
@@ -125,15 +140,15 @@ class TestVerdictWeightUpdateGating:
             verdict="down", apply_weight_update=True, criterion_triggered="mentions X",
         )
         with patch("api.chat.graph_store.get_run", AsyncMock(return_value=_run_record())), \
-             patch("api.chat.graph_store.get_all_edges", AsyncMock(return_value=[_edge(weight=0.5)])), \
-             patch("api.chat.graph_store.get_mu", AsyncMock(return_value={"mu_id": "mu-1"})), \
-             patch("api.chat.graph_store.update_edge_weight", AsyncMock()) as update_mock, \
+             patch("api.chat.graph_store.get_edge", AsyncMock(return_value=_edge())), \
+             patch("api.chat.graph_store.update_edge_counters", AsyncMock()) as update_mock, \
+             patch("api.chat.graph_store.insert_edge_update_event", AsyncMock()), \
              patch("api.chat.graph_store.update_run_feedback", AsyncMock()), \
              patch("api.chat.record_feedback_event", AsyncMock()):
             result = run(feedback_verdict(request))
 
         assert result.edges_updated == 1
-        assert result.weight_updates[0]["new_weight"] < 0.5
+        assert result.weight_updates[0]["new_weight"] < result.weight_updates[0]["old_weight"]
         update_mock.assert_called_once()
 
     def test_apply_weight_update_true_none_verdict_makes_zero_changes(self):

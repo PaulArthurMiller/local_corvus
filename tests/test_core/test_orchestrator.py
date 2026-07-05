@@ -328,3 +328,31 @@ class TestMilestone12Orchestrator:
         record = RunRecord(series_id=str(uuid.uuid4()), experiment_id=EXPERIMENT_ID)
         print(f"[test] record.experiment_id={record.experiment_id!r}")
         assert record.experiment_id == EXPERIMENT_ID
+
+
+# ---------------------------------------------------------------------------
+# M20 Phase 1 — RUN_CONDITION / EDGE_UPDATE_CFG module constants
+# ---------------------------------------------------------------------------
+
+
+class TestMilestone20Orchestrator:
+
+    def test_run_condition_defaults_to_static_weight_without_env_var(self):
+        """No RUN_CONDITION env var set in the test process -> the pre-M20
+        scalar-weight behavior (static_weight) is the safe default, not
+        "learned" — plain chat-UI/dev usage must be unaffected by M20."""
+        from core.orchestrator import RUN_CONDITION
+        print(f"[test] RUN_CONDITION={RUN_CONDITION!r}")
+        assert RUN_CONDITION == "static_weight"
+
+    def test_edge_update_cfg_is_validated_and_resolved(self):
+        from core.orchestrator import EDGE_UPDATE_CFG
+        print(f"[test] EDGE_UPDATE_CFG={EDGE_UPDATE_CFG!r}")
+        assert EDGE_UPDATE_CFG["prior_alpha"] > 0
+        assert EDGE_UPDATE_CFG["prior_beta"] > 0
+        assert EDGE_UPDATE_CFG["weight_mode"] in ("mean", "sample")
+
+    def test_edge_rng_is_a_random_instance(self):
+        import random
+        from core.orchestrator import EDGE_RNG
+        assert isinstance(EDGE_RNG, random.Random)

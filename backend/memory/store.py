@@ -50,8 +50,31 @@ CREATE TABLE IF NOT EXISTS edges (
     last_traversed_at TEXT,
     traversal_count INTEGER DEFAULT 0,
     creation_run_id TEXT,
-    creation_trigger TEXT
+    creation_trigger TEXT,
+    alpha REAL NOT NULL DEFAULT 1.0,
+    beta REAL NOT NULL DEFAULT 1.0,
+    evidence_updated_at_turn INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS edge_update_events (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT,
+    turn_index INTEGER,
+    verdict_id TEXT,
+    mu_id TEXT NOT NULL,
+    edge_id TEXT NOT NULL,
+    hop_k INTEGER NOT NULL,
+    verdict TEXT NOT NULL,
+    increment REAL NOT NULL,
+    alpha_before REAL NOT NULL,
+    alpha_after REAL NOT NULL,
+    beta_before REAL NOT NULL,
+    beta_after REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_edge_update_events_edge ON edge_update_events(edge_id);
+CREATE INDEX IF NOT EXISTS idx_edge_update_events_run ON edge_update_events(run_id);
 
 CREATE TABLE IF NOT EXISTS analytics (
     run_id TEXT PRIMARY KEY,
@@ -86,7 +109,8 @@ CREATE TABLE IF NOT EXISTS analytics (
     measurement_session_index INTEGER,
     is_probe_turn INTEGER NOT NULL DEFAULT 0,
     use_session_context INTEGER NOT NULL DEFAULT 0,
-    failure_reason TEXT
+    failure_reason TEXT,
+    edge_weights_used TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS feedback_events (
@@ -207,6 +231,11 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("feedback_events", "judge_temperature", "REAL"),
         ("feedback_events", "judge_pinned_snapshot", "TEXT"),
         ("feedback_events", "prompt_id", "TEXT"),
+        # M20 Phase 1: Beta(alpha, beta) evidence counters on edges + traversal weight log
+        ("edges", "alpha", "REAL NOT NULL DEFAULT 1.0"),
+        ("edges", "beta", "REAL NOT NULL DEFAULT 1.0"),
+        ("edges", "evidence_updated_at_turn", "INTEGER"),
+        ("analytics", "edge_weights_used", "TEXT NOT NULL DEFAULT '{}'"),
     ]
     for table, column, col_type in add_column_migrations:
         try:
@@ -347,13 +376,23 @@ class GraphStore:
         edge_id: Optional[str] = None,
         creation_run_id: Optional[str] = None,
         creation_trigger: Optional[str] = None,
+        alpha: float = 1.0,
+        beta: float = 1.0,
     ) -> dict:
         """
         Insert a directed edge between two MUs.
 
         direction: "forward" | "bidirectional"
-        weight: initial weight from config initial_edge_weight
-        creation_trigger: "prompt_construction" | "co_activation" | "feedback" | "traversal"
+        weight: initial weight from config initial_edge_weight (read by the
+            static_weight/random_weight conditions; ignored by "learned",
+            which reads alpha/beta via effective_weight() instead — see
+            backend/learning/edge_update.py)
+        creation_trigger: "prompt_construction" | "co_activation" | "feedback" | "traversal" | "seed"
+        alpha, beta: Beta-posterior evidence counters (M20 Phase 1). Callers
+            should pass edge_update.prior_alpha/prior_beta for runtime-created
+            edges, or edge_update.seed_prior_alpha/seed_prior_beta for
+            seed-fixture edges — defaults here are a schema-level safety net,
+            not a substitute for config-driven values.
         """
         eid = edge_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -363,21 +402,23 @@ class GraphStore:
                 """
                 INSERT INTO edges
                     (edge_id, source_mu_id, target_mu_id, created_at, weight, direction,
-                     creation_run_id, creation_trigger)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     creation_run_id, creation_trigger, alpha, beta)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (eid, source_mu_id, target_mu_id, now, weight, direction,
-                 creation_run_id, creation_trigger),
+                 creation_run_id, creation_trigger, alpha, beta),
             )
             await db.commit()
         finally:
             await db.close()
         logger.info(
-            "store: created edge edge_id=%s %s→%s weight=%.3f trigger=%s",
+            "store: created edge edge_id=%s %s→%s weight=%.3f alpha=%.3f beta=%.3f trigger=%s",
             eid,
             source_mu_id,
             target_mu_id,
             weight,
+            alpha,
+            beta,
             creation_trigger,
         )
         return {
@@ -391,6 +432,9 @@ class GraphStore:
             "traversal_count": 0,
             "creation_run_id": creation_run_id,
             "creation_trigger": creation_trigger,
+            "alpha": alpha,
+            "beta": beta,
+            "evidence_updated_at_turn": None,
         }
 
     async def get_edges_for_mu(self, mu_id: str) -> list[dict]:
@@ -501,7 +545,7 @@ class GraphStore:
                     assembled_prompt_json, config_hash, full_config_snapshot,
                     condition_label, turn_index, session_turn_index,
                     measurement_session_index, is_probe_turn, use_session_context,
-                    failure_reason
+                    failure_reason, edge_weights_used
                 ) VALUES (
                     :run_id, :series_id, :experiment_id, :timestamp, :input_mu_id, :output_mu_id,
                     :tool_calls, :activated_mu_ids, :activated_edge_ids, :prompt_mu_id,
@@ -512,7 +556,7 @@ class GraphStore:
                     :assembled_prompt_json, :config_hash, :full_config_snapshot,
                     :condition_label, :turn_index, :session_turn_index,
                     :measurement_session_index, :is_probe_turn, :use_session_context,
-                    :failure_reason
+                    :failure_reason, :edge_weights_used
                 )
                 """,
                 {
@@ -549,6 +593,7 @@ class GraphStore:
                     "is_probe_turn": 1 if run.get("is_probe_turn") else 0,
                     "use_session_context": 1 if run.get("use_session_context") else 0,
                     "failure_reason": run.get("failure_reason"),
+                    "edge_weights_used": json.dumps(run.get("edge_weights_used", {})),
                 },
             )
             await db.commit()
@@ -603,7 +648,7 @@ class GraphStore:
             "weight_updates", "hyperparameters_snapshot",
             "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
             "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
-            "assembled_prompt_json", "full_config_snapshot",
+            "assembled_prompt_json", "full_config_snapshot", "edge_weights_used",
         }
         result = []
         for row in rows:
@@ -669,7 +714,7 @@ class GraphStore:
             "weight_updates", "hyperparameters_snapshot",
             "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
             "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
-            "assembled_prompt_json", "full_config_snapshot",
+            "assembled_prompt_json", "full_config_snapshot", "edge_weights_used",
         }
         for field in json_fields:
             if r.get(field):
@@ -766,6 +811,110 @@ class GraphStore:
         finally:
             await db.close()
         return dict(row) if row is not None else None
+
+    # -------------------------------------------------------------------------
+    # M20 Phase 1: Beta(alpha, beta) evidence counters + edge_update_events
+    # -------------------------------------------------------------------------
+
+    async def update_edge_counters(
+        self,
+        edge_id: str,
+        alpha: float,
+        beta: float,
+        evidence_updated_at_turn: Optional[int] = None,
+    ) -> bool:
+        """
+        Update only the alpha/beta evidence counters (and evidence_updated_at_turn)
+        of an edge. Never touches the scalar `weight` column — the learned
+        condition derives its weight from these counters via effective_weight(),
+        it does not maintain a denormalized "current weight". Returns True if a
+        row was updated.
+        """
+        db = await _open_db()
+        try:
+            cursor = await db.execute(
+                """
+                UPDATE edges
+                SET alpha = ?, beta = ?, evidence_updated_at_turn = ?
+                WHERE edge_id = ?
+                """,
+                (alpha, beta, evidence_updated_at_turn, edge_id),
+            )
+            await db.commit()
+            updated = cursor.rowcount > 0
+        finally:
+            await db.close()
+        if updated:
+            logger.info(
+                "store: updated edge counters edge_id=%s alpha=%.4f beta=%.4f turn=%s",
+                edge_id, alpha, beta, evidence_updated_at_turn,
+            )
+        else:
+            logger.warning("store: edge_id=%s not found for counter update", edge_id)
+        return updated
+
+    async def insert_edge_update_event(self, event: dict) -> None:
+        """Insert one immutable edge_update_events row (one per edge/verdict increment)."""
+        db = await _open_db()
+        try:
+            await db.execute(
+                """
+                INSERT INTO edge_update_events
+                    (event_id, run_id, turn_index, verdict_id, mu_id, edge_id, hop_k,
+                     verdict, increment, alpha_before, alpha_after, beta_before,
+                     beta_after, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["event_id"],
+                    event.get("run_id"),
+                    event.get("turn_index"),
+                    event.get("verdict_id"),
+                    event["mu_id"],
+                    event["edge_id"],
+                    event["hop_k"],
+                    event["verdict"],
+                    event["increment"],
+                    event["alpha_before"],
+                    event["alpha_after"],
+                    event["beta_before"],
+                    event["beta_after"],
+                    event["created_at"],
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        logger.info(
+            "store: inserted edge_update_event event_id=%s edge_id=%s verdict=%s increment=%.4f",
+            event["event_id"], event["edge_id"], event["verdict"], event["increment"],
+        )
+
+    async def get_edge_update_events_for_edge(self, edge_id: str) -> list[dict]:
+        """Return all edge_update_events for one edge, ordered by created_at ASC."""
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM edge_update_events WHERE edge_id = ? ORDER BY created_at ASC",
+                (edge_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
+
+    async def get_edge_update_events_for_run(self, run_id: str) -> list[dict]:
+        """Return all edge_update_events produced by one run's verdict, ordered by created_at ASC."""
+        db = await _open_db()
+        try:
+            async with db.execute(
+                "SELECT * FROM edge_update_events WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [dict(r) for r in rows]
 
 
     async def sync_probes(self, probes: list[dict]) -> None:
@@ -979,7 +1128,7 @@ class GraphStore:
             "weight_updates", "hyperparameters_snapshot",
             "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
             "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
-            "assembled_prompt_json", "full_config_snapshot",
+            "assembled_prompt_json", "full_config_snapshot", "edge_weights_used",
         }
         result = []
         for row in rows:
@@ -1351,7 +1500,7 @@ class GraphStore:
             "weight_updates", "hyperparameters_snapshot",
             "bm25_scores_per_mu", "entry_point_mu_ids", "candidate_set_before_ranking",
             "traversal_path", "hop_depth_per_retrieved_mu", "edge_contributions",
-            "assembled_prompt_json", "full_config_snapshot",
+            "assembled_prompt_json", "full_config_snapshot", "edge_weights_used",
         }
         result = []
         for row in rows:

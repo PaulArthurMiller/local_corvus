@@ -36,6 +36,7 @@ from analytics.reports.experiment_report import generate_experiment_report, writ
 from analytics.reports.series_report import generate_series_report, write_series_report
 from analytics.run_log import query_runs
 from analytics.seed_fixture import register_fixture
+from core.orchestrator import EDGE_RNG, RUN_CONDITION
 from memory.retrieval import retrieve
 from memory.snapshot import take_archive_snapshot, take_battery_snapshot
 from memory.store import store as graph_store
@@ -298,7 +299,10 @@ async def run_probe(body: RunProbeRequest):
 
     # Run retrieval — read-only; no MU creation, no edges written
     try:
-        retrieval_result = await retrieve(probe.prompt_text, graph_store, config)
+        retrieval_result = await retrieve(
+            probe.prompt_text, graph_store, config,
+            condition=RUN_CONDITION, rng=EDGE_RNG,
+        )
     except Exception as exc:
         logger.error("admin/run-probe: retrieval failed — %s", exc)
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {exc}")

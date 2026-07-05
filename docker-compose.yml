@@ -18,6 +18,7 @@ services:
       - CONDITION_LABEL=${CONDITION_LABEL:-}
       - USE_SESSION_CONTEXT=${USE_SESSION_CONTEXT:-}
       - EXPERIMENT_ID=${EXPERIMENT_ID:-}
+      - RUN_CONDITION=${RUN_CONDITION:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

@@ -49,6 +49,13 @@ class RunRecord(BaseModel):
     hop_depth_per_retrieved_mu: dict[str, Any] = Field(default_factory=dict)
     edge_contributions: dict[str, Any] = Field(default_factory=dict)
 
+    # M20 Phase 1 — per-turn traversal weight log (§3.4). {edge_id: {alpha,
+    # beta, weight_used, mode}} for every edge in traversal_path. Required in
+    # weight_mode: sample (the drawn weight can't be reconstructed from
+    # counters alone); logged in weight_mode: mean too so the trace-test
+    # procedure is identical across modes.
+    edge_weights_used: dict[str, Any] = Field(default_factory=dict)
+
     # Full Ollama messages array with base64 image data replaced by placeholder strings
     assembled_prompt_json: list[dict] = Field(default_factory=list)
 

@@ -243,6 +243,68 @@ reporting:
   # Range: 0.01–0.2.
   random_control_variance_floor: 0.05
 
+edge_update:
+  # M20 Phase 1 — Beta(alpha, beta) posterior edge-weight learning.
+  # Applies only when the backend's RUN_CONDITION is "learned" (see
+  # backend/core/orchestrator.py). static_weight/random_weight conditions
+  # never read or write these values — they keep using the scalar `weight`
+  # column exactly as before.
+
+  # Beta prior for runtime-created edges (1.0, 1.0 = uniform / no evidence).
+  # Must be > 0.
+  prior_alpha: 1.0
+  prior_beta: 1.0
+
+  # Beta prior for seed-fixture edges (seed_v2 load). Defaults equal the
+  # runtime prior; the separate knob exists so seed edges can be initialized
+  # warmer or cooler than runtime edges without a code change. Must be > 0.
+  seed_prior_alpha: 1.0
+  seed_prior_beta: 1.0
+
+  # c — pseudo-count magnitude applied to a path's terminal edge (hop_k=0)
+  # per verdict. The learning-rate knob. Must be > 0.
+  credit_scale: 1.0
+
+  # lambda — per-hop backward decay of credit along the traversal path:
+  # increment = credit_scale * credit_lambda ** hop_k. Must satisfy
+  # 0 < credit_lambda <= 1.
+  credit_lambda: 0.6
+
+  # Whether a "down" verdict's credit propagates along the whole path or
+  # only strikes the terminal (hop_k=0) edge.
+  # Values: "path" | "terminal"
+  negative_scope: path
+
+  # Deterministic posterior mean vs. Thompson-sampled draw as the single
+  # weight traversal actually reads.
+  # Values: "mean" | "sample"
+  weight_mode: mean
+
+  evidence_cap:
+    # Ship the knob; default-off for the pilot. When enabled, an edge's
+    # (alpha, beta) are rescaled to sum to n_max after each update —
+    # preserves the mean while capping accumulated evidence, approximating
+    # a constant learning rate.
+    enabled: false
+    # Must be > prior_alpha + prior_beta when enabled.
+    n_max: 50.0
+
+  # RNG seed for weight_mode: sample. null = derive deterministically from
+  # EXPERIMENT_ID; an explicit integer overrides. Ignored in weight_mode: mean.
+  rng_seed: null
+
+decay:
+  # RESERVED for a future milestone — schema is validated at startup but
+  # NOTHING in this block is implemented yet. The backend refuses to start
+  # if enabled is true.
+  enabled: false
+  # discount (counter discounting) | actr (reserved, not implemented)
+  mechanism: discount
+  # Per-application discount on (alpha, beta) when mechanism: discount.
+  gamma: 0.99
+  # usage (only non-traversed edges decay) | clock
+  gate: usage
+
 prompt_gen:
   # M19 Phase 1 — Sonnet-based prompt bank generation. Host-side only; the
   # `anthropic` SDK is a dev dependency, never installed in the Docker image.

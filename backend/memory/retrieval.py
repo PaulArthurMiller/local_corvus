@@ -22,12 +22,22 @@ small MU counts of a local research session.
 """
 
 import logging
+import random
 import re
 from dataclasses import dataclass, field
+from typing import Optional
 
 from rank_bm25 import BM25Okapi
 
+from learning.edge_update import compute_effective_weight
+
 logger = logging.getLogger(__name__)
+
+# Module-level RNG fallback for callers that don't inject one (e.g. read-only
+# probe measurement via admin.py). Real turns should pass the orchestrator's
+# process-scoped, seeded RNG so weight_mode: sample is reproducible — see
+# backend/core/orchestrator.py's _EDGE_RNG.
+_DEFAULT_RNG = random.Random()
 
 _WORD_RE = re.compile(r"\b\w+\b")
 
@@ -74,13 +84,35 @@ class RetrievalResult:
     # Separates edge-learned signal from BM25 lexical signal in the K1 composite score.
     edge_contributions: dict[str, float] = field(default_factory=dict)
 
+    # M20 Phase 1 — per-turn traversal weight log (§3.4). {edge_id: {alpha,
+    # beta, weight_used, mode}} for every edge in traversal_path. Populated
+    # regardless of weight_mode (cheap in "mean"; required for reconstruction
+    # in "sample", since a Thompson draw can't be recovered from counters alone).
+    edge_weights_used: dict[str, dict] = field(default_factory=dict)
 
-async def retrieve(query: str, store, config: dict) -> RetrievalResult:
+
+async def retrieve(
+    query: str,
+    store,
+    config: dict,
+    condition: str = "static_weight",
+    rng: Optional[random.Random] = None,
+) -> RetrievalResult:
     """
     Run BM25 + traversal funnel against all MUs in the store.
 
     Returns a RetrievalResult with the retrieved MUs and traversal metadata.
     Returns an empty result if the store has no MUs or no keywords match.
+
+    condition dispatches every edge weight read through effective_weight()
+    (backend/learning/edge_update.py): "learned" derives weight from the
+    edge's Beta(alpha, beta) posterior; "static_weight"/"random_weight"
+    (the default, for backward compatibility with callers that don't pass a
+    condition) read the existing scalar `weight` column unchanged. rng is
+    the RNG used for weight_mode: sample — pass the orchestrator's seeded,
+    process-scoped RNG for reproducibility; defaults to an unseeded
+    module-level RNG for read-only callers (e.g. probe measurement) that
+    don't need reproducible samples.
     """
     hp = config.get("hyperparameters", {})
     pool_size: int = hp.get("retrieval_keyword_pool_size", 20)
@@ -88,6 +120,8 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     level1_k: int = hp.get("retrieval_level1_top_k", 3)
     level2_k: int = hp.get("retrieval_level2_top_k", 1)
     dir_multiplier: float = float(hp.get("directional_edge_weight_multiplier", 1.5))
+    weight_mode: str = config.get("edge_update", {}).get("weight_mode", "mean")
+    rng = rng if rng is not None else _DEFAULT_RNG
 
     all_mus = await store.get_all_mus()
     all_edges = await store.get_all_edges()
@@ -95,6 +129,15 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     if not all_mus:
         logger.debug("retrieve: store is empty — skipping retrieval")
         return RetrievalResult()
+
+    # Compute each edge's effective weight exactly once for this turn — a
+    # Thompson-sampled draw must stay consistent across every scoring site
+    # (K1's edge_weight_sum and K2's traversal) that reads the same edge
+    # within one turn.
+    weight_cache = {
+        e["edge_id"]: compute_effective_weight(e, condition, weight_mode, rng)
+        for e in all_edges
+    }
 
     # --- Stage 1: BM25 index ---
     mu_ids = [m["mu_id"] for m in all_mus]
@@ -143,7 +186,7 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     for edge in all_edges:
         src = edge["source_mu_id"]
         tgt = edge["target_mu_id"]
-        w = edge["weight"]
+        w = weight_cache[edge["edge_id"]].weight
         edge_weight_sum[src] = edge_weight_sum.get(src, 0.0) + w
         edge_weight_sum[tgt] = edge_weight_sum.get(tgt, 0.0) + w
         outgoing_edges.setdefault(src, []).append(edge)
@@ -182,8 +225,9 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
             target = edge["target_mu_id"]
             if target in k1_set:
                 continue
+            edge_weight = weight_cache[edge["edge_id"]].weight
             k2_scores[target] = (
-                k2_scores.get(target, 0.0) + edge["weight"] * dir_multiplier
+                k2_scores.get(target, 0.0) + edge_weight * dir_multiplier
             )
             traversed_edge_ids.append(edge["edge_id"])
             traversal_path.append({
@@ -210,6 +254,20 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
     mu_by_id = {m["mu_id"]: m for m in all_mus}
     retrieved_mus = [mu_by_id[mid] for mid in activated_mu_ids if mid in mu_by_id]
 
+    # §3.4 traversal weight log — every edge in traversal_path, with the
+    # counter state read and the weight actually used (required to walk a
+    # Thompson-sampled turn after the fact; cheap and logged uniformly in
+    # weight_mode: mean too).
+    edge_weights_used = {
+        hop["edge_id"]: {
+            "alpha": weight_cache[hop["edge_id"]].alpha,
+            "beta": weight_cache[hop["edge_id"]].beta,
+            "weight_used": weight_cache[hop["edge_id"]].weight,
+            "mode": weight_cache[hop["edge_id"]].mode,
+        }
+        for hop in traversal_path
+    }
+
     logger.info(
         "retrieve: returning %d MUs (K1=%d K2=%d traversed_edges=%d)",
         len(retrieved_mus),
@@ -229,4 +287,5 @@ async def retrieve(query: str, store, config: dict) -> RetrievalResult:
         traversal_path=traversal_path,
         hop_depth_per_retrieved_mu=hop_depth_per_retrieved_mu,
         edge_contributions={mid: edge_weight_sum.get(mid, 0.0) for mid in multi_hit},
+        edge_weights_used=edge_weights_used,
     )

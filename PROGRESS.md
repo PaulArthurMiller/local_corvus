@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Active — M19 Phases 1–3 planned (BUILD-PLAN.md updated 2026-07-04)  
-Current milestone: 19 Phase 1 — Prompt Bank Generation + Validation — COMPLETE  
-Next step: Review PR for milestone-19-phase-1-prompt-bank, then /build Milestone 19 Phase 2 — Judge Integration (Gemma judge module, feedback_events migration, POST /feedback/verdict endpoint).
+Current milestone: 19 Phase 2 — Judge Integration — COMPLETE  
+Next step: Review PR for milestone-19-phase-2-judge, then /build Milestone 19 Phase 3 — Full Pilot Execution + Reporting Wire-Up.
 
 ## Session log
 
@@ -14,6 +14,25 @@ Next step: Review PR for milestone-19-phase-1-prompt-bank, then /build Milestone
   - Phase 2 (`milestone-19-phase-2-judge`): Gemma judge module + verdict logging. **Planning discovery:** `feedback_events` table lacks all 8 judge fields the overview requires (`judge_source`, `condition_label`, `criterion_triggered`, etc.) — Phase 2 includes a DB migration and a new `POST /feedback/verdict` endpoint with an explicit `apply_weight_update` flag; the condition gate stays in `runner.py` (judge is condition-agnostic). Open decision flagged: verdict string vocabulary (`thumbs_up` vs `up`) — resolve by grepping report code at build time.
   - Phase 3 (`milestone-19-phase-3-pilot`): series/experiment report wire-up, notification channel dispatch (`log` only implemented), budget cap pre-run + mid-run, and the required full pilot smoke run. **Planning discovery:** `runner.py` never passes `series_id` on chat calls — series reports would query empty sets; fixed as Phase 3 build item 1. Open question flagged: how runs get stamped with `experiment_id` (highest-risk unknown; resolve before writing reporting calls).
   - Judge calls go to Ollama at `localhost:11434` from the host-side harness (not `host.docker.internal`, which is the container-side alias).
+- 2026-07-05: /build — Milestone 19 Phase 2 complete (Judge Integration)
+  - Created: `scripts/harness/judge.py` (`OllamaJudgeClient` — `chat_json()`, `model_available()`; `judge_turn()`; `JudgeVerdict` dataclass; `ProbeTurnJudgeError`, `JudgeUnparseableError`; closed-vocabulary verdict parsing with one re-ask)
+  - Modified: `backend/memory/store.py` (feedback_events gains 8 nullable columns: `condition_label`, `rationale`, `criterion_triggered`, `judge_source`, `judge_model_name`, `judge_temperature`, `judge_pinned_snapshot`, `prompt_id` — additive `_migrate_db()` entries + `_INIT_SQL`; `insert_feedback_event()` writes all new fields)
+  - Modified: `backend/analytics/feedback_events.py` (`FeedbackEvent` gains the same 8 optional fields)
+  - Modified: `backend/api/chat.py` (new `POST /feedback/verdict` endpoint with `VerdictRequest`/`VerdictResponse`; extracted `_apply_weight_updates()` shared helper — used by both `/feedback` and `/feedback/verdict` so the §6.1 edge-delta-ledger orphan check audits one code path; `/feedback` now stamps `judge_source="human"`, contract otherwise unchanged)
+  - Modified: `scripts/harness/client.py` (`BackendClient.post_verdict()` — POST /feedback/verdict wrapper, same connectivity/turn-error split as `chat()`)
+  - Modified: `scripts/harness/schema.py` (`JudgeConfig.temperature` tightened `le=2.0` → `le=0.1`; `DEFAULT_ERROR_POLICY` gains `"judge_unparseable": "soft_continue"`)
+  - Modified: `scripts/harness/checkpoint.py` (`TurnCheckpoint` gains `verdict`, `feedback_event_id`, `judge_error` — kept separate from `detail` so a verdict-posting hiccup never overwrites the chat call's own audit info)
+  - Modified: `scripts/harness/runner.py` (judge-availability preflight — `GET /api/tags`, unconditional hard stop if the judge model is missing, runs before any wipe/seed call; `_judge_and_post_verdict()` helper: judges each successfully-completed bulk turn via the loaded prompt bank's criteria, computes `apply_weight_update = (condition == "learned" and verdict in ("up","down"))`, posts the verdict, supports `--interactive` accept/override/skip; `JudgeUnparseableError` routes through `error_policy["judge_unparseable"]`)
+  - Modified: `scripts/run_experiment_harness.py` (`--interactive` and `--judge-host` CLI flags; constructs `OllamaJudgeClient` alongside `BackendClient`)
+  - Added: `tests/test_harness/test_judge.py` (13 new — verdict parsing incl. closed-vocabulary `criterion_triggered` check, probe-turn guard, retry-then-raise, and `OllamaJudgeClient` request-shape tests against `httpx.MockTransport`)
+  - Extended: `tests/test_harness/test_runner.py` (11 new — learned/static/none weight-update gating, no-judge-client no-op, unparseable soft-continue + checkpoint anomaly, hard-stop override, `--interactive` accept/override, judge preflight hard-stop, probe turns never judged)
+  - Extended: `tests/test_harness/test_schema.py` (5 new — temperature validator, `judge_unparseable` policy default/override)
+  - Extended: `tests/test_api/test_feedback_verdict.py` (new file, 12 tests), `tests/test_analytics/test_feedback_events.py` (+4), `tests/test_memory/test_store.py` (+1 migration test)
+  - Tests: 44 new, 465 total — all passing
+  - Branch: `milestone-19-phase-2-judge`
+  - **Verdict vocabulary decision (build item 2, resolved by grep):** searched `series_report.py`, `experiment_report.py`, `control_shadow.py` for `"thumbs_up"`/`"thumbs_down"` string matching — found none; the one comment referencing "thumbs_up runs" in `experiment_report.py` actually keys off `analytics.feedback_signal == 1`, not the verdict string. Decision: the judge endpoint stores its own `"up"/"down"/"none"` vocabulary directly rather than mapping onto the older `"thumbs_up"/"thumbs_down"` strings; `judge_source` distinguishes origin, not the verdict string.
+  - **Live verification (Docker not running this session — same deferral as Phase 0/1, Ollama was reachable natively):** ran `judge_turn()` against the real `gemma4:e4b` model for 5 real (prompt, criteria, response) cases spanning up/down verdicts and a criterion-triggered check — all 5 returned clean, correctly-classified JSON on the first attempt (0% unparseable rate, well under the 10% risk threshold flagged in BUILD-PLAN.md). Full Docker-backend dry-run (checks 1–2 of the Phase 2 verification protocol) deferred to a future `/smoketest` session, same as Phase 0/1's precedent — `execute_run()` was instead verified against a fake `BackendClient` in `test_runner.py`, exercising the identical code path.
+  - **Pre-pilot calibration reminder (flagged in BUILD-PLAN.md):** before any large pilot run, spot-check 15–20 judged turns with `--interactive` against Gemma's verdicts to catch ambiguously-written criteria — schedule this between Phase 2 merge and the Phase 3 pilot.
 - 2026-06-14: Architecture document drafted — `.agents/local_corvus_architecture_v0.1.md`
 - 2026-06-15: Build plan created — `BUILD-PLAN.md`, 4 milestones defined
 - 2026-06-15: /build — Milestone 1 complete

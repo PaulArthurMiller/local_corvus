@@ -110,3 +110,58 @@ class BackendClient:
             raise BackendTurnError(f"chat response missing run_id: {data}")
 
         return data
+
+    def post_verdict(
+        self,
+        run_id: str,
+        verdict: str,
+        condition_label: str,
+        judge_source: str,
+        apply_weight_update: bool,
+        rationale: Optional[str] = None,
+        criterion_triggered: Optional[str] = None,
+        judge_model_name: Optional[str] = None,
+        judge_temperature: Optional[float] = None,
+        judge_pinned_snapshot: Optional[str] = None,
+        prompt_id: Optional[str] = None,
+    ) -> dict:
+        """POST /feedback/verdict (M19 Phase 2) — record a judge or human-override
+        verdict, applying the weight update only when apply_weight_update is True."""
+        body = {
+            "run_id": run_id,
+            "verdict": verdict,
+            "condition_label": condition_label,
+            "judge_source": judge_source,
+            "apply_weight_update": apply_weight_update,
+            "rationale": rationale,
+            "criterion_triggered": criterion_triggered,
+            "judge_model_name": judge_model_name,
+            "judge_temperature": judge_temperature,
+            "judge_pinned_snapshot": judge_pinned_snapshot,
+            "prompt_id": prompt_id,
+        }
+        try:
+            resp = self._client.post("/feedback/verdict", json=body)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise BackendConnectivityError(f"feedback/verdict call failed (connectivity): {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise BackendConnectivityError(f"feedback/verdict call failed: {exc}") from exc
+
+        if resp.status_code >= 500:
+            raise BackendConnectivityError(
+                f"feedback/verdict failed with server error {resp.status_code}: {resp.text[:200]}"
+            )
+        if resp.status_code >= 400:
+            raise BackendTurnError(
+                f"feedback/verdict failed with client error {resp.status_code}: {resp.text[:200]}"
+            )
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise BackendTurnError(f"feedback/verdict response was not valid JSON: {exc}") from exc
+
+        if "feedback_event_id" not in data:
+            raise BackendTurnError(f"feedback/verdict response missing feedback_event_id: {data}")
+
+        return data

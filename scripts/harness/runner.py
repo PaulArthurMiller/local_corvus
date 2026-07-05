@@ -12,7 +12,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 
@@ -26,9 +26,10 @@ from harness.checkpoint import (
     save_checkpoint,
 )
 from harness.client import BackendClient, BackendConnectivityError, BackendTurnError
+from harness.judge import JudgeUnparseableError, judge_turn
 from harness.manifest import RunManifest, compute_config_hash, compute_run_id, now_iso, save_manifest
 from harness.notify import build_notification_payload, notify
-from harness.prompt_bank import PromptBank, load_bank
+from harness.prompt_bank import PromptBank, PromptBankEntry, load_bank
 from harness.schema import DEFAULT_ERROR_POLICY, RunPlan
 from harness.turn_resolution import TURN_TYPE_PROBE, assign_prompt_ids, resolve_turn_sequence
 
@@ -101,6 +102,78 @@ def build_turn_message(probes: list, turn: dict, condition: str, prompt_lookup: 
     return _placeholder_bulk_message(condition, turn)
 
 
+def _judge_and_post_verdict(
+    client: BackendClient,
+    judge_client: Any,
+    plan: RunPlan,
+    condition: str,
+    run_id: Optional[str],
+    prompt_entry: PromptBankEntry,
+    response_text: str,
+    turn_type: str,
+    error_policy: dict,
+    interactive: bool,
+    resume_input_fn: Callable[[str], str],
+    print_fn: Callable[[str], None],
+) -> tuple:
+    """
+    Judge one bulk turn's response and post the verdict to the backend.
+
+    Returns (verdict, feedback_event_id, judge_error) — verdict and
+    feedback_event_id are None when judging soft-continues (judge_error
+    holds the reason instead). Raises HardStopError only for the
+    judge_unparseable hard_stop policy case. BackendConnectivityError /
+    BackendTurnError raised by client.post_verdict() propagate to the
+    caller, which applies the standard connectivity/turn_ambiguous policy —
+    the same categories every other backend call in the loop uses.
+    """
+    try:
+        verdict_obj = judge_turn(
+            judge_client, prompt_entry.prompt_text, prompt_entry.criteria,
+            response_text, plan.judge, turn_type,
+        )
+    except JudgeUnparseableError as exc:
+        policy = error_policy.get("judge_unparseable", "soft_continue")
+        if policy == "hard_stop":
+            raise HardStopError(f"judge_unparseable: {exc}") from exc
+        print_fn(f"  judge verdict unparseable — soft-continuing, no verdict recorded: {exc}")
+        logger.warning("runner: judge_unparseable (soft_continue): %s", exc)
+        return None, None, f"judge_unparseable: {exc}"
+
+    verdict = verdict_obj.verdict
+    judge_source = f"model:{plan.judge.model}"
+
+    if interactive:
+        print_fn(
+            f"  Judge verdict: {verdict} rationale={verdict_obj.rationale!r} "
+            f"criterion_triggered={verdict_obj.criterion_triggered!r}"
+        )
+        answer = resume_input_fn("Accept judge verdict, or override? [a/o/skip]: ").strip().lower()
+        if answer == "skip":
+            return None, None, "verdict skipped by operator (--interactive)"
+        if answer == "o":
+            override = resume_input_fn("Override verdict (up/down/none): ").strip().lower()
+            if override in ("up", "down", "none"):
+                verdict = override
+                judge_source = "human"
+
+    apply_weight_update = condition == "learned" and verdict in ("up", "down")
+    verdict_response = client.post_verdict(
+        run_id=run_id,
+        verdict=verdict,
+        condition_label=condition,
+        judge_source=judge_source,
+        apply_weight_update=apply_weight_update,
+        rationale=verdict_obj.rationale,
+        criterion_triggered=verdict_obj.criterion_triggered,
+        judge_model_name=plan.judge.model,
+        judge_temperature=plan.judge.temperature,
+        judge_pinned_snapshot=plan.judge.pinned_snapshot,
+        prompt_id=prompt_entry.prompt_id,
+    )
+    return verdict, verdict_response.get("feedback_event_id"), None
+
+
 def scope_for_dry_run(plan: RunPlan, conditions: list, full_sequence: list) -> tuple:
     """
     Dry-run mode limits execution to dry_run_n turns, 1 series, and the
@@ -121,6 +194,8 @@ def execute_run(
     probes: Optional[list] = None,
     resume_input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
+    judge_client: Optional[Any] = None,
+    interactive: bool = False,
 ) -> RunOutcome:
     """
     Run the full harness skeleton against `client` and return a RunOutcome.
@@ -128,6 +203,13 @@ def execute_run(
     `client` is injected so tests can pass a fake/stub BackendClient without
     a real Docker stack. probes is an optional pre-loaded list of
     {probe_id, prompt_text} used as placeholder content for probe turns.
+
+    judge_client (M19 Phase 2) is an optional injected OllamaJudgeClient (or
+    fake). When None, no judging happens — this keeps every Phase 0/1 test
+    and call site working unchanged. When present and a prompt bank is
+    loaded, every successfully-completed bulk turn is judged and the verdict
+    is posted to the backend; interactive=True additionally prompts to
+    accept or override each verdict (calibration mode — see --interactive).
     """
     probes = probes or []
     config_hash = compute_config_hash(plan)
@@ -194,6 +276,12 @@ def execute_run(
     prompt_lookup = (
         {e.prompt_id: e.prompt_text for e in prompt_bank.validated_entries()} if prompt_bank else None
     )
+    # M19 Phase 2 — full entry lookup (prompt_text + criteria) for judging;
+    # prompt_lookup above stays text-only since build_turn_message never
+    # needs criteria.
+    entry_by_prompt_id = (
+        {e.prompt_id: e for e in prompt_bank.validated_entries()} if prompt_bank else None
+    )
 
     try:
         if prompt_bank_error and error_policy.get("connectivity") == "hard_stop":
@@ -207,6 +295,14 @@ def execute_run(
         except BackendConnectivityError as exc:
             error_summary = f"connectivity: {exc}"
             raise HardStopError(error_summary) from exc
+
+        # M19 Phase 2 — judge availability preflight. Runs before any graph
+        # mutation (ahead of the wipe/seed loop below); a missing judge model
+        # is an unconditional hard stop, not subject to error_policy override.
+        if judge_client is not None and prompt_bank is not None:
+            if not judge_client.model_available(plan.judge.model):
+                error_summary = f"judge model unavailable: {plan.judge.model!r} not found on Ollama"
+                raise HardStopError(error_summary)
 
         for condition in conditions:
             print_fn(f"\n=== Condition: {condition} ===")
@@ -237,6 +333,7 @@ def execute_run(
                 message = build_turn_message(probes, turn, condition, prompt_lookup)
                 status = STATUS_OK
                 detail = None
+                response = None
                 try:
                     response = client.chat(message)
                     detail = response.get("run_id")
@@ -251,6 +348,42 @@ def execute_run(
                         raise HardStopError(error_summary) from exc
                     status, detail = STATUS_SOFT_CONTINUE, str(exc)
 
+                # M19 Phase 2 — judge the response and post the verdict.
+                # Bulk turns only (guard #1 — probes are never judged); the
+                # judge module itself refuses probe turns too (guard #2).
+                verdict_str: Optional[str] = None
+                feedback_event_id: Optional[str] = None
+                judge_error: Optional[str] = None
+                if (
+                    status == STATUS_OK
+                    and turn["turn_type"] != TURN_TYPE_PROBE
+                    and judge_client is not None
+                    and entry_by_prompt_id is not None
+                ):
+                    prompt_entry = entry_by_prompt_id.get(turn.get("prompt_id"))
+                    if prompt_entry is not None:
+                        try:
+                            verdict_str, feedback_event_id, judge_error = _judge_and_post_verdict(
+                                client, judge_client, plan, condition, detail, prompt_entry,
+                                (response or {}).get("response", ""), turn["turn_type"],
+                                error_policy, interactive, resume_input_fn, print_fn,
+                            )
+                        except HardStopError as exc:
+                            # judge_unparseable hard_stop — the helper already
+                            # composed the message; just surface it here.
+                            error_summary = str(exc)
+                            raise
+                        except BackendConnectivityError as exc:
+                            if error_policy.get("connectivity") == "hard_stop":
+                                error_summary = f"connectivity during verdict post {key}: {exc}"
+                                raise HardStopError(error_summary) from exc
+                            judge_error = f"verdict post connectivity error: {exc}"
+                        except BackendTurnError as exc:
+                            if error_policy.get("turn_ambiguous") == "hard_stop":
+                                error_summary = f"verdict post turn error {key}: {exc}"
+                                raise HardStopError(error_summary) from exc
+                            judge_error = f"verdict post turn error: {exc}"
+
                 checkpoint.turns.append(TurnCheckpoint(
                     condition=condition,
                     series_index=turn["series_index"],
@@ -258,10 +391,14 @@ def execute_run(
                     turn_type=turn["turn_type"],
                     status=status,
                     detail=detail,
+                    verdict=verdict_str,
+                    feedback_event_id=feedback_event_id,
+                    judge_error=judge_error,
                 ))
                 save_checkpoint(checkpoint, run_base_dir)
                 turns_processed += 1
-                print_fn(f"  turn {key} type={turn['turn_type']} -> {status}")
+                verdict_note = f" verdict={verdict_str}" if verdict_str else ""
+                print_fn(f"  turn {key} type={turn['turn_type']} -> {status}{verdict_note}")
 
     except HardStopError:
         aborted = True

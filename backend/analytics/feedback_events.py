@@ -19,14 +19,35 @@ logger = logging.getLogger(__name__)
 
 
 class FeedbackEvent(BaseModel):
-    """Structured record of one feedback signal (or explicit absence thereof)."""
+    """
+    Structured record of one feedback signal (or explicit absence thereof).
+
+    verdict vocabulary is source-dependent by design: the chat-UI /feedback
+    path stores "thumbs_up"/"thumbs_down"/"none" (unchanged since M8); the
+    judge-driven /feedback/verdict path (M19 Phase 2) stores "up"/"down"/
+    "none" directly rather than mapping onto the older strings — a grep of
+    the report generators (series_report.py, experiment_report.py,
+    control_shadow.py) found nothing matching on the literal "thumbs_*"
+    strings, so there was no reason to force one vocabulary. judge_source
+    is what distinguishes origin, not the verdict string itself.
+    """
 
     feedback_event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     run_id: str
-    verdict: str  # "thumbs_up" | "thumbs_down" | "none"
+    verdict: str  # "thumbs_up" | "thumbs_down" | "up" | "down" | "none"
     verdict_basis: Optional[str] = None  # e.g. "checklist_pass", "confabulation"
     turn_index: Optional[int] = None
     is_probe_turn: bool = False
+    # M19 Phase 2 — judge verdict metadata. All optional: pre-existing rows
+    # (and the chat-UI /feedback path prior to this milestone) keep NULLs.
+    condition_label: Optional[str] = None
+    rationale: Optional[str] = None
+    criterion_triggered: Optional[str] = None
+    judge_source: Optional[str] = None  # "model:<name>" | "human"
+    judge_model_name: Optional[str] = None
+    judge_temperature: Optional[float] = None
+    judge_pinned_snapshot: Optional[str] = None
+    prompt_id: Optional[str] = None
 
 
 async def record_feedback_event(event: FeedbackEvent) -> None:

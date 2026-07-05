@@ -95,7 +95,15 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     verdict TEXT NOT NULL,
     verdict_basis TEXT,
     turn_index INTEGER,
-    is_probe_turn INTEGER NOT NULL DEFAULT 0
+    is_probe_turn INTEGER NOT NULL DEFAULT 0,
+    condition_label TEXT,
+    rationale TEXT,
+    criterion_triggered TEXT,
+    judge_source TEXT,
+    judge_model_name TEXT,
+    judge_temperature REAL,
+    judge_pinned_snapshot TEXT,
+    prompt_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS probes (
@@ -190,6 +198,15 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("memory_units", "cluster_id", "TEXT"),
         # M15: outcome_override on probe_results
         ("probe_results", "outcome_override", "TEXT"),
+        # M19 Phase 2: judge verdict metadata on feedback_events
+        ("feedback_events", "condition_label", "TEXT"),
+        ("feedback_events", "rationale", "TEXT"),
+        ("feedback_events", "criterion_triggered", "TEXT"),
+        ("feedback_events", "judge_source", "TEXT"),
+        ("feedback_events", "judge_model_name", "TEXT"),
+        ("feedback_events", "judge_temperature", "REAL"),
+        ("feedback_events", "judge_pinned_snapshot", "TEXT"),
+        ("feedback_events", "prompt_id", "TEXT"),
     ]
     for table, column, col_type in add_column_migrations:
         try:
@@ -694,8 +711,10 @@ class GraphStore:
                 """
                 INSERT INTO feedback_events
                     (feedback_event_id, run_id, verdict, verdict_basis,
-                     turn_index, is_probe_turn)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     turn_index, is_probe_turn, condition_label, rationale,
+                     criterion_triggered, judge_source, judge_model_name,
+                     judge_temperature, judge_pinned_snapshot, prompt_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["feedback_event_id"],
@@ -704,6 +723,14 @@ class GraphStore:
                     event.get("verdict_basis"),
                     event.get("turn_index"),
                     1 if event.get("is_probe_turn") else 0,
+                    event.get("condition_label"),
+                    event.get("rationale"),
+                    event.get("criterion_triggered"),
+                    event.get("judge_source"),
+                    event.get("judge_model_name"),
+                    event.get("judge_temperature"),
+                    event.get("judge_pinned_snapshot"),
+                    event.get("prompt_id"),
                 ),
             )
             await db.commit()

@@ -28,6 +28,11 @@ _CONFIG_PATH = os.getenv(
     os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml"),
 )
 
+# M19 Phase 2 — closed verdict vocabulary for the judge-facing endpoint. See
+# the FeedbackEvent docstring in analytics/feedback_events.py for why this
+# differs from the older "thumbs_up"/"thumbs_down" strings.
+VALID_JUDGE_VERDICTS = ("up", "down", "none")
+
 
 def _load_weight_update_rate() -> float:
     try:
@@ -167,9 +172,11 @@ async def feedback(request: FeedbackRequest) -> FeedbackResponse:
     """
     Apply a feedback signal to the edges activated during a prior run.
 
-    Loads the run record, fetches activated edges, runs SimpleRL.update(),
-    writes new weights to the graph store, and appends weight_updates to
-    the run record.
+    This is the chat-UI thumbs path — always a human verdict (any verdict
+    not produced by an automated judge call is "human" by the standing
+    rule) and always applies the weight update. POST /feedback/verdict
+    (M19 Phase 2) is the judge-driven, condition-aware counterpart with an
+    explicit apply_weight_update flag.
     """
     if request.signal not in (1, -1):
         raise HTTPException(
@@ -181,7 +188,6 @@ async def feedback(request: FeedbackRequest) -> FeedbackResponse:
         "feedback: run_id=%s signal=%+d", request.run_id, request.signal
     )
 
-    # Load the run record to get activated_edge_ids
     run = await graph_store.get_run(request.run_id)
     if run is None:
         raise HTTPException(
@@ -189,37 +195,6 @@ async def feedback(request: FeedbackRequest) -> FeedbackResponse:
             detail=f"run_id {request.run_id!r} not found",
         )
 
-    activated_edge_ids: list[str] = run.get("activated_edge_ids") or []
-    activated_mu_ids: list[str] = run.get("activated_mu_ids") or []
-
-    logger.info(
-        "feedback: run_id=%s has %d activated edge(s) and %d activated MU(s)",
-        request.run_id,
-        len(activated_edge_ids),
-        len(activated_mu_ids),
-    )
-
-    # Fetch full edge records for all activated edges
-    activated_edges = await _fetch_edges_by_ids(activated_edge_ids)
-
-    # Fetch full MU records for all activated MUs (SimpleRL ignores them,
-    # but the interface requires them for future algorithm compatibility)
-    activated_mus: list[dict] = []
-    for mu_id in activated_mu_ids:
-        mu = await graph_store.get_mu(mu_id)
-        if mu is not None:
-            activated_mus.append(mu)
-
-    # Run the learning algorithm
-    weight_update_rate = _load_weight_update_rate()
-    algorithm = SimpleRL(weight_update_rate=weight_update_rate)
-    updates = algorithm.update(
-        activated_edges=activated_edges,
-        activated_mus=activated_mus,
-        feedback=request.signal,
-    )
-
-    # Build a feedback event before writing weights (need its ID for weight_updates)
     verdict = "thumbs_up" if request.signal == 1 else "thumbs_down"
     feedback_event = FeedbackEvent(
         run_id=request.run_id,
@@ -227,35 +202,14 @@ async def feedback(request: FeedbackRequest) -> FeedbackResponse:
         verdict_basis=request.verdict_basis,
         turn_index=run.get("turn_index"),
         is_probe_turn=request.is_probe_turn,
+        judge_source="human",
     )
 
-    # Build an edge lookup for source/target enrichment
-    edge_by_id = {e["edge_id"]: e for e in activated_edges}
+    weight_updates = await _apply_weight_updates(
+        run, request.signal, feedback_event.feedback_event_id
+    )
 
-    # Write new weights to graph store and build enriched weight_updates record
-    weight_updates: list[dict] = []
-    for edge_id, new_weight in updates:
-        edge = edge_by_id.get(edge_id, {})
-        old_weight = edge.get("weight")
-        await graph_store.update_edge_weight(edge_id, new_weight)
-        weight_updates.append({
-            "edge_id": edge_id,
-            "old_weight": old_weight,
-            "new_weight": new_weight,
-            "source_mu_id": edge.get("source_mu_id"),
-            "target_mu_id": edge.get("target_mu_id"),
-            "feedback_event_id": feedback_event.feedback_event_id,
-        })
-
-    # Persist feedback event
     await record_feedback_event(feedback_event)
-
-    # Persist feedback signal + weight updates back to the run record
-    await graph_store.update_run_feedback(
-        run_id=request.run_id,
-        feedback_signal=request.signal,
-        weight_updates=weight_updates,
-    )
 
     logger.info(
         "feedback: complete run_id=%s signal=%+d edges_updated=%d event_id=%s",
@@ -271,6 +225,188 @@ async def feedback(request: FeedbackRequest) -> FeedbackResponse:
         edges_updated=len(weight_updates),
         weight_updates=weight_updates,
     )
+
+
+# ---------------------------------------------------------------------------
+# Feedback verdict (M19 Phase 2) — judge-driven or human-override verdicts,
+# with an explicit, condition-aware apply_weight_update flag.
+# ---------------------------------------------------------------------------
+
+
+class VerdictRequest(BaseModel):
+    run_id: str
+    verdict: str  # "up" | "down" | "none"
+    condition_label: str
+    judge_source: str  # "model:<name>" for automated verdicts, "human" for overrides
+    apply_weight_update: bool
+    rationale: Optional[str] = None
+    criterion_triggered: Optional[str] = None  # required iff verdict == "down"
+    judge_model_name: Optional[str] = None
+    judge_temperature: Optional[float] = None
+    judge_pinned_snapshot: Optional[str] = None
+    prompt_id: Optional[str] = None
+
+
+class VerdictResponse(BaseModel):
+    run_id: str
+    feedback_event_id: str
+    verdict: str
+    apply_weight_update: bool
+    edges_updated: int
+    weight_updates: list[dict]
+
+
+@router.post("/feedback/verdict", response_model=VerdictResponse)
+async def feedback_verdict(request: VerdictRequest) -> VerdictResponse:
+    """
+    Record a structured verdict (judge-produced or human override) and,
+    only when explicitly requested, apply the resulting weight update.
+
+    Always inserts a feedback_events row — including verdict="none" — so
+    absence of a clear signal is an explicit observation, never a silent
+    gap (the M8 instrumentation audit's NULL-as-none problem must not
+    reappear). apply_weight_update is an explicit flag rather than
+    something this endpoint infers from condition_label: the judge and this
+    endpoint stay condition-agnostic by design (see BUILD-PLAN.md), and the
+    runner decides "who acts on the verdict" as orchestration policy.
+    """
+    if request.verdict not in VALID_JUDGE_VERDICTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"verdict must be one of {VALID_JUDGE_VERDICTS}, got {request.verdict!r}",
+        )
+    if request.verdict == "down" and not (request.criterion_triggered or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="criterion_triggered is required and must be non-empty when verdict is 'down'",
+        )
+
+    logger.info(
+        "feedback_verdict: run_id=%s verdict=%s condition=%s apply_weight_update=%s judge_source=%s",
+        request.run_id,
+        request.verdict,
+        request.condition_label,
+        request.apply_weight_update,
+        request.judge_source,
+    )
+
+    run = await graph_store.get_run(request.run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"run_id {request.run_id!r} not found",
+        )
+
+    feedback_event = FeedbackEvent(
+        run_id=request.run_id,
+        verdict=request.verdict,
+        turn_index=run.get("turn_index"),
+        is_probe_turn=False,  # probe turns never reach this endpoint (guarded in judge.py + runner.py)
+        condition_label=request.condition_label,
+        rationale=request.rationale,
+        criterion_triggered=request.criterion_triggered,
+        judge_source=request.judge_source,
+        judge_model_name=request.judge_model_name,
+        judge_temperature=request.judge_temperature,
+        judge_pinned_snapshot=request.judge_pinned_snapshot,
+        prompt_id=request.prompt_id,
+    )
+
+    weight_updates: list[dict] = []
+    if request.apply_weight_update and request.verdict in ("up", "down"):
+        signal = 1 if request.verdict == "up" else -1
+        weight_updates = await _apply_weight_updates(
+            run, signal, feedback_event.feedback_event_id
+        )
+
+    await record_feedback_event(feedback_event)
+
+    logger.info(
+        "feedback_verdict: complete run_id=%s verdict=%s edges_updated=%d event_id=%s",
+        request.run_id,
+        request.verdict,
+        len(weight_updates),
+        feedback_event.feedback_event_id,
+    )
+
+    return VerdictResponse(
+        run_id=request.run_id,
+        feedback_event_id=feedback_event.feedback_event_id,
+        verdict=request.verdict,
+        apply_weight_update=request.apply_weight_update,
+        edges_updated=len(weight_updates),
+        weight_updates=weight_updates,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+async def _apply_weight_updates(
+    run: dict, signal: int, feedback_event_id: str
+) -> list[dict]:
+    """
+    Load activated edges/MUs for `run`, run SimpleRL, write new weights, and
+    persist the resulting weight_updates onto the run record.
+
+    Shared by POST /feedback and POST /feedback/verdict so the §6.1 edge
+    delta ledger's orphan-update check audits a single code path instead of
+    two independently-maintained copies.
+    """
+    activated_edge_ids: list[str] = run.get("activated_edge_ids") or []
+    activated_mu_ids: list[str] = run.get("activated_mu_ids") or []
+
+    logger.info(
+        "feedback: run_id=%s has %d activated edge(s) and %d activated MU(s)",
+        run.get("run_id"),
+        len(activated_edge_ids),
+        len(activated_mu_ids),
+    )
+
+    # Fetch full edge records for all activated edges
+    activated_edges = await _fetch_edges_by_ids(activated_edge_ids)
+
+    # Fetch full MU records for all activated MUs (SimpleRL ignores them,
+    # but the interface requires them for future algorithm compatibility)
+    activated_mus: list[dict] = []
+    for mu_id in activated_mu_ids:
+        mu = await graph_store.get_mu(mu_id)
+        if mu is not None:
+            activated_mus.append(mu)
+
+    weight_update_rate = _load_weight_update_rate()
+    algorithm = SimpleRL(weight_update_rate=weight_update_rate)
+    updates = algorithm.update(
+        activated_edges=activated_edges,
+        activated_mus=activated_mus,
+        feedback=signal,
+    )
+
+    edge_by_id = {e["edge_id"]: e for e in activated_edges}
+
+    weight_updates: list[dict] = []
+    for edge_id, new_weight in updates:
+        edge = edge_by_id.get(edge_id, {})
+        old_weight = edge.get("weight")
+        await graph_store.update_edge_weight(edge_id, new_weight)
+        weight_updates.append({
+            "edge_id": edge_id,
+            "old_weight": old_weight,
+            "new_weight": new_weight,
+            "source_mu_id": edge.get("source_mu_id"),
+            "target_mu_id": edge.get("target_mu_id"),
+            "feedback_event_id": feedback_event_id,
+        })
+
+    await graph_store.update_run_feedback(
+        run_id=run["run_id"],
+        feedback_signal=signal,
+        weight_updates=weight_updates,
+    )
+
+    return weight_updates
 
 
 async def _fetch_edges_by_ids(edge_ids: list[str]) -> list[dict]:

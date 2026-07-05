@@ -534,6 +534,70 @@ class TestMilestone12MuFields:
         assert row is not None
         assert row["series_id"] == "series-old-value"
 
+    def test_migration_adds_judge_columns_and_preserves_existing_rows(self):
+        """
+        M19 Phase 2: _migrate_db() adds the 8 judge-verdict columns to an old
+        feedback_events table (pre-Phase-2 schema) without disturbing
+        existing rows.
+        """
+        import aiosqlite
+        import tempfile
+        from memory.store import _migrate_db
+
+        async def _run_migration_test():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "old_feedback_events.db"
+                db = await aiosqlite.connect(str(db_path))
+                db.row_factory = aiosqlite.Row
+                # Pre-Phase-2 feedback_events schema (M8/M9 — 6 columns only)
+                await db.executescript("""
+                    CREATE TABLE analytics (
+                        run_id TEXT PRIMARY KEY,
+                        series_id TEXT NOT NULL,
+                        timestamp TEXT NOT NULL
+                    );
+                    CREATE TABLE feedback_events (
+                        feedback_event_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        verdict TEXT NOT NULL,
+                        verdict_basis TEXT,
+                        turn_index INTEGER,
+                        is_probe_turn INTEGER NOT NULL DEFAULT 0
+                    );
+                """)
+                await db.commit()
+                await db.execute(
+                    "INSERT INTO feedback_events "
+                    "(feedback_event_id, run_id, verdict, is_probe_turn) VALUES (?, ?, ?, ?)",
+                    ("fbevt-1", "run-1", "thumbs_up", 0),
+                )
+                await db.commit()
+
+                await _migrate_db(db)
+
+                async with db.execute(
+                    "SELECT * FROM feedback_events WHERE feedback_event_id=?", ("fbevt-1",)
+                ) as cur:
+                    row = await cur.fetchone()
+                await db.close()
+                return row
+
+        row = asyncio.get_event_loop().run_until_complete(_run_migration_test())
+        print(f"[test] migrated feedback_events row: {dict(row)}")
+        assert row is not None
+        # Pre-existing data untouched
+        assert row["verdict"] == "thumbs_up"
+        assert row["run_id"] == "run-1"
+        # New columns exist and default to NULL for pre-existing rows
+        assert row["condition_label"] is None
+        assert row["rationale"] is None
+        assert row["criterion_triggered"] is None
+        assert row["judge_source"] is None
+        assert row["judge_model_name"] is None
+        assert row["judge_temperature"] is None
+        assert row["judge_pinned_snapshot"] is None
+        assert row["prompt_id"] is None
+
 
 # ---------------------------------------------------------------------------
 # Milestone 19 Phase 0 — wipe_graph

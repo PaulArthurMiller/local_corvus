@@ -91,6 +91,43 @@ class TestFeedbackEventModel:
         event = FeedbackEvent(run_id="run-3", verdict="none")
         assert event.verdict == "none"
 
+    def test_m19_phase2_judge_fields_default_to_none(self):
+        """Judge metadata fields are optional and default to None (pre-existing rows)."""
+        event = FeedbackEvent(run_id="run-4", verdict="thumbs_up")
+        assert event.condition_label is None
+        assert event.rationale is None
+        assert event.criterion_triggered is None
+        assert event.judge_source is None
+        assert event.judge_model_name is None
+        assert event.judge_temperature is None
+        assert event.judge_pinned_snapshot is None
+        assert event.prompt_id is None
+
+    def test_m19_phase2_judge_fields_can_all_be_set(self):
+        """FeedbackEvent accepts the full M19 Phase 2 judge verdict metadata."""
+        event = FeedbackEvent(
+            run_id="run-5",
+            verdict="down",
+            condition_label="learned",
+            rationale="response omitted the required detail",
+            criterion_triggered="mentions the header rule",
+            judge_source="model:gemma4:e4b",
+            judge_model_name="gemma4:e4b",
+            judge_temperature=0.0,
+            judge_pinned_snapshot="sha256:abcdef",
+            prompt_id="cluster_a_0003",
+        )
+        print(f"[test] judge event: {event.model_dump()}")
+        assert event.verdict == "down"
+        assert event.condition_label == "learned"
+        assert event.rationale == "response omitted the required detail"
+        assert event.criterion_triggered == "mentions the header rule"
+        assert event.judge_source == "model:gemma4:e4b"
+        assert event.judge_model_name == "gemma4:e4b"
+        assert event.judge_temperature == 0.0
+        assert event.judge_pinned_snapshot == "sha256:abcdef"
+        assert event.prompt_id == "cluster_a_0003"
+
 
 class TestRecordFeedbackEvent:
 
@@ -117,6 +154,38 @@ class TestRecordFeedbackEvent:
             assert fetched[0]["verdict"] == "thumbs_up"
             assert fetched[0]["verdict_basis"] == "checklist_pass"
             assert fetched[0]["feedback_event_id"] == event.feedback_event_id
+
+    def test_record_feedback_event_persists_judge_metadata(self):
+        """M19 Phase 2 judge fields round-trip through the feedback_events table."""
+        with TempDBStore() as s:
+            run_id = str(uuid.uuid4())
+            _insert_minimal_run(run_id)
+
+            import analytics.feedback_events as fe_module
+            with mock.patch.object(fe_module, "graph_store", s):
+                event = FeedbackEvent(
+                    run_id=run_id,
+                    verdict="up",
+                    condition_label="learned",
+                    rationale="fully correct",
+                    judge_source="model:gemma4:e4b",
+                    judge_model_name="gemma4:e4b",
+                    judge_temperature=0.0,
+                    prompt_id="cluster_a_0001",
+                )
+                run(record_feedback_event(event))
+
+            fetched = run(s.get_feedback_events_for_run(run_id))
+            print(f"[test] persisted judge event: {fetched}")
+            assert len(fetched) == 1
+            assert fetched[0]["verdict"] == "up"
+            assert fetched[0]["condition_label"] == "learned"
+            assert fetched[0]["rationale"] == "fully correct"
+            assert fetched[0]["judge_source"] == "model:gemma4:e4b"
+            assert fetched[0]["judge_model_name"] == "gemma4:e4b"
+            assert fetched[0]["judge_temperature"] == 0.0
+            assert fetched[0]["prompt_id"] == "cluster_a_0001"
+            assert fetched[0]["criterion_triggered"] is None
 
     def test_record_feedback_event_with_none_verdict_basis(self):
         """verdict_basis=None is stored correctly (not as the string 'None')."""

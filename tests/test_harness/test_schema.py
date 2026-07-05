@@ -121,3 +121,38 @@ def test_format_validation_error_is_not_a_raw_stack_trace():
     message = format_validation_error(exc_info.value)
     assert "Traceback" not in message
     assert "conditions" in message
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 2 — judge.temperature tightened to <= 0.1 (reproducibility)
+# ---------------------------------------------------------------------------
+
+def test_judge_temperature_above_0_1_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(judge={"model": "gemma4:e4b", "temperature": 0.5}))
+    message = format_validation_error(exc_info.value)
+    assert "temperature" in message
+
+
+def test_judge_temperature_at_0_1_is_accepted():
+    plan = RunPlan(**_base_kwargs(judge={"model": "gemma4:e4b", "temperature": 0.1}))
+    assert plan.judge.temperature == 0.1
+
+
+def test_judge_temperature_default_is_accepted():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.judge.temperature == 0.0
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 2 — judge_unparseable error policy key
+# ---------------------------------------------------------------------------
+
+def test_judge_unparseable_defaults_to_soft_continue():
+    from harness.schema import DEFAULT_ERROR_POLICY
+    assert DEFAULT_ERROR_POLICY["judge_unparseable"] == "soft_continue"
+
+
+def test_judge_unparseable_error_policy_override_accepted():
+    plan = RunPlan(**_base_kwargs(error_policy={"judge_unparseable": "hard_stop"}))
+    assert plan.error_policy == {"judge_unparseable": "hard_stop"}

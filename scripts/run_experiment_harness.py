@@ -31,6 +31,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from harness.client import BackendClient  # noqa: E402
 from harness.elicit import elicit_plan, offer_to_save_plan  # noqa: E402
+from harness.judge import DEFAULT_JUDGE_HOST, OllamaJudgeClient  # noqa: E402
 from harness.prompt_bank import bank_path_for_hash  # noqa: E402
 from harness.prompt_gen import generate_bank_for_plan  # noqa: E402
 from harness.runner import execute_run, load_probe_prompts  # noqa: E402
@@ -74,9 +75,14 @@ def main() -> None:
     parser.add_argument("--plan", type=str, default=None, help="Path to a run plan JSON file")
     parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode regardless of the plan")
     parser.add_argument("--backend-url", type=str, default=DEFAULT_BACKEND_URL)
+    parser.add_argument("--judge-host", type=str, default=DEFAULT_JUDGE_HOST)
     parser.add_argument(
         "--generate-bank", action="store_true",
         help="Generate (or reuse) the prompt bank for the given plan, then exit without running an experiment",
+    )
+    parser.add_argument(
+        "--interactive", action="store_true",
+        help="After each judge verdict, prompt to accept or override it (calibration mode, not routine use)",
     )
     args = parser.parse_args()
 
@@ -103,8 +109,11 @@ def main() -> None:
     probes = load_probe_prompts(PROBE_SET_PATH)
     logger.info("run_experiment_harness: loaded %d probe prompt(s) for placeholder content", len(probes))
 
-    with BackendClient(base_url=args.backend_url) as client:
-        outcome = execute_run(plan, client, RUNS_DIR, probes=probes)
+    with BackendClient(base_url=args.backend_url) as client, OllamaJudgeClient(host=args.judge_host) as judge_client:
+        outcome = execute_run(
+            plan, client, RUNS_DIR, probes=probes,
+            judge_client=judge_client, interactive=args.interactive,
+        )
 
     if outcome.status == "aborted":
         sys.exit(1)

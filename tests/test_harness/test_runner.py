@@ -3,6 +3,7 @@ Tests for scripts/harness/runner.py — core orchestration, using a fake
 BackendClient so no real Docker stack is required.
 """
 
+import json
 import os
 import sys
 
@@ -18,15 +19,17 @@ from harness.schema import RunPlan
 class FakeBackendClient:
     """Duck-typed stand-in for harness.client.BackendClient."""
 
-    def __init__(self, health_error=None, wipe_error=None, seed_error=None, chat_errors=None):
+    def __init__(self, health_error=None, wipe_error=None, seed_error=None, chat_errors=None, verdict_errors=None):
         self.health_error = health_error
         self.wipe_error = wipe_error
         self.seed_error = seed_error
         self.chat_errors = chat_errors or {}  # call-index -> exception instance
+        self.verdict_errors = verdict_errors or {}  # call-index -> exception instance
         self.chat_call_count = 0
         self.chat_messages = []
         self.wipe_calls = []
         self.seed_calls = 0
+        self.verdict_calls = []
 
     def health(self):
         if self.health_error:
@@ -55,6 +58,13 @@ class FakeBackendClient:
         if idx in self.chat_errors:
             raise self.chat_errors[idx]
         return {"run_id": f"run-{idx}", "response": "placeholder response"}
+
+    def post_verdict(self, **kwargs):
+        idx = len(self.verdict_calls)
+        self.verdict_calls.append(kwargs)
+        if idx in self.verdict_errors:
+            raise self.verdict_errors[idx]
+        return {"feedback_event_id": f"fbevent-{idx}"}
 
 
 def _plan(**overrides):
@@ -266,3 +276,216 @@ def test_missing_prompt_bank_file_hard_stops_before_wipe_graph_is_called(tmp_pat
     assert outcome.status == "aborted"
     assert "prompt bank" in outcome.error_summary
     assert client.wipe_calls == []
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 2 — judge wiring
+# ---------------------------------------------------------------------------
+
+
+class FakeOllamaJudgeClient:
+    """Duck-typed stand-in for harness.judge.OllamaJudgeClient."""
+
+    def __init__(self, verdicts=None, available=True, chat_json_fn=None):
+        self._verdicts = list(verdicts) if verdicts is not None else None
+        self._default_verdict = {"verdict": "up", "rationale": "ok", "criterion_triggered": None}
+        self.available = available
+        self.calls = []
+        if chat_json_fn is not None:
+            self.chat_json = chat_json_fn
+
+    def chat_json(self, model, temperature, prompt):
+        self.calls.append(prompt)
+        v = self._verdicts.pop(0) if self._verdicts else self._default_verdict
+        return json.dumps(v)
+
+    def model_available(self, model):
+        return self.available
+
+
+def _write_bank_with_criteria(tmp_path, n=5, cluster_id="cluster_a"):
+    entries = [
+        PromptBankEntry(
+            prompt_id=f"{cluster_id}_{i:04d}", cluster_id=cluster_id,
+            prompt_text=f"real bank prompt {i}", hop_distance=0,
+            criteria=["mentions X"], seed_fixture_version="v2",
+            generated_by="claude-sonnet-5@2026-07-04", validated=True,
+        )
+        for i in range(n)
+    ]
+    bank = PromptBank(entries=entries, generation_params={}, content_hash="testhash789")
+    return save_bank(bank, tmp_path)
+
+
+def test_learned_condition_up_verdict_applies_weight_update(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=2, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert outcome.status == "complete"
+    assert len(client.verdict_calls) == 2
+    assert client.verdict_calls[0]["apply_weight_update"] is True
+    assert client.verdict_calls[0]["condition_label"] == "learned"
+    assert client.verdict_calls[0]["judge_source"] == "model:gemma4:e4b"
+    assert outcome.checkpoint.turns[0].verdict == "up"
+    assert outcome.checkpoint.turns[0].feedback_event_id == "fbevent-0"
+
+
+def test_static_condition_up_verdict_does_not_apply_weight_update(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["static_weight"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+
+    execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert client.verdict_calls[0]["apply_weight_update"] is False
+    assert client.verdict_calls[0]["condition_label"] == "static_weight"
+
+
+def test_learned_condition_none_verdict_does_not_apply_weight_update(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "none", "rationale": "ambiguous", "criterion_triggered": None}])
+
+    execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert client.verdict_calls[0]["apply_weight_update"] is False
+    assert client.verdict_calls[0]["verdict"] == "none"
+
+
+def test_no_judge_client_means_no_judging_happens(tmp_path):
+    """judge_client=None (the default) — Phase 0/1 behavior is unchanged."""
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path))
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.verdict_calls == []
+    assert outcome.checkpoint.turns[0].verdict is None
+
+
+def test_unparseable_judge_soft_continues_and_checkpoint_notes_anomaly(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(chat_json_fn=lambda model, temperature, prompt: "not json")
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert outcome.status == "complete"  # the chat turn itself succeeded
+    assert client.verdict_calls == []  # no verdict posted
+    assert outcome.checkpoint.turns[0].status == STATUS_OK
+    assert outcome.checkpoint.turns[0].verdict is None
+    assert outcome.checkpoint.turns[0].judge_error is not None
+    assert "judge_unparseable" in outcome.checkpoint.turns[0].judge_error
+
+
+def test_judge_unparseable_hard_stop_when_policy_overridden(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"], error_policy={"judge_unparseable": "hard_stop"},
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(chat_json_fn=lambda model, temperature, prompt: "not json")
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert outcome.status == "aborted"
+    assert "judge_unparseable" in outcome.error_summary
+
+
+def test_interactive_override_sets_human_judge_source(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+
+    scripted_answers = iter(["o", "down"])
+
+    def scripted_input(_prompt):
+        return next(scripted_answers)
+
+    execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True, resume_input_fn=scripted_input,
+    )
+
+    assert client.verdict_calls[0]["verdict"] == "down"
+    assert client.verdict_calls[0]["judge_source"] == "human"
+
+
+def test_interactive_accept_keeps_model_judge_source(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+
+    def scripted_accept(_prompt):
+        return "a"
+
+    execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True, resume_input_fn=scripted_accept,
+    )
+
+    assert client.verdict_calls[0]["verdict"] == "up"
+    assert client.verdict_calls[0]["judge_source"] == "model:gemma4:e4b"
+
+
+def test_judge_preflight_hard_stops_when_model_unavailable(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path))
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(available=False)
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert outcome.status == "aborted"
+    assert "judge model" in outcome.error_summary
+    assert client.wipe_calls == []
+
+
+def test_probe_turns_are_never_judged(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=3, probe_ratio=1.0, probe_placement="end",
+        prompt_bank_path=str(bank_path), conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient()
+    probes = [{"probe_id": "p06", "prompt_text": "What is the format rule?"}]
+
+    outcome = execute_run(
+        plan, client, tmp_path, probes=probes, print_fn=_noop_print, judge_client=judge_client,
+    )
+
+    assert outcome.status == "complete"
+    assert client.verdict_calls == []
+    assert judge_client.calls == []
+    assert all(t.verdict is None for t in outcome.checkpoint.turns)

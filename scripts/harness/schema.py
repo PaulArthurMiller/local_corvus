@@ -21,9 +21,12 @@ VALID_PROBE_PLACEMENTS = ("random", "end", "fixed_checkpoints")
 # Error-handling policy keys understood by the harness in Phase 0.
 # "connectivity" covers backend-unreachable / DB-failure conditions.
 # "turn_ambiguous" covers a single per-turn result that is malformed or missing.
+# "judge_unparseable" (M19 Phase 2) covers a judge response that fails to
+# parse into a valid verdict even after one re-ask.
 DEFAULT_ERROR_POLICY = {
     "connectivity": "hard_stop",
     "turn_ambiguous": "soft_continue",
+    "judge_unparseable": "soft_continue",
 }
 VALID_ERROR_ACTIONS = ("hard_stop", "soft_continue")
 
@@ -63,10 +66,16 @@ class DifficultyConfig(BaseModel):
 
 
 class JudgeConfig(BaseModel):
-    """Judge identity pinning. Phase 0 only stores/validates this — no judge calls yet."""
+    """Judge identity pinning + calls (M19 Phase 2 — see harness/judge.py)."""
 
     model: str = Field(default="gemma4:e4b", description="Judge model identity, config-swappable")
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    # Tightened for M19 Phase 2: judge calls must be near-deterministic for
+    # cross-condition verdict comparability to be meaningful — reproducibility
+    # requires near-0, not merely "low", temperature.
+    temperature: float = Field(
+        default=0.0, ge=0.0, le=0.1,
+        description="Must be <= 0.1 — judge calls need near-0 temperature for reproducibility",
+    )
     pinned_snapshot: Optional[str] = Field(
         default=None, description="Optional pinned model snapshot/digest for reproducibility"
     )

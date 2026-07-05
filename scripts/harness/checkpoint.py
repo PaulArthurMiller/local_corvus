@@ -30,6 +30,13 @@ class TurnCheckpoint(BaseModel):
     status: str  # "ok" | "error_soft_continue"
     timestamp: str = Field(default_factory=now_iso)
     detail: Optional[str] = None
+    # M19 Phase 2 — judge verdict outcome for this turn. `detail` above
+    # always describes the chat-call result (run_id, or the chat error);
+    # these three describe the independent judge/verdict-posting outcome,
+    # so a verdict-posting hiccup never overwrites the chat call's audit info.
+    verdict: Optional[str] = None
+    feedback_event_id: Optional[str] = None
+    judge_error: Optional[str] = None
 
 
 class CheckpointState(BaseModel):

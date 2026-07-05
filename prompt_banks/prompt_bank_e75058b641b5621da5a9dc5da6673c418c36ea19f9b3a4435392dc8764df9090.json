@@ -1,0 +1,1066 @@
+{
+  "entries": [
+    {
+      "prompt_id": "cluster_a_0000",
+      "cluster_id": "cluster_a",
+      "prompt_text": "I'm designing a machine-readable export. What two things must be pinned down for every column so the file parses the same way every time?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions defining each field's data type or format explicitly",
+        "mentions a single uniform delimiter used across all records"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0001",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Why is maintaining a consistent ordering of columns critical in a structured export, and what does the consuming application do when the sequence changes between records?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions the consuming application relying on predictable data placement",
+        "mentions elements being incorrectly mapped or skipped when the sequence changes"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0002",
+      "cluster_id": "cluster_a",
+      "prompt_text": "What should happen when the character used to separate values also shows up inside one of the values themselves?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions escaping the delimiter when it appears inside a field value",
+        "mentions parsers misreading records if this is not handled"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0003",
+      "cluster_id": "cluster_a",
+      "prompt_text": "How should the header rows of an export relate to the underlying rows, and why do downstream consumers depend on that correspondence?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions headers precisely mirroring the structure of every data row",
+        "mentions downstream consumers misinterpreting subsequent fields on mismatch"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0004",
+      "cluster_id": "cluster_a",
+      "prompt_text": "What problems do stray whitespace and inconsistent padding cause when a program interprets each value in a structured export?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions parsing mechanisms being confused by extra spaces or inconsistent spacing",
+        "mentions the output failing checks against the expected format"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0005",
+      "cluster_id": "cluster_a",
+      "prompt_text": "When is it necessary to wrap a value in quotes in a delimited file, and what goes wrong if that practice is applied unevenly?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions quoting values containing special characters like separators or line breaks",
+        "mentions parsers misinterpreting records when quoting is inconsistent"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0006",
+      "cluster_id": "cluster_a",
+      "prompt_text": "If one generated file mixes character encodings like UTF-8 and Latin-1 between sections, what happens to parsers reading the stream?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions parsers misinterpreting byte sequences under mixed encodings",
+        "mentions maintaining consistent character encoding throughout"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0007",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Should a missing value in a generated record be skipped entirely or filled with something? Why?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions using a consistent placeholder rather than omitting the field",
+        "mentions column positioning or downstream parsers being confused by omissions"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0008",
+      "cluster_id": "cluster_a",
+      "prompt_text": "What must be rigorously defined for every field of an export so parsing stays reliable across the entire set of records?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions explicit rules for each field's data type",
+        "mentions a single uniform delimiter across all records"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0009",
+      "cluster_id": "cluster_a",
+      "prompt_text": "A colleague wants to change the field ordering in our nightly structured feed 'just this once'. What should I tell them about predictable placement?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions the computational system relying on predictable data placement",
+        "mentions the consuming application mapping or skipping elements incorrectly"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0010",
+      "cluster_id": "cluster_a",
+      "prompt_text": "How do I keep a delimiter character that appears inside a field value from being mistaken for a record separator during parsing?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions properly escaping the delimiter inside field values",
+        "mentions the parsing engine mistaking internal content for record separators"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0011",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Header rows define field meaning and order for downstream consumers \u2014 what discipline keeps them trustworthy in a generated export?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions headers defining the meaning and order of every field",
+        "mentions consuming applications misinterpreting subsequent fields on mismatch"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0012",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Why must whitespace and internal spacing be strictly managed in structured records meant for programmatic consumption?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions inconsistent spacing confusing parsing mechanisms",
+        "mentions minor inconsistencies eroding the integrity of the whole structure"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0013",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Quoted string handling in delimited output: when line breaks appear inside a field value, what quoting practice keeps parsers from misreading records?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions quoting values containing special characters like the delimiter or line breaks",
+        "mentions quoted content being treated as a single unit"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0014",
+      "cluster_id": "cluster_a",
+      "prompt_text": "What's the safest character encoding policy when several programs append records to the same structured file?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions consistent encoding kept throughout the output",
+        "mentions parsers failing at character boundaries or corrupting interpretation otherwise"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0015",
+      "cluster_id": "cluster_a",
+      "prompt_text": "When a value is unknown at write time, how do I keep the row from breaking the reader?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions writing a consistent placeholder for missing values",
+        "mentions preserving the expected column positions"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0016",
+      "cluster_id": "cluster_a",
+      "prompt_text": "List the delimiter and field conventions an export needs so a parser never guesses where one record's values end and the next begin.",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions one uniform delimiter used consistently",
+        "mentions escaping when the delimiter appears inside a field value"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0017",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Consistent field ordering matters in a structured output because consuming applications rely on predictable placement \u2014 so what breaks first when two teams disagree about it?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions incorrectly mapped or skipped data elements",
+        "mentions preserving a fixed, predictable ordering"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0018",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Delimiter consistency, header rows, and placeholder values for missing fields: give me a review checklist for a generated structured export.",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions consistent delimiter, escaping, or quoting",
+        "mentions headers mirroring data rows",
+        "mentions consistent placeholders for missing values"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0000",
+      "cluster_id": "cluster_b",
+      "prompt_text": "What does a well-written schema actually pin down about incoming data before any code touches it?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions specifying expected shape and type per element",
+        "mentions unambiguous validation against the definition"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0001",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Why must strict type validation reject arriving data whose type doesn't match what the schema declares, instead of silently accepting it?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions consumers expecting explicit types for calculations or comparisons",
+        "mentions brittle behavior or failures difficult to trace back to the acceptance"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0002",
+      "cluster_id": "cluster_b",
+      "prompt_text": "How should a robust schema distinguish required elements from optional ones so incoming data keeps a predictable shape?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions explicitly delineating required versus optional elements",
+        "mentions ambiguous data shapes or unpredictable validation failures otherwise"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0003",
+      "cluster_id": "cluster_b",
+      "prompt_text": "We're evolving a live schema by adding a required element. What does backward compatibility demand for existing data producers?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions existing producers providing the old shape and failing validation",
+        "mentions anticipating legacy producers when the schema changes"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0004",
+      "cluster_id": "cluster_b",
+      "prompt_text": "In a data contract, what's the practical difference between a key that's set to null and a key that isn't there at all?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions null meaning present-but-empty versus absence meaning the key is missing",
+        "mentions the schema declaring which is permitted per element"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0005",
+      "cluster_id": "cluster_b",
+      "prompt_text": "A single element in our schema can hold either a number or a string. What design keeps that from becoming a validation headache?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions union types complicating the expected shape",
+        "mentions discriminated unions or a tag naming the actual type"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0006",
+      "cluster_id": "cluster_b",
+      "prompt_text": "What are the arguments for agreeing on the data definition before writing application logic rather than after?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions schema-first establishing expectations early",
+        "mentions reducing type mismatches or late validation errors"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0007",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Runtime schema validation at system boundaries: why must incoming data be checked at every entry point before processing begins?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions validating the data's shape at every entry point",
+        "mentions preventing corrupt type information from propagating downstream"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0008",
+      "cluster_id": "cluster_b",
+      "prompt_text": "What goes wrong with incoming data validation when the expected shape and type of each element was never rigorously pre-defined?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions a schema specifying shape and type per element",
+        "mentions ambiguous or unreliable validation without it"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0009",
+      "cluster_id": "cluster_b",
+      "prompt_text": "When a validator silently accepts data of the wrong type, why are the resulting failures so hard to trace back later?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions corrupted downstream expectations from silent acceptance",
+        "mentions errors surfacing far from the initial acceptance error"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0010",
+      "cluster_id": "cluster_b",
+      "prompt_text": "When reviewing a proposed schema, how do I judge whether it defines the expected payload tightly enough?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions per-element shape and type specificity",
+        "mentions required-versus-optional distinctions or null-versus-absent semantics"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0011",
+      "cluster_id": "cluster_b",
+      "prompt_text": "How does strict type validation at intake protect consumers that need to perform integer calculations or date comparisons on incoming data?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions consumers relying on explicit types for calculations or comparisons",
+        "mentions unexpected errors when an incorrect type slips through"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0012",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Our API ingests webhooks from dozens of partners. Why does runtime validation of each payload's shape and type at the boundary matter?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions boundary validation before processing begins",
+        "mentions preventing corrupt types from propagating into internal components"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0013",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Required versus optional elements in a schema: when may a validator be lenient about an element a payload omits?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions explicitly delineating required versus optional elements",
+        "mentions ambiguous data shapes when the distinction is ignored"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0014",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Explain how a payload's declared 'shape' differs from its individual value types, and why both need specifying.",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions shape as the arrangement of elements and types as per-element expectations",
+        "mentions validation needing both to be unambiguous"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0015",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Backward compatibility when evolving a schema: what must each new version guarantee to existing data producers?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions existing producers providing the old shape",
+        "mentions a new mandatory element failing validation for legacy producers"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0016",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema validation of data shape and type goes beyond syntax: why is 'it parses as JSON' not the same as 'the payload is valid'?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions the schema specifying expected data shape and type",
+        "mentions validation determining whether the structure conforms"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0017",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Strict type validation should reject a declared-integer element arriving as a quoted string \u2014 why is silently accepting the wrong type worse?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions silently accepting an incorrect type corrupting the downstream data structure",
+        "mentions consumers expecting explicit types for integer calculations or date comparisons"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0018",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Summarize the lifecycle benefits of writing the data contract first when two teams integrate.",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions agreeing on expected data and types early",
+        "mentions fewer cryptic mismatches or late-stage validation errors"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0000",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Why can't a system rely on agents choosing to comply voluntarily with its rules, and what must happen to every violation instead?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions compliance being maintained only through enforcement",
+        "mentions violations being detected and reported, never silently tolerated"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0001",
+      "cluster_id": "cluster_c",
+      "prompt_text": "What should an API do about malformed or malicious requests before they reach business logic?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions checking inputs at the boundary or entry point",
+        "mentions screening out bad input preemptively to protect the application layer"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0002",
+      "cluster_id": "cluster_c",
+      "prompt_text": "What operational rule guarantees an operation executed twice in a distributed system produces the same final state, and where must it be enforced?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions idempotency as the operational rule or constraint",
+        "mentions enforcement at every call site against retries"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0003",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Why should the rawest layer of an ingestion pipeline never be edited in place?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions immutability of the raw layer preserving the original records",
+        "mentions derived versions and an intact audit trail"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0004",
+      "cluster_id": "cluster_c",
+      "prompt_text": "In multi-tenant architecture, why must the platform itself enforce access control boundaries between tenants rather than trusting them to comply?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions the platform proactively enforcing boundaries at the foundational level",
+        "mentions voluntary adherence guaranteeing nothing and detecting no boundary violation"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0005",
+      "cluster_id": "cluster_c",
+      "prompt_text": "What request frequency rule protects an API's infrastructure from overload, and why must it enforce itself server-side?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions a server-side enforced request frequency limit",
+        "mentions logged violations triggering an immediate block"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0006",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Why does processing events out of order corrupt a consumer's view of the world?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions sequential processing as a strict operational requirement",
+        "mentions consumers acting on an inconsistent representation of state"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0007",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Naming convention rules across large codebases: what's the long-term payoff of enforcing them rigorously on every team?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions standardizing syntax across disparate teams",
+        "mentions preventing structural violation and keeping a unified codebase standard"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0008",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Rule violations detected in production must be reported: why is silently tolerating them never acceptable?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions violations being detected and reported, never silently tolerated",
+        "mentions systems collapsing under inconsistency because compliance requires enforcement"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0009",
+      "cluster_id": "cluster_c",
+      "prompt_text": "How do network retries interact with operations that don't enforce idempotency at every call site?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions successive executions producing inconsistent final states",
+        "mentions the idempotency constraint being enforced at every call site"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0010",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Enforcement versus voluntary compliance: what separates a guideline agents may choose to follow from a rule the system enforces?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions compliance maintained only through enforcement",
+        "mentions violations being monitored, detected, and reported"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0011",
+      "cluster_id": "cluster_c",
+      "prompt_text": "A downstream stage of our pipeline wants to 'fix' records in the landing zone. What's the objection?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions the raw layer staying untouched and immutable",
+        "mentions modifications living in derived versions to protect accountability"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0012",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Why is per-tenant isolation not something you can leave to client-side good behavior?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions foundational platform-level enforcement of access boundaries",
+        "mentions zero detection of breaches under voluntary adherence"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0013",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Request frequency limits protect an API from overload: our public endpoint slows when one client floods it \u2014 what enforcement is missing?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions a server-side, self-enforcing request frequency rule",
+        "mentions logged access violations triggering an immediate block"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0014",
+      "cluster_id": "cluster_c",
+      "prompt_text": "What ordering promise must an event-driven system keep, and what happens when it doesn't?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions sequential or temporal ordering as a hard requirement",
+        "mentions consumers processing state changes out of sequence"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0015",
+      "cluster_id": "cluster_c",
+      "prompt_text": "How does enforcing naming conventions reduce technical debt in large codebases spread across many teams?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions standardized syntax across teams",
+        "mentions conformance to architectural guidelines preventing decentralized deviations"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0016",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Why must every API boundary screen incoming requests against its rules before the business logic runs?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions checking input at the entry point before processing",
+        "mentions malformed or malicious traffic reaching core logic otherwise"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0017",
+      "cluster_id": "cluster_c",
+      "prompt_text": "The mandate says violations must never be silently tolerated. What does that imply about monitoring and reporting?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions actively monitoring and reporting violations",
+        "mentions detection being mandatory rather than optional"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0018",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Server-side enforcement of request frequency rules: why is trusting callers to throttle themselves insufficient?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions the limit needing to enforce itself server-side",
+        "mentions client cooperation or attempts to comply being insufficient"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0000",
+      "cluster_id": "cluster_d",
+      "prompt_text": "What practice makes every claim in an analytical report traceable back to an identifiable origin when someone asks where a conclusion came from?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions rigorously citing the source of every claim",
+        "mentions provenance of conclusions being traceable to an identifiable origin"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0001",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Why do unsupported assertions sink the credibility of a research write-up?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions claims needing citations back to their original source",
+        "mentions the chain from conclusion to origin being verifiable"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0002",
+      "cluster_id": "cluster_d",
+      "prompt_text": "What should a derived dataset record about its own history, and who benefits?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions recording origin and every transformation as lineage",
+        "mentions analysts validating any point back through pipeline stages"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0003",
+      "cluster_id": "cluster_d",
+      "prompt_text": "A bug appears months after deployment. How does good build metadata shorten the investigation?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions artifacts citing their exact commit and dependency versions",
+        "mentions traceability enabling reproducibility and faster debugging"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0004",
+      "cluster_id": "cluster_d",
+      "prompt_text": "When an AI system quotes outside material in its answers, what bookkeeping keeps the result trustworthy?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions citing the original material",
+        "mentions tracking claims to their specific origin for verifiable provenance"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0005",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Why do financial auditors insist on knowing not just what a balance is, but how it got that way?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions recording the source and origin of every balance change",
+        "mentions a chain of custody or attributable alterations"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0006",
+      "cluster_id": "cluster_d",
+      "prompt_text": "What risk does a single component of unknown manufacture introduce into a hardware build?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions compromising the whole system's integrity",
+        "mentions documenting manufacturing origin and material source for audits"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0007",
+      "cluster_id": "cluster_d",
+      "prompt_text": "What provenance documentation must accompany a trained model so claims about its performance are reproducible?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions documenting dataset lineage and training procedure at origin",
+        "mentions the model being traceable to a verifiable source"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0008",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Every claim in an analytical system must cite its source: how does an analyst prove a reported number is traceable to an identifiable origin?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions citing the source so provenance is traceable to an identifiable origin",
+        "mentions documenting the foundational input or intellectual lineage of each point"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0009",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Lineage tracking requires every derived dataset to record its origin and transformations: what does that let analysts do in an incident review?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions tracing any point back through every pipeline stage",
+        "mentions citing the underlying logic or raw records relied upon"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0010",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance of a published statistic must be verifiable: why is 'trust me, the pipeline produced it' unacceptable?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions claims being traceable through verifiable records",
+        "mentions unverified claims being inherently untrustworthy"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0011",
+      "cluster_id": "cluster_d",
+      "prompt_text": "What source and dependency information should CI stamp into every build artifact it publishes, and why?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions citing the exact source commit and dependency versions",
+        "mentions traceability enabling reproducibility and faster debugging"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0012",
+      "cluster_id": "cluster_d",
+      "prompt_text": "In academic writing, what practice connects each factual statement to something a reader can check?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions citing the original source for every claim",
+        "mentions the path from conclusion to origin staying intact"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0013",
+      "cluster_id": "cluster_d",
+      "prompt_text": "What makes an audit trail 'complete' for a money-moving system?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions every alteration attributable to a time and process",
+        "mentions full provenance of balance changes"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0014",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Why does supply chain security require documenting the manufacturing origin and material source of every hardware component?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions a component of unknown origin compromising system integrity",
+        "mentions validating the complete history of materials for security audits"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0015",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Model weight provenance documents training methods and dataset lineage: what lets another lab reproduce a reported result?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions documenting dataset lineage and procedural steps at origin",
+        "mentions claims being reproducible and traceable to a verifiable source"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0016",
+      "cluster_id": "cluster_d",
+      "prompt_text": "When AI-generated text weaves in outside facts, what keeps accountability intact?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions rigorous tracking of claims to their specific origin",
+        "mentions citation preserving credibility of generated content"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0017",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Every claim must cite its source before sign-off: what should a reviewer verify about the origin of each number in an analysis?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions each claim citing its source",
+        "mentions conclusions being traceable back to an identifiable origin"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "session-authored-offline@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    }
+  ],
+  "generation_params": {
+    "total_prompts": 125,
+    "probe_ratio": 0.4,
+    "hop_distance_levels": [
+      0,
+      1
+    ],
+    "subjects": "auto",
+    "model": "session-authored-offline"
+  },
+  "content_hash": "e75058b641b5621da5a9dc5da6673c418c36ea19f9b3a4435392dc8764df9090"
+}

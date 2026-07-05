@@ -353,6 +353,47 @@ def test_graph_wipe_skip_no_runs():
         assert result["status"] == "SKIP"
 
 
+def test_graph_wipe_ignores_seed_fixture_mus_reseeded_by_another_condition():
+    """Seed-fixture MUs keep the fixture's original created_at but are stamped
+    with whichever experiment_id the backend carried when they were loaded. In
+    a multi-condition harness run, a later condition's re-seed (e.g.
+    "..._random_weight") therefore predates an earlier condition's first run —
+    that must not read as an incomplete wipe. Seed MUs are identified by
+    series_id 'seed:%' and are verified by the seed-provenance check instead."""
+    with TempDB() as store:
+        experiment_id = "pilot_learned"
+
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A",
+            experiment_id=experiment_id,
+            turn_index=1,
+        )))
+
+        import aiosqlite
+
+        async def _insert_reseeded_seed_mu():
+            db = await aiosqlite.connect(store_module._DB_PATH)
+            try:
+                await db.execute(
+                    """INSERT INTO memory_units
+                       (mu_id, created_at, source_type, raw_content, experiment_id, series_id)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (_mu_id(), "2025-12-31T00:00:00+00:00",
+                     "agent_output", "seed fixture content",
+                     "pilot_random_weight", "seed:v2"),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+
+        run(_insert_reseeded_seed_mu())
+
+        result = run(_check_graph_wipe(experiment_id, store))
+        print(f"graph_wipe: {result}")
+        assert result["status"] == "PASS"
+        assert result["pre_experiment_foreign_mu_count"] == 0
+
+
 # ---------------------------------------------------------------------------
 # §6.3 probe-replay-index normalization
 # ---------------------------------------------------------------------------

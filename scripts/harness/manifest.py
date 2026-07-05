@@ -58,8 +58,16 @@ def run_identity_for(plan: RunPlan, attempt: int = 1) -> str:
     attempt-suffix convention: attempt=1 reproduces the original plain
     plan_id (fully backward compatible for the common case where a plan
     only ever runs once).
+
+    A dry run gets a "_dryrun"-suffixed identity. Without it, a dry run of
+    a plan writes analytics/feedback_events rows under the exact
+    experiment_id the later real run of that plan uses — wipe_graph()
+    deliberately never deletes those tables, so the real run's series/
+    experiment reports would silently aggregate the dry run's turns. Same
+    failure mode as the attempt-collision fix, via a different door.
     """
-    return plan.plan_id if attempt <= 1 else f"{plan.plan_id}_attempt{attempt}"
+    base = plan.plan_id if attempt <= 1 else f"{plan.plan_id}_attempt{attempt}"
+    return f"{base}_dryrun" if plan.dry_run else base
 
 
 class RunManifest(BaseModel):

@@ -1392,9 +1392,15 @@ class GraphStore:
         Count MUs from a different experiment that existed before this experiment started.
 
         A non-zero count indicates a possible incomplete graph wipe before this
-        experiment run. Excludes NULL experiment_id (pre-M12 MUs) and seed-prefixed
-        experiment_ids (excluded by the experiment_id != :eid check, since seed MUs
-        share the same experiment_id). Per §6.3 graph-wipe verification.
+        experiment run. Excludes NULL experiment_id (pre-M12 MUs), seed-prefixed
+        experiment_ids, and seed-fixture MUs (series_id 'seed:%'). Seed MUs must
+        be excluded by series_id, not just experiment_id: they are stamped with
+        whichever experiment_id the backend carried when the fixture was loaded,
+        but keep the fixture's original created_at — so in a multi-condition
+        harness run, a later condition's re-seed would otherwise show up as
+        "pre-experiment foreign MUs" in an earlier condition's report. Seed MU
+        provenance is verified separately by the §6.3 seed-fixture check.
+        Per §6.3 graph-wipe verification.
         """
         db = await _open_db()
         try:
@@ -1404,6 +1410,7 @@ class GraphStore:
                 WHERE experiment_id IS NOT NULL
                   AND experiment_id != ?
                   AND experiment_id NOT LIKE 'seed:%'
+                  AND (series_id IS NULL OR series_id NOT LIKE 'seed:%')
                   AND created_at < ?
                 """,
                 (experiment_id, earliest_timestamp),

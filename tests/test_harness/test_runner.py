@@ -295,7 +295,7 @@ def test_resume_declined_gets_a_new_run_id_and_experiment_id(tmp_path):
     failing_client = FakeBackendClient(chat_errors={1: BackendConnectivityError("dropped")})
     first_outcome = execute_run(plan, failing_client, tmp_path, print_fn=_noop_print)
     assert first_outcome.status == "aborted"
-    assert failing_client.wipe_calls == ["p1_learned"]
+    assert failing_client.wipe_calls == ["p1_dryrun_learned"]
 
     healthy_client = FakeBackendClient()
     second_outcome = execute_run(
@@ -306,8 +306,8 @@ def test_resume_declined_gets_a_new_run_id_and_experiment_id(tmp_path):
     assert second_outcome.status == "complete"
     assert second_outcome.run_id != first_outcome.run_id
     assert second_outcome.run_id.endswith("_attempt2")
-    # The fresh attempt wipes under a distinct experiment_id, not "p1_learned".
-    assert healthy_client.wipe_calls == ["p1_attempt2_learned"]
+    # The fresh attempt wipes under a distinct experiment_id, not "p1_dryrun_learned".
+    assert healthy_client.wipe_calls == ["p1_attempt2_dryrun_learned"]
 
 
 def test_rerunning_an_already_complete_plan_gets_a_new_run_id_and_experiment_id(tmp_path):
@@ -322,7 +322,7 @@ def test_rerunning_an_already_complete_plan_gets_a_new_run_id_and_experiment_id(
     first_client = FakeBackendClient()
     first_outcome = execute_run(plan, first_client, tmp_path, print_fn=_noop_print)
     assert first_outcome.status == "complete"
-    assert first_client.wipe_calls == ["p1_learned"]
+    assert first_client.wipe_calls == ["p1_dryrun_learned"]
 
     second_client = FakeBackendClient()
     second_outcome = execute_run(plan, second_client, tmp_path, print_fn=_noop_print)
@@ -330,7 +330,7 @@ def test_rerunning_an_already_complete_plan_gets_a_new_run_id_and_experiment_id(
     assert second_outcome.status == "complete"
     assert second_outcome.run_id != first_outcome.run_id
     assert second_outcome.run_id.endswith("_attempt2")
-    assert second_client.wipe_calls == ["p1_attempt2_learned"]
+    assert second_client.wipe_calls == ["p1_attempt2_dryrun_learned"]
     # The completed first attempt's own checkpoint/manifest files are untouched.
     reloaded_first = load_checkpoint(first_outcome.run_id, tmp_path)
     assert reloaded_first is not None
@@ -376,7 +376,7 @@ def test_resume_mid_series_preserves_graph_and_skips_wipe_seed(tmp_path):
     first_outcome = execute_run(plan, failing_client, tmp_path, print_fn=_noop_print)
     assert first_outcome.status == "aborted"
     assert len(first_outcome.checkpoint.turns) == 1
-    assert failing_client.wipe_calls == ["p1_learned"]  # first attempt: brand new, wipes normally
+    assert failing_client.wipe_calls == ["p1_dryrun_learned"]  # first attempt: brand new, wipes normally
 
     healthy_client = FakeBackendClient()
     restart_calls = []
@@ -390,7 +390,7 @@ def test_resume_mid_series_preserves_graph_and_skips_wipe_seed(tmp_path):
     assert second_outcome.status == "complete"
     assert healthy_client.wipe_calls == []  # graph preserved, not reset
     assert healthy_client.seed_calls == 0
-    assert restart_calls == [{"EXPERIMENT_ID": "p1_learned", "RUN_CONDITION": "learned"}]  # still restarted for correct stamping
+    assert restart_calls == [{"EXPERIMENT_ID": "p1_dryrun_learned", "RUN_CONDITION": "learned"}]  # still restarted for correct stamping
     assert healthy_client.chat_call_count == 2  # only the 2 remaining turns
 
 
@@ -424,7 +424,7 @@ def test_wipe_is_called_before_seed_for_each_condition(tmp_path):
 
     assert outcome.status == "complete"
     # Dry-run scopes to exactly one condition ("learned", first in condition_order).
-    assert client.wipe_calls == ["p1_learned"]
+    assert client.wipe_calls == ["p1_dryrun_learned"]
     assert client.seed_calls == 1
 
 
@@ -714,7 +714,7 @@ def test_chat_receives_deterministic_series_id(tmp_path):
     outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
 
     assert outcome.status == "complete"
-    assert client.chat_series_ids == ["p1_learned_s0", "p1_learned_s0"]
+    assert client.chat_series_ids == ["p1_dryrun_learned_s0", "p1_dryrun_learned_s0"]
 
 
 def test_manifest_records_series_id_map_for_all_conditions_and_series(tmp_path):
@@ -724,10 +724,10 @@ def test_manifest_records_series_id_map_for_all_conditions_and_series(tmp_path):
     outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
 
     manifest = load_manifest(outcome.run_id, tmp_path)
-    assert manifest.series_id_map["learned:0"] == "p1_learned_s0"
-    assert manifest.series_id_map["learned:1"] == "p1_learned_s1"
-    assert manifest.series_id_map["static_weight:0"] == "p1_static_weight_s0"
-    assert manifest.series_id_map["static_weight:1"] == "p1_static_weight_s1"
+    assert manifest.series_id_map["learned:0"] == "p1_dryrun_learned_s0"
+    assert manifest.series_id_map["learned:1"] == "p1_dryrun_learned_s1"
+    assert manifest.series_id_map["static_weight:0"] == "p1_dryrun_static_weight_s0"
+    assert manifest.series_id_map["static_weight:1"] == "p1_dryrun_static_weight_s1"
 
 
 # ---------------------------------------------------------------------------
@@ -743,7 +743,7 @@ def test_series_completion_triggers_series_report_with_correct_ids(tmp_path):
     outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
 
     assert outcome.status == "complete"
-    assert client.series_report_calls == [("p1_learned", "p1_learned_s0")]
+    assert client.series_report_calls == [("p1_dryrun_learned", "p1_dryrun_learned_s0")]
     assert len(outcome.checkpoint.series_reports) == 1
     record = outcome.checkpoint.series_reports[0]
     assert record.condition == "learned"
@@ -881,7 +881,7 @@ def test_docker_restart_called_once_per_condition_when_project_root_given(tmp_pa
 
     assert outcome.status == "complete"
     assert restart_calls == [
-        (Path("/fake/project"), {"EXPERIMENT_ID": "p1_learned", "RUN_CONDITION": "learned"})
+        (Path("/fake/project"), {"EXPERIMENT_ID": "p1_dryrun_learned", "RUN_CONDITION": "learned"})
     ]
     assert len(health_calls) == 1
 

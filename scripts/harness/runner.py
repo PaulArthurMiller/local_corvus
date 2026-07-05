@@ -46,7 +46,14 @@ from harness.docker_lifecycle import (
     wait_for_health,
 )
 from harness.judge import JudgeUnparseableError, judge_turn
-from harness.manifest import RunManifest, compute_config_hash, compute_run_id, now_iso, save_manifest
+from harness.manifest import (
+    RunManifest,
+    compute_config_hash,
+    compute_run_id,
+    now_iso,
+    run_identity_for,
+    save_manifest,
+)
 from harness.notify import build_notification_payload, notify
 from harness.prompt_bank import PromptBank, PromptBankEntry, load_bank
 from harness.schema import DEFAULT_ERROR_POLICY, RunPlan
@@ -324,12 +331,64 @@ def execute_run(
     incurred (or about to be incurred) for this run's prompt bank — 0.0
     when an existing bank is reused. Combined with a judge-call estimate
     and checked against plan.budget_cap before any graph mutation.
+
+    experiment_id/series_id collision note: run_id/experiment_id are
+    derived from plan_id (+ an "_attemptN" suffix beyond the first attempt
+    at a given identity). Accepting a resume of an incomplete run keeps
+    attempt=1's identity; declining a resume, or invoking execute_run()
+    again for a plan that already completed, bumps the attempt number
+    instead of silently reusing an identity that already has real data —
+    wipe_graph() never deletes analytics/feedback_events, so reuse would
+    otherwise mix an old trial's rows into a new one's experiment_id.
     """
     probes = probes or []
     config_hash = compute_config_hash(plan)
-    run_id = compute_run_id(plan, config_hash)
-    print_fn(f"Plan loaded: plan_id={plan.plan_id!r} config_hash={config_hash}")
-    logger.info("runner: run_id=%s config_hash=%s", run_id, config_hash)
+
+    # --- Resume / attempt-identity detection ---
+    # A checkpoint counts as "incomplete" (and therefore resumable) if it
+    # was never finished OR it was previously aborted — only a "complete"
+    # checkpoint has nothing left to do. Re-invoking execute_run() for the
+    # exact same plan after it already completed (or after the user
+    # declines to resume an incomplete one) must NOT reuse that run_id:
+    # wipe_graph() never deletes analytics/feedback_events, so a fresh
+    # checkpoint at the same run_id/experiment_id would silently mix a new
+    # trial's data with the old run's. Each attempt beyond the first gets
+    # its own run_id/experiment_id (compute_run_id / run_identity_for) —
+    # attempt 1 is byte-for-byte the original convention, so this is fully
+    # backward compatible for a plan that only ever runs once.
+    attempt = 1
+    resume = False
+    existing: Optional[CheckpointState] = None
+    while True:
+        run_id = compute_run_id(plan, config_hash, attempt)
+        existing = load_checkpoint(run_id, run_base_dir)
+        if existing is None:
+            break
+        if existing.final_status != "complete":
+            print_fn(
+                f"Found incomplete checkpoint for run_id={run_id} with "
+                f"{len(existing.turns)} turn(s) already recorded "
+                f"(final_status={existing.final_status!r})."
+            )
+            answer = resume_input_fn("Resume this run? (y/n) [y]: ").strip().lower()
+            resume = answer in ("", "y", "yes")
+            if resume:
+                break
+            print_fn(
+                f"Starting fresh under a new run identity — run_id={run_id}'s data "
+                f"is preserved, not overwritten."
+            )
+            attempt += 1
+            continue
+        print_fn(
+            f"run_id={run_id} already completed — starting a new attempt under a "
+            f"distinct identity so its data is never mixed with the completed run."
+        )
+        attempt += 1
+
+    run_identity = run_identity_for(plan, attempt)
+    print_fn(f"Plan loaded: plan_id={plan.plan_id!r} config_hash={config_hash} run_id={run_id!r}")
+    logger.info("runner: run_id=%s config_hash=%s attempt=%d", run_id, config_hash, attempt)
 
     full_sequence = resolve_turn_sequence(plan)
 
@@ -353,12 +412,13 @@ def execute_run(
             )
 
     # M19 Phase 3 — deterministic series_id per (condition, series_index),
-    # e.g. "{plan_id}_{condition}_s{series_index}". Covers every condition
-    # in the plan (not just what a scoped dry-run executes) so the manifest
-    # is always a complete map, matching resolved_turn_sequence's use of
-    # full_sequence rather than the scoped one.
+    # e.g. "{run_identity}_{condition}_s{series_index}". Covers every
+    # condition in the plan (not just what a scoped dry-run executes) so
+    # the manifest is always a complete map, matching
+    # resolved_turn_sequence's use of full_sequence rather than the scoped
+    # one.
     series_id_map = {
-        f"{condition}:{series_index}": f"{plan.plan_id}_{condition}_s{series_index}"
+        f"{condition}:{series_index}": f"{run_identity}_{condition}_s{series_index}"
         for condition in plan.condition_order
         for series_index in range(plan.series_count)
     }
@@ -373,24 +433,7 @@ def execute_run(
     manifest_path = save_manifest(manifest, run_base_dir)
     print_fn(f"Manifest saved: {manifest_path}")
 
-    # --- Resume detection ---
-    # A run counts as "incomplete" (and therefore resumable) if it was never
-    # finished OR it was previously aborted — only a "complete" run has
-    # nothing left to do.
-    existing = load_checkpoint(run_id, run_base_dir)
-    resume = False
-    if existing is not None and existing.final_status != "complete":
-        print_fn(
-            f"Found incomplete checkpoint for run_id={run_id} with "
-            f"{len(existing.turns)} turn(s) already recorded "
-            f"(final_status={existing.final_status!r})."
-        )
-        answer = resume_input_fn("Resume this run? (y/n) [y]: ").strip().lower()
-        resume = answer in ("", "y", "yes")
-        if not resume:
-            print_fn("Starting fresh — previous checkpoint will be overwritten.")
-
-    checkpoint = existing if (existing is not None and resume) else CheckpointState(run_id=run_id)
+    checkpoint = existing if resume else CheckpointState(run_id=run_id)
 
     error_policy = resolve_error_policy(plan)
     conditions, scoped_sequence = scope_for_dry_run(plan, plan.condition_order, full_sequence)
@@ -470,7 +513,7 @@ def execute_run(
                 continue
 
             print_fn(f"\n=== Condition: {condition} ===")
-            experiment_id = f"{plan.plan_id}_{condition}"
+            experiment_id = f"{run_identity}_{condition}"
 
             # M19 Phase 3 — restart the backend with this condition's
             # EXPERIMENT_ID before touching the graph. Unconditional hard
@@ -649,9 +692,9 @@ def execute_run(
         # deterministically from the manifest's own naming convention, never
         # asked of the user.
         if "learned" in conditions:
-            learned_experiment_id = f"{plan.plan_id}_learned"
+            learned_experiment_id = f"{run_identity}_learned"
             control_experiment_ids = {
-                c: f"{plan.plan_id}_{c}" for c in conditions if c != "learned"
+                c: f"{run_identity}_{c}" for c in conditions if c != "learned"
             } or None
             try:
                 experiment_report_record = _generate_experiment_report(

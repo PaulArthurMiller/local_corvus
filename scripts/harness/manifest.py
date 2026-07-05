@@ -28,16 +28,38 @@ def compute_config_hash(plan: RunPlan) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def compute_run_id(plan: RunPlan, config_hash: str) -> str:
+def compute_run_id(plan: RunPlan, config_hash: str, attempt: int = 1) -> str:
     """
-    Deterministic run_id derived from plan_id + a hash prefix.
+    Deterministic run_id derived from plan_id + a hash prefix (+ an attempt
+    suffix for attempt > 1).
 
-    Re-running the same plan file produces the same run_id, which is what
-    makes checkpoint-based resume possible — a materially different plan
-    (different config_hash) intentionally gets a fresh run directory rather
-    than silently resuming an unrelated checkpoint.
+    Re-running the same plan file produces the same run_id on the first
+    attempt, which is what makes checkpoint-based resume possible — a
+    materially different plan (different config_hash) intentionally gets a
+    fresh run directory rather than silently resuming an unrelated
+    checkpoint.
+
+    attempt > 1 is for M19 Phase 3's experiment_id collision fix: if a
+    run_id's checkpoint is already "complete" (or the user declines to
+    resume an incomplete one), re-invoking execute_run() must not silently
+    reuse that identity — wipe_graph() never deletes analytics/
+    feedback_events, so a fresh checkpoint at the same run_id/experiment_id
+    would mix a new trial's data with the old run's. See run_identity_for()
+    for the matching experiment_id/series_id namespace.
     """
-    return f"{plan.plan_id}_{config_hash[:12]}"
+    suffix = "" if attempt <= 1 else f"_attempt{attempt}"
+    return f"{plan.plan_id}_{config_hash[:12]}{suffix}"
+
+
+def run_identity_for(plan: RunPlan, attempt: int = 1) -> str:
+    """
+    The plan_id-based identity used to build experiment_id/series_id
+    strings (e.g. "{run_identity}_{condition}"). Matches compute_run_id()'s
+    attempt-suffix convention: attempt=1 reproduces the original plain
+    plan_id (fully backward compatible for the common case where a plan
+    only ever runs once).
+    """
+    return plan.plan_id if attempt <= 1 else f"{plan.plan_id}_attempt{attempt}"
 
 
 class RunManifest(BaseModel):

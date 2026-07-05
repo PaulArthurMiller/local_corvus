@@ -10,6 +10,7 @@ from harness.manifest import (
     compute_config_hash,
     compute_run_id,
     load_manifest,
+    run_identity_for,
     save_manifest,
 )
 from harness.schema import RunPlan
@@ -69,3 +70,37 @@ def test_save_and_load_manifest_round_trips(tmp_path):
 
 def test_load_manifest_returns_none_when_missing(tmp_path):
     assert load_manifest("nonexistent_run", tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — attempt-suffix disambiguation (experiment_id collision fix)
+# ---------------------------------------------------------------------------
+
+def test_compute_run_id_attempt_1_matches_original_convention():
+    plan = _plan()
+    config_hash = compute_config_hash(plan)
+    assert compute_run_id(plan, config_hash) == compute_run_id(plan, config_hash, attempt=1)
+    assert compute_run_id(plan, config_hash, attempt=1) == f"p1_{config_hash[:12]}"
+
+
+def test_compute_run_id_attempt_2_is_distinct_and_stable():
+    plan = _plan()
+    config_hash = compute_config_hash(plan)
+    run_id_1 = compute_run_id(plan, config_hash, attempt=1)
+    run_id_2a = compute_run_id(plan, config_hash, attempt=2)
+    run_id_2b = compute_run_id(plan, config_hash, attempt=2)
+
+    assert run_id_2a != run_id_1
+    assert run_id_2a == run_id_2b  # deterministic given the same attempt number
+    assert run_id_2a == f"p1_{config_hash[:12]}_attempt2"
+
+
+def test_run_identity_for_attempt_1_is_plain_plan_id():
+    plan = _plan()
+    assert run_identity_for(plan) == "p1"
+    assert run_identity_for(plan, attempt=1) == "p1"
+
+
+def test_run_identity_for_attempt_2_is_suffixed():
+    plan = _plan()
+    assert run_identity_for(plan, attempt=2) == "p1_attempt2"

@@ -285,6 +285,80 @@ def test_resume_declined_starts_fresh(tmp_path):
     assert healthy_client.chat_call_count == 2
 
 
+def test_resume_declined_gets_a_new_run_id_and_experiment_id(tmp_path):
+    """M19 Phase 3 collision fix: declining to resume an incomplete run must
+    not reuse its run_id/experiment_id — wipe_graph() never deletes
+    analytics/feedback_events, so reusing the identity would mix the
+    abandoned attempt's data with the fresh one's."""
+    plan = _plan(dry_run=True, dry_run_n=2, conditions=["learned"])
+
+    failing_client = FakeBackendClient(chat_errors={1: BackendConnectivityError("dropped")})
+    first_outcome = execute_run(plan, failing_client, tmp_path, print_fn=_noop_print)
+    assert first_outcome.status == "aborted"
+    assert failing_client.wipe_calls == ["p1_learned"]
+
+    healthy_client = FakeBackendClient()
+    second_outcome = execute_run(
+        plan, healthy_client, tmp_path,
+        resume_input_fn=lambda _p: "n", print_fn=_noop_print,
+    )
+
+    assert second_outcome.status == "complete"
+    assert second_outcome.run_id != first_outcome.run_id
+    assert second_outcome.run_id.endswith("_attempt2")
+    # The fresh attempt wipes under a distinct experiment_id, not "p1_learned".
+    assert healthy_client.wipe_calls == ["p1_attempt2_learned"]
+
+
+def test_rerunning_an_already_complete_plan_gets_a_new_run_id_and_experiment_id(tmp_path):
+    """M19 Phase 3 collision fix: re-invoking execute_run() for a plan that
+    already ran to completion must not silently reuse its run_id/
+    experiment_id (the pre-Phase-3 behavior — the resume-prompt block was
+    skipped entirely for a "complete" checkpoint, so a fresh checkpoint
+    was created at the *same* run_id, and new chat calls would have landed
+    under the same experiment_id as the completed run's data)."""
+    plan = _plan(dry_run=True, dry_run_n=1, conditions=["learned"])
+
+    first_client = FakeBackendClient()
+    first_outcome = execute_run(plan, first_client, tmp_path, print_fn=_noop_print)
+    assert first_outcome.status == "complete"
+    assert first_client.wipe_calls == ["p1_learned"]
+
+    second_client = FakeBackendClient()
+    second_outcome = execute_run(plan, second_client, tmp_path, print_fn=_noop_print)
+
+    assert second_outcome.status == "complete"
+    assert second_outcome.run_id != first_outcome.run_id
+    assert second_outcome.run_id.endswith("_attempt2")
+    assert second_client.wipe_calls == ["p1_attempt2_learned"]
+    # The completed first attempt's own checkpoint/manifest files are untouched.
+    reloaded_first = load_checkpoint(first_outcome.run_id, tmp_path)
+    assert reloaded_first is not None
+    assert reloaded_first.final_status == "complete"
+    assert len(reloaded_first.turns) == 1
+
+
+def test_resuming_an_incomplete_run_keeps_the_same_run_id_and_experiment_id(tmp_path):
+    """Accepting a resume must NOT bump the attempt number — this is the
+    common, everyday case and has to stay byte-for-byte the original
+    run_id/experiment_id convention."""
+    plan = _plan(dry_run=True, dry_run_n=2, conditions=["learned"])
+
+    failing_client = FakeBackendClient(chat_errors={1: BackendConnectivityError("dropped")})
+    first_outcome = execute_run(plan, failing_client, tmp_path, print_fn=_noop_print)
+    assert first_outcome.status == "aborted"
+
+    healthy_client = FakeBackendClient()
+    second_outcome = execute_run(
+        plan, healthy_client, tmp_path,
+        resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+    )
+
+    assert second_outcome.status == "complete"
+    assert second_outcome.run_id == first_outcome.run_id
+    assert healthy_client.wipe_calls == ["p1_learned"]
+
+
 def test_wipe_is_called_before_seed_for_each_condition(tmp_path):
     plan = _plan(dry_run=True, dry_run_n=1)
     client = FakeBackendClient()

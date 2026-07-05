@@ -20,12 +20,31 @@ from harness.checkpoint import (
     STATUS_OK,
     STATUS_SOFT_CONTINUE,
     CheckpointState,
+    ExperimentReportRecord,
+    SeriesReportRecord,
     TurnCheckpoint,
     is_turn_done,
     load_checkpoint,
     save_checkpoint,
 )
-from harness.client import BackendClient, BackendConnectivityError, BackendTurnError
+from harness.client import (
+    BackendClient,
+    BackendConnectivityError,
+    BackendTurnError,
+    ReportGenerationError,
+)
+from harness.cost import (
+    JUDGE_COST_PER_CALL_USD,
+    BudgetExceededError,
+    CostTracker,
+    check_prerun_budget,
+    estimate_prerun_cost,
+)
+from harness.docker_lifecycle import (
+    DockerLifecycleError,
+    restart_backend,
+    wait_for_health,
+)
 from harness.judge import JudgeUnparseableError, judge_turn
 from harness.manifest import RunManifest, compute_config_hash, compute_run_id, now_iso, save_manifest
 from harness.notify import build_notification_payload, notify
@@ -174,6 +193,84 @@ def _judge_and_post_verdict(
     return verdict, verdict_response.get("feedback_event_id"), None
 
 
+def _generate_series_report(
+    client: BackendClient,
+    error_policy: dict,
+    print_fn: Callable[[str], None],
+    condition: str,
+    series_index: int,
+    experiment_id: str,
+    series_id: str,
+) -> SeriesReportRecord:
+    """
+    Call generate-series for one completed (condition, series_index) and
+    return a SeriesReportRecord regardless of outcome. Failures are
+    governed by error_policy["report_generation"] (soft_continue by
+    default, prominently logged) rather than the generic
+    connectivity/turn_ambiguous categories — a broken report is
+    re-generatable later; an aborted run that otherwise succeeded is not.
+    """
+    try:
+        result = client.generate_series_report(experiment_id, series_id)
+    except ReportGenerationError as exc:
+        policy = error_policy.get("report_generation", "soft_continue")
+        message = (
+            f"series report generation failed for condition={condition} "
+            f"series_index={series_index} (experiment_id={experiment_id} "
+            f"series_id={series_id}): {exc}"
+        )
+        if policy == "hard_stop":
+            raise HardStopError(f"report_generation: {message}") from exc
+        logger.error("runner: %s (soft_continue per error_policy)", message)
+        print_fn(f"  ⚠ SERIES REPORT GENERATION FAILED (soft-continue): {message}")
+        return SeriesReportRecord(
+            condition=condition, series_index=series_index, experiment_id=experiment_id,
+            series_id=series_id, status=STATUS_SOFT_CONTINUE, error=str(exc),
+        )
+
+    print_fn(
+        f"  Series report generated: condition={condition} series_index={series_index} "
+        f"report_id={result.get('report_id')} md={result.get('md_path')}"
+    )
+    return SeriesReportRecord(
+        condition=condition, series_index=series_index, experiment_id=experiment_id,
+        series_id=series_id, status=STATUS_OK, report_id=result.get("report_id"),
+        json_path=result.get("json_path"), md_path=result.get("md_path"),
+    )
+
+
+def _generate_experiment_report(
+    client: BackendClient,
+    error_policy: dict,
+    print_fn: Callable[[str], None],
+    experiment_id: str,
+    control_experiment_ids: Optional[dict],
+) -> ExperimentReportRecord:
+    """Call generate-experiment at experiment close. Same soft-continue-by-default
+    policy as _generate_series_report, via the same error_policy key."""
+    try:
+        result = client.generate_experiment_report(experiment_id, control_experiment_ids)
+    except ReportGenerationError as exc:
+        policy = error_policy.get("report_generation", "soft_continue")
+        message = f"experiment report generation failed (experiment_id={experiment_id}): {exc}"
+        if policy == "hard_stop":
+            raise HardStopError(f"report_generation: {message}") from exc
+        logger.error("runner: %s (soft_continue per error_policy)", message)
+        print_fn(f"  ⚠ EXPERIMENT REPORT GENERATION FAILED (soft-continue): {message}")
+        return ExperimentReportRecord(
+            experiment_id=experiment_id, status=STATUS_SOFT_CONTINUE, error=str(exc),
+        )
+
+    print_fn(
+        f"  Experiment report generated: experiment_id={experiment_id} "
+        f"report_id={result.get('report_id')} md={result.get('md_path')}"
+    )
+    return ExperimentReportRecord(
+        experiment_id=experiment_id, status=STATUS_OK, report_id=result.get("report_id"),
+        json_path=result.get("json_path"), md_path=result.get("md_path"),
+    )
+
+
 def scope_for_dry_run(plan: RunPlan, conditions: list, full_sequence: list) -> tuple:
     """
     Dry-run mode limits execution to dry_run_n turns, 1 series, and the
@@ -196,6 +293,11 @@ def execute_run(
     print_fn: Callable[[str], None] = print,
     judge_client: Optional[Any] = None,
     interactive: bool = False,
+    docker_project_root: Optional[Path] = None,
+    restart_backend_fn: Callable[[Path, dict], None] = restart_backend,
+    wait_for_health_fn: Callable[..., None] = wait_for_health,
+    bank_generation_cost_usd: float = 0.0,
+    judge_cost_per_call: float = JUDGE_COST_PER_CALL_USD,
 ) -> RunOutcome:
     """
     Run the full harness skeleton against `client` and return a RunOutcome.
@@ -210,6 +312,18 @@ def execute_run(
     loaded, every successfully-completed bulk turn is judged and the verdict
     is posted to the backend; interactive=True additionally prompts to
     accept or override each verdict (calibration mode — see --interactive).
+
+    docker_project_root (M19 Phase 3) opts into restarting the backend
+    container with a per-condition EXPERIMENT_ID before each condition's
+    wipe/seed — required for real multi-condition runs, since
+    backend/core/orchestrator.py resolves EXPERIMENT_ID once at process
+    startup with no per-request override. None (the default) skips this
+    entirely, which is what every dry-run/unit-test call site wants.
+
+    bank_generation_cost_usd is the known/estimated Sonnet cost already
+    incurred (or about to be incurred) for this run's prompt bank — 0.0
+    when an existing bank is reused. Combined with a judge-call estimate
+    and checked against plan.budget_cap before any graph mutation.
     """
     probes = probes or []
     config_hash = compute_config_hash(plan)
@@ -238,11 +352,23 @@ def execute_run(
                 plan.random_seed,
             )
 
+    # M19 Phase 3 — deterministic series_id per (condition, series_index),
+    # e.g. "{plan_id}_{condition}_s{series_index}". Covers every condition
+    # in the plan (not just what a scoped dry-run executes) so the manifest
+    # is always a complete map, matching resolved_turn_sequence's use of
+    # full_sequence rather than the scoped one.
+    series_id_map = {
+        f"{condition}:{series_index}": f"{plan.plan_id}_{condition}_s{series_index}"
+        for condition in plan.condition_order
+        for series_index in range(plan.series_count)
+    }
+
     manifest = RunManifest(
         run_id=run_id,
         plan=plan.model_dump(mode="json"),
         config_hash=config_hash,
         resolved_turn_sequence=full_sequence,
+        series_id_map=series_id_map,
     )
     manifest_path = save_manifest(manifest, run_base_dir)
     print_fn(f"Manifest saved: {manifest_path}")
@@ -283,7 +409,30 @@ def execute_run(
         {e.prompt_id: e for e in prompt_bank.validated_entries()} if prompt_bank else None
     )
 
+    # M19 Phase 3 — pre-run budget gate, the very first check, before any
+    # graph mutation or judge preflight (see the Phase 3 run-lifecycle
+    # diagram in BUILD-PLAN.md). n_judge_calls only counts bulk turns —
+    # probes are never judged — across every condition actually scoped to
+    # run (respects dry_run's single-condition scoping).
+    n_judge_calls = (
+        len(conditions) * sum(1 for t in scoped_sequence if t["turn_type"] != TURN_TYPE_PROBE)
+        if judge_client is not None else 0
+    )
+    prerun_estimate = estimate_prerun_cost(bank_generation_cost_usd, n_judge_calls, judge_cost_per_call)
+    print_fn(
+        f"Pre-run cost estimate: bank_generation=${prerun_estimate['bank_generation_cost_usd']:.4f} "
+        f"judge_calls=${prerun_estimate['judge_calls_cost_usd']:.4f} "
+        f"total=${prerun_estimate['estimated_total_cost_usd']:.4f} budget_cap={plan.budget_cap}"
+    )
+    cost_tracker = CostTracker(budget_cap=plan.budget_cap, cumulative_cost_usd=bank_generation_cost_usd)
+
     try:
+        try:
+            check_prerun_budget(prerun_estimate, plan.budget_cap)
+        except BudgetExceededError as exc:
+            error_summary = f"budget_cap: {exc}"
+            raise HardStopError(error_summary) from exc
+
         if prompt_bank_error and error_policy.get("connectivity") == "hard_stop":
             error_summary = prompt_bank_error
             raise HardStopError(error_summary)
@@ -306,8 +455,24 @@ def execute_run(
 
         for condition in conditions:
             print_fn(f"\n=== Condition: {condition} ===")
+            experiment_id = f"{plan.plan_id}_{condition}"
+
+            # M19 Phase 3 — restart the backend with this condition's
+            # EXPERIMENT_ID before touching the graph. Unconditional hard
+            # stop (not subject to error_policy override) — nothing
+            # downstream is trustworthy if the restart itself fails.
+            # docker_project_root=None (the default) skips this entirely.
+            if docker_project_root is not None:
+                try:
+                    restart_backend_fn(docker_project_root, {"EXPERIMENT_ID": experiment_id})
+                    wait_for_health_fn(client)
+                except DockerLifecycleError as exc:
+                    error_summary = f"docker restart failed for condition {condition}: {exc}"
+                    raise HardStopError(error_summary) from exc
+                print_fn(f"Backend restarted for condition={condition} EXPERIMENT_ID={experiment_id}")
+
             try:
-                wipe_result = client.wipe_graph(experiment_id=f"{plan.plan_id}_{condition}")
+                wipe_result = client.wipe_graph(experiment_id=experiment_id)
                 seed_result = client.seed_graph(version="v2")
                 stats = client.graph_stats()
             except BackendConnectivityError as exc:
@@ -325,17 +490,44 @@ def execute_run(
                 f"mu_count={seed_result.get('mu_count')} stats_mu_count={stats.get('mu_count')}"
             )
 
+            # M19 Phase 3 — random_weight control: re-randomize edge weights
+            # at the start of each series (tracked per condition so a
+            # resumed run never re-randomizes a series already in progress).
+            randomized_series_this_condition: set = set()
+
             for turn in scoped_sequence:
                 key = (condition, turn["series_index"], turn["turn_index"])
                 if is_turn_done(checkpoint, *key):
                     continue
 
+                if (
+                    condition == "random_weight"
+                    and turn["series_index"] not in randomized_series_this_condition
+                ):
+                    randomized_series_this_condition.add(turn["series_index"])
+                    try:
+                        randomize_result = client.randomize_edges()
+                        print_fn(
+                            f"  Randomized edge weights for condition={condition} "
+                            f"series_index={turn['series_index']}: "
+                            f"edges_randomized={randomize_result.get('edges_randomized')}"
+                        )
+                    except BackendConnectivityError as exc:
+                        if error_policy.get("connectivity") == "hard_stop":
+                            error_summary = (
+                                f"connectivity during edge randomization for condition="
+                                f"{condition} series_index={turn['series_index']}: {exc}"
+                            )
+                            raise HardStopError(error_summary) from exc
+                        print_fn(f"  edge randomization failed (soft-continue): {exc}")
+
+                series_id = series_id_map[f"{condition}:{turn['series_index']}"]
                 message = build_turn_message(probes, turn, condition, prompt_lookup)
                 status = STATUS_OK
                 detail = None
                 response = None
                 try:
-                    response = client.chat(message)
+                    response = client.chat(message, series_id=series_id)
                     detail = response.get("run_id")
                 except BackendConnectivityError as exc:
                     if error_policy.get("connectivity") == "hard_stop":
@@ -384,6 +576,19 @@ def execute_run(
                                 raise HardStopError(error_summary) from exc
                             judge_error = f"verdict post turn error: {exc}"
 
+                        # M19 Phase 3 — a judge call was made regardless of
+                        # outcome (verdict, unparseable, or a soft-continued
+                        # posting error); local Ollama costs $0/call today
+                        # but the ledger entry + mid-run budget check are
+                        # real, so a hosted judge later is a config change.
+                        # Only reached when the call above didn't hard-stop.
+                        cost_tracker.add_cost("judge_call", judge_cost_per_call)
+                        try:
+                            cost_tracker.check_budget(f"mid-run after turn {key}")
+                        except BudgetExceededError as exc:
+                            error_summary = f"budget_cap: {exc}"
+                            raise HardStopError(error_summary) from exc
+
                 checkpoint.turns.append(TurnCheckpoint(
                     condition=condition,
                     series_index=turn["series_index"],
@@ -400,20 +605,71 @@ def execute_run(
                 verdict_note = f" verdict={verdict_str}" if verdict_str else ""
                 print_fn(f"  turn {key} type={turn['turn_type']} -> {status}{verdict_note}")
 
+                # M19 Phase 3 — series-close reporting. "Complete" is judged
+                # against the plan's true turns_per_series boundary, not the
+                # dry-run-scoped sequence, so a short smoke dry_run_n never
+                # fires this prematurely; a dry run spanning full series
+                # legitimately does (verification protocol item 1).
+                if turn["turn_index"] == plan.turns_per_series - 1:
+                    already_reported = any(
+                        r.condition == condition and r.series_index == turn["series_index"]
+                        for r in checkpoint.series_reports
+                    )
+                    if not already_reported:
+                        try:
+                            report_record = _generate_series_report(
+                                client, error_policy, print_fn,
+                                condition, turn["series_index"], experiment_id, series_id,
+                            )
+                        except HardStopError as exc:
+                            error_summary = str(exc)
+                            raise
+                        checkpoint.series_reports.append(report_record)
+                        save_checkpoint(checkpoint, run_base_dir)
+
+        # M19 Phase 3 — experiment-close reporting. Only meaningful once the
+        # learned condition has actually run this session; skips cleanly
+        # (no call, no error) when scope_for_dry_run limited execution to a
+        # control-only condition list. control_experiment_ids is assembled
+        # deterministically from the manifest's own naming convention, never
+        # asked of the user.
+        if "learned" in conditions:
+            learned_experiment_id = f"{plan.plan_id}_learned"
+            control_experiment_ids = {
+                c: f"{plan.plan_id}_{c}" for c in conditions if c != "learned"
+            } or None
+            try:
+                experiment_report_record = _generate_experiment_report(
+                    client, error_policy, print_fn, learned_experiment_id, control_experiment_ids,
+                )
+            except HardStopError as exc:
+                error_summary = str(exc)
+                raise
+            checkpoint.experiment_report = experiment_report_record
+            save_checkpoint(checkpoint, run_base_dir)
+
     except HardStopError:
         aborted = True
 
     checkpoint.final_status = "aborted" if aborted else "complete"
     save_checkpoint(checkpoint, run_base_dir)
 
+    # M19 Phase 3 — the experiment-close report's md_path becomes report_path
+    # in the notification payload, exactly the field the Phase 0 stub
+    # already defined. None when aborted, skipped, or itself soft-continued.
+    report_path = None
+    if checkpoint.experiment_report is not None and checkpoint.experiment_report.status == STATUS_OK:
+        report_path = checkpoint.experiment_report.md_path
+
     payload = build_notification_payload(
         run_id=run_id,
         status=checkpoint.final_status,
         error_summary=error_summary,
-        report_path=None,
+        report_path=report_path,
     )
     notification_log_path = notify(
-        "harness_run_aborted" if aborted else "harness_run_complete", payload, run_base_dir
+        "harness_run_aborted" if aborted else "harness_run_complete", payload, run_base_dir,
+        channel=plan.notification.channel,
     )
 
     if aborted:

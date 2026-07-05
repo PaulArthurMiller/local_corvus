@@ -156,3 +156,37 @@ def test_judge_unparseable_defaults_to_soft_continue():
 def test_judge_unparseable_error_policy_override_accepted():
     plan = RunPlan(**_base_kwargs(error_policy={"judge_unparseable": "hard_stop"}))
     assert plan.error_policy == {"judge_unparseable": "hard_stop"}
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — notification channel + report_generation error policy key
+# ---------------------------------------------------------------------------
+
+def test_report_generation_defaults_to_soft_continue():
+    from harness.schema import DEFAULT_ERROR_POLICY
+    assert DEFAULT_ERROR_POLICY["report_generation"] == "soft_continue"
+
+
+def test_report_generation_error_policy_override_accepted():
+    plan = RunPlan(**_base_kwargs(error_policy={"report_generation": "hard_stop"}))
+    assert plan.error_policy == {"report_generation": "hard_stop"}
+
+
+def test_notification_channel_defaults_to_log():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.notification.channel == "log"
+
+
+def test_notification_channel_accepts_email_and_webhook():
+    plan_email = RunPlan(**_base_kwargs(notification={"channel": "email"}))
+    plan_webhook = RunPlan(**_base_kwargs(notification={"channel": "webhook"}))
+    assert plan_email.notification.channel == "email"
+    assert plan_webhook.notification.channel == "webhook"
+
+
+def test_invalid_notification_channel_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(notification={"channel": "carrier_pigeon"}))
+    message = format_validation_error(exc_info.value)
+    assert "channel" in message
+    assert "carrier_pigeon" in message

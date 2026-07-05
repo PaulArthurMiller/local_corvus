@@ -1,0 +1,30 @@
+{
+  "plan_id": "phase3-pilot-2026-07-05",
+  "plan_name": "M19 Phase 3 full pilot smoke run",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 1,
+  "turns_per_series": 7,
+  "probe_ratio": 0.3,
+  "probe_placement": "end",
+  "difficulty": {
+    "hop_distance_levels": [0, 1]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": ["learned", "static_weight", "random_weight"],
+  "condition_order": ["learned", "static_weight", "random_weight"],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": null,
+  "prompt_bank_path": "prompt_banks/prompt_bank_3a3c7eb69111a3891c7bc399758b539953164548a5b2db269c643bcb51c2c511.json",
+  "dry_run": false,
+  "random_seed": 42
+}

@@ -23,10 +23,15 @@ VALID_PROBE_PLACEMENTS = ("random", "end", "fixed_checkpoints")
 # "turn_ambiguous" covers a single per-turn result that is malformed or missing.
 # "judge_unparseable" (M19 Phase 2) covers a judge response that fails to
 # parse into a valid verdict even after one re-ask.
+# "report_generation" (M19 Phase 3) covers a series/experiment report call
+# failing — defaults to soft_continue regardless of the "connectivity"
+# default, since a broken report is re-generatable later but an aborted
+# run (that otherwise succeeded) is not.
 DEFAULT_ERROR_POLICY = {
     "connectivity": "hard_stop",
     "turn_ambiguous": "soft_continue",
     "judge_unparseable": "soft_continue",
+    "report_generation": "soft_continue",
 }
 VALID_ERROR_ACTIONS = ("hard_stop", "soft_continue")
 
@@ -81,8 +86,24 @@ class JudgeConfig(BaseModel):
     )
 
 
+VALID_NOTIFICATION_CHANNELS = ("log", "email", "webhook")
+
+
 class NotificationConfig(BaseModel):
     enabled: bool = True
+    # M19 Phase 3 — "email"/"webhook" are validated here but not yet
+    # implemented; notify.py falls back to "log" with a logged warning so
+    # wiring a real channel later is one new handler function, no refactor.
+    channel: str = "log"
+
+    @field_validator("channel")
+    @classmethod
+    def _validate_channel(cls, v: str) -> str:
+        if v not in VALID_NOTIFICATION_CHANNELS:
+            raise ValueError(
+                f"notification.channel must be one of {VALID_NOTIFICATION_CHANNELS}, got {v!r}"
+            )
+        return v
 
 
 class PromptGenConfig(BaseModel):

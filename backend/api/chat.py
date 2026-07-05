@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from analytics.feedback_events import FeedbackEvent, record_feedback_event
 from core.orchestrator import AttachmentInput, run_interaction
-from core.session import create_session, get_session
+from core.session import get_or_create_session
 from learning.simple_rl import SimpleRL
 from memory.store import store as graph_store
 
@@ -90,18 +90,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
     core/orchestrator.py.
     """
     # --- Series resolution (series_id is what was previously called session_id) ---
-    if request.series_id:
-        session = get_session(request.series_id)
-        if session is None:
-            logger.warning(
-                "chat: unknown series_id=%s — creating new series",
-                request.series_id,
-            )
-            series_id = create_session()
-        else:
-            series_id = session.session_id
-    else:
-        series_id = create_session()
+    # get_or_create_session honors a caller-supplied series_id even on its
+    # first use (M19 harness passes a deterministic series_id on every
+    # call) rather than discarding it and minting a random UUID — while
+    # still behaving exactly like a fresh create_session() when the chat
+    # UI sends no series_id at all.
+    series_id = get_or_create_session(request.series_id)
 
     logger.info(
         "chat: series_id=%s message_len=%d attachments=%d",

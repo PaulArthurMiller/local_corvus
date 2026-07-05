@@ -60,6 +60,32 @@ def get_session(session_id: str) -> Optional[Session]:
     return session
 
 
+def get_or_create_session(requested_id: Optional[str] = None) -> str:
+    """
+    Return `requested_id` if it's already a registered session; otherwise
+    create a new session and return its ID.
+
+    When `requested_id` is given but not yet registered, the new session
+    is created *using that exact ID* rather than a fresh UUID — this is
+    what lets a caller (e.g. the M19 experiment harness's deterministic
+    `{plan_id}_{condition}_s{series_index}`) supply its own series
+    identifier and have every subsequent call with that same ID land in
+    the same session, instead of silently minting a new random UUID on
+    every call because the ID was never seen before.
+
+    When `requested_id` is None, behaves exactly like create_session().
+    """
+    if requested_id and requested_id in _sessions:
+        return requested_id
+    sid = requested_id or str(uuid.uuid4())
+    _sessions[sid] = Session(
+        session_id=sid,
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    logger.info("session: created session_id=%s (caller_supplied=%s)", sid, bool(requested_id))
+    return sid
+
+
 def get_session_messages(session_id: str) -> list[dict]:
     """
     Return a copy of the message history for the session.

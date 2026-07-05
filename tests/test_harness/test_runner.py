@@ -6,11 +6,14 @@ BackendClient so no real Docker stack is required.
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
 from harness.checkpoint import STATUS_OK, STATUS_SOFT_CONTINUE, load_checkpoint
-from harness.client import BackendConnectivityError, BackendTurnError
+from harness.client import BackendConnectivityError, BackendTurnError, ReportGenerationError
+from harness.docker_lifecycle import DockerLifecycleError
+from harness.manifest import load_manifest
 from harness.prompt_bank import PromptBank, PromptBankEntry, save_bank
 from harness.runner import execute_run
 from harness.schema import RunPlan
@@ -19,17 +22,28 @@ from harness.schema import RunPlan
 class FakeBackendClient:
     """Duck-typed stand-in for harness.client.BackendClient."""
 
-    def __init__(self, health_error=None, wipe_error=None, seed_error=None, chat_errors=None, verdict_errors=None):
+    def __init__(
+        self, health_error=None, wipe_error=None, seed_error=None, chat_errors=None,
+        verdict_errors=None, series_report_error=None, experiment_report_error=None,
+        randomize_error=None,
+    ):
         self.health_error = health_error
         self.wipe_error = wipe_error
         self.seed_error = seed_error
         self.chat_errors = chat_errors or {}  # call-index -> exception instance
         self.verdict_errors = verdict_errors or {}  # call-index -> exception instance
+        self.series_report_error = series_report_error
+        self.experiment_report_error = experiment_report_error
+        self.randomize_error = randomize_error
         self.chat_call_count = 0
         self.chat_messages = []
+        self.chat_series_ids = []
         self.wipe_calls = []
         self.seed_calls = 0
         self.verdict_calls = []
+        self.series_report_calls = []
+        self.experiment_report_calls = []
+        self.randomize_calls = 0
 
     def health(self):
         if self.health_error:
@@ -55,6 +69,7 @@ class FakeBackendClient:
         idx = self.chat_call_count
         self.chat_call_count += 1
         self.chat_messages.append(message)
+        self.chat_series_ids.append(series_id)
         if idx in self.chat_errors:
             raise self.chat_errors[idx]
         return {"run_id": f"run-{idx}", "response": "placeholder response"}
@@ -65,6 +80,36 @@ class FakeBackendClient:
         if idx in self.verdict_errors:
             raise self.verdict_errors[idx]
         return {"feedback_event_id": f"fbevent-{idx}"}
+
+    def generate_series_report(self, experiment_id, series_id):
+        self.series_report_calls.append((experiment_id, series_id))
+        if self.series_report_error:
+            raise self.series_report_error
+        idx = len(self.series_report_calls)
+        return {
+            "report_id": f"series-report-{idx}",
+            "json_path": f"/reports/series-{idx}.json",
+            "md_path": f"/reports/series-{idx}.md",
+            "run_count": 5,
+        }
+
+    def generate_experiment_report(self, experiment_id, control_experiment_ids=None):
+        self.experiment_report_calls.append((experiment_id, control_experiment_ids))
+        if self.experiment_report_error:
+            raise self.experiment_report_error
+        idx = len(self.experiment_report_calls)
+        return {
+            "report_id": f"experiment-report-{idx}",
+            "json_path": f"/reports/experiment-{idx}.json",
+            "md_path": f"/reports/experiment-{idx}.md",
+            "series_count": 2,
+        }
+
+    def randomize_edges(self):
+        self.randomize_calls += 1
+        if self.randomize_error:
+            raise self.randomize_error
+        return {"edges_randomized": 32}
 
 
 def _plan(**overrides):
@@ -489,3 +534,284 @@ def test_probe_turns_are_never_judged(tmp_path):
     assert client.verdict_calls == []
     assert judge_client.calls == []
     assert all(t.verdict is None for t in outcome.checkpoint.turns)
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — series_id wiring + manifest series_id_map
+# ---------------------------------------------------------------------------
+
+def test_chat_receives_deterministic_series_id(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2, probe_ratio=0.0)
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.chat_series_ids == ["p1_learned_s0", "p1_learned_s0"]
+
+
+def test_manifest_records_series_id_map_for_all_conditions_and_series(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1)
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    manifest = load_manifest(outcome.run_id, tmp_path)
+    assert manifest.series_id_map["learned:0"] == "p1_learned_s0"
+    assert manifest.series_id_map["learned:1"] == "p1_learned_s1"
+    assert manifest.series_id_map["static_weight:0"] == "p1_static_weight_s0"
+    assert manifest.series_id_map["static_weight:1"] == "p1_static_weight_s1"
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — series-close + experiment-close reporting
+# ---------------------------------------------------------------------------
+
+def test_series_completion_triggers_series_report_with_correct_ids(tmp_path):
+    # dry_run_n == turns_per_series (5): the full series_index=0 completes,
+    # unlike the shorter dry runs elsewhere which never reach the last turn.
+    plan = _plan(dry_run=True, dry_run_n=5)
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.series_report_calls == [("p1_learned", "p1_learned_s0")]
+    assert len(outcome.checkpoint.series_reports) == 1
+    record = outcome.checkpoint.series_reports[0]
+    assert record.condition == "learned"
+    assert record.series_index == 0
+    assert record.status == STATUS_OK
+    assert record.report_id == "series-report-1"
+    assert record.md_path == "/reports/series-1.md"
+
+
+def test_multi_series_full_run_generates_one_series_report_per_series(tmp_path):
+    plan = _plan(series_count=2, turns_per_series=2, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.series_report_calls == [
+        ("p1_learned", "p1_learned_s0"),
+        ("p1_learned", "p1_learned_s1"),
+    ]
+    assert len(outcome.checkpoint.series_reports) == 2
+
+
+def test_series_report_failure_soft_continues_and_checkpoint_records_error(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=5)
+    client = FakeBackendClient(series_report_error=ReportGenerationError("bogus series_id"))
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"  # the run itself still completes
+    assert len(outcome.checkpoint.series_reports) == 1
+    record = outcome.checkpoint.series_reports[0]
+    assert record.status == STATUS_SOFT_CONTINUE
+    assert "bogus series_id" in record.error
+
+
+def test_series_report_failure_hard_stops_when_policy_overridden(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=5, error_policy={"report_generation": "hard_stop"})
+    client = FakeBackendClient(series_report_error=ReportGenerationError("boom"))
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "report_generation" in outcome.error_summary
+
+
+def test_experiment_close_calls_generate_experiment_with_control_ids(tmp_path):
+    plan = _plan(
+        series_count=1, turns_per_series=1, probe_ratio=0.0,
+        conditions=["learned", "static_weight", "random_weight"],
+    )
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.experiment_report_calls == [
+        ("p1_learned", {"static_weight": "p1_static_weight", "random_weight": "p1_random_weight"})
+    ]
+    assert outcome.checkpoint.experiment_report.status == STATUS_OK
+    assert outcome.checkpoint.experiment_report.md_path == "/reports/experiment-1.md"
+
+
+def test_experiment_close_skipped_when_learned_condition_did_not_run(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, conditions=["static_weight"])
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.experiment_report_calls == []
+    assert outcome.checkpoint.experiment_report is None
+
+
+def test_hard_stop_mid_run_skips_experiment_close_but_still_notifies_aborted(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2)
+    client = FakeBackendClient(health_error=BackendConnectivityError("down"))
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert client.experiment_report_calls == []
+    assert outcome.checkpoint.experiment_report is None
+    assert outcome.notification_log_path.exists()
+    lines = outcome.notification_log_path.read_text(encoding="utf-8").strip().splitlines()
+    last_record = json.loads(lines[-1])
+    assert last_record["status"] == "aborted"
+    assert last_record["report_path"] is None
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — random_weight edge randomization
+# ---------------------------------------------------------------------------
+
+def test_random_weight_condition_randomizes_edges_once_per_series(tmp_path):
+    plan = _plan(series_count=2, turns_per_series=2, probe_ratio=0.0, conditions=["random_weight"])
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.randomize_calls == 2  # once per series, not once per turn
+
+
+def test_non_random_weight_conditions_never_randomize_edges(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2)
+    client = FakeBackendClient()
+
+    execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert client.randomize_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — Docker lifecycle (per-condition EXPERIMENT_ID restart)
+# ---------------------------------------------------------------------------
+
+def test_docker_restart_called_once_per_condition_when_project_root_given(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1)  # dry-run scopes to one condition ("learned")
+    client = FakeBackendClient()
+    restart_calls = []
+    health_calls = []
+
+    def fake_restart(project_root, env_overrides):
+        restart_calls.append((project_root, env_overrides))
+
+    def fake_wait(client_arg):
+        health_calls.append(client_arg)
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        docker_project_root=Path("/fake/project"),
+        restart_backend_fn=fake_restart, wait_for_health_fn=fake_wait,
+    )
+
+    assert outcome.status == "complete"
+    assert restart_calls == [(Path("/fake/project"), {"EXPERIMENT_ID": "p1_learned"})]
+    assert len(health_calls) == 1
+
+
+def test_docker_restart_skipped_by_default(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1)
+    client = FakeBackendClient()
+    calls = []
+
+    execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        restart_backend_fn=lambda *a, **k: calls.append(a),
+    )
+
+    assert calls == []  # docker_project_root defaults to None
+
+
+def test_docker_restart_failure_hard_stops_before_wipe(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1)
+    client = FakeBackendClient()
+
+    def failing_restart(project_root, env_overrides):
+        raise DockerLifecycleError("docker compose up failed")
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        docker_project_root=Path("/fake/project"), restart_backend_fn=failing_restart,
+    )
+
+    assert outcome.status == "aborted"
+    assert "docker restart failed" in outcome.error_summary
+    assert client.wipe_calls == []
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — budget_cap enforcement
+# ---------------------------------------------------------------------------
+
+def test_budget_cap_prerun_over_estimate_hard_stops_with_zero_client_calls(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2, budget_cap=0.01)
+    client = FakeBackendClient()
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, bank_generation_cost_usd=5.0,
+    )
+
+    assert outcome.status == "aborted"
+    assert "budget_cap" in outcome.error_summary
+    assert client.wipe_calls == []
+    assert client.chat_call_count == 0
+
+
+def test_budget_cap_none_never_stops_even_with_high_bank_cost(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, budget_cap=None)
+    client = FakeBackendClient()
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, bank_generation_cost_usd=99999.0,
+    )
+
+    assert outcome.status == "complete"
+
+
+def test_budget_cap_exceeded_by_projected_judge_costs_hard_stops_before_any_turns(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", n=3)
+    plan = _plan(
+        dry_run=True, dry_run_n=3, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"], budget_cap=0.03,
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "up", "rationale": "ok", "criterion_triggered": None} for _ in range(3)]
+    )
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        judge_cost_per_call=0.02,  # 3 bulk turns x $0.02 = $0.06 > $0.03 cap
+    )
+
+    assert outcome.status == "aborted"
+    assert "budget_cap" in outcome.error_summary
+    assert client.chat_call_count == 0  # caught before any graph mutation or turn
+
+
+def test_budget_cap_within_estimate_allows_judge_calls_to_proceed(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", n=2)
+    plan = _plan(
+        dry_run=True, dry_run_n=2, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"], budget_cap=1.0,
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "up", "rationale": "ok", "criterion_triggered": None} for _ in range(2)]
+    )
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        judge_cost_per_call=0.01,
+    )
+
+    assert outcome.status == "complete"
+    assert len(client.verdict_calls) == 2

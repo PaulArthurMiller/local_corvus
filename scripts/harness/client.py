@@ -25,6 +25,18 @@ class BackendTurnError(Exception):
     """A single ambiguous/missing per-turn result — soft-continue by default."""
 
 
+class ReportGenerationError(Exception):
+    """
+    A series/experiment report call failed (M19 Phase 3).
+
+    Deliberately not a BackendConnectivityError/BackendTurnError — report
+    failures are governed by the dedicated error_policy["report_generation"]
+    key (soft_continue by default) regardless of what the "connectivity"
+    default is set to, since a broken report can be re-generated later but
+    an aborted run cannot be re-run for free.
+    """
+
+
 class BackendClient:
     # Chat calls go through Ollama inference and can run well past a generic
     # HTTP timeout, especially on a cold model load — give them their own,
@@ -165,3 +177,52 @@ class BackendClient:
             raise BackendTurnError(f"feedback/verdict response missing feedback_event_id: {data}")
 
         return data
+
+    def generate_series_report(self, experiment_id: str, series_id: str) -> dict:
+        """POST /admin/reports/generate-series (M13). Raises ReportGenerationError
+        on any failure — never BackendConnectivityError/BackendTurnError, so the
+        caller applies error_policy["report_generation"] instead of the generic
+        connectivity/turn_ambiguous categories."""
+        try:
+            resp = self._client.post(
+                "/admin/reports/generate-series",
+                json={"experiment_id": experiment_id, "series_id": series_id},
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as exc:
+            raise ReportGenerationError(
+                f"generate-series report failed (experiment_id={experiment_id!r} "
+                f"series_id={series_id!r}): {exc}"
+            ) from exc
+
+    def generate_experiment_report(
+        self, experiment_id: str, control_experiment_ids: Optional[dict] = None
+    ) -> dict:
+        """POST /admin/reports/generate-experiment (M14-16). See generate_series_report
+        for why this raises ReportGenerationError rather than the generic categories."""
+        try:
+            resp = self._client.post(
+                "/admin/reports/generate-experiment",
+                json={
+                    "experiment_id": experiment_id,
+                    "control_experiment_ids": control_experiment_ids,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as exc:
+            raise ReportGenerationError(
+                f"generate-experiment report failed (experiment_id={experiment_id!r}): {exc}"
+            ) from exc
+
+    def randomize_edges(self) -> dict:
+        """POST /admin/edges/randomize — resets all edge weights to uniform
+        random [0, 1]. Called at the start of each series in the
+        random_weight control condition."""
+        try:
+            resp = self._client.post("/admin/edges/randomize")
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as exc:
+            raise BackendConnectivityError(f"edges/randomize failed: {exc}") from exc

@@ -46,6 +46,11 @@ class RunManifest(BaseModel):
     config_hash: str
     resolved_turn_sequence: list[dict] = Field(default_factory=list)
     created_at: str = Field(default_factory=now_iso)
+    # M19 Phase 3 — deterministic series_id per (condition, series_index),
+    # keyed "{condition}:{series_index}" -> series_id. Recorded up front
+    # (covers every condition/series in the plan, not just what a scoped
+    # dry-run actually executes) so a run is fully auditable after the fact.
+    series_id_map: dict[str, str] = Field(default_factory=dict)
 
 
 def run_dir_for(run_id: str, base_dir: Path) -> Path:

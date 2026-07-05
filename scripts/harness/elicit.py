@@ -19,6 +19,7 @@ from harness.schema import (
     DifficultyConfig,
     JudgeConfig,
     NotificationConfig,
+    PromptGenConfig,
     RunPlan,
 )
 
@@ -153,6 +154,14 @@ def elicit_plan(input_fn: InputFn = input, print_fn=print) -> RunPlan:
     budget_cap_raw = _ask_optional(input_fn, "budget_cap (blank = none)", None)
     budget_cap = float(budget_cap_raw) if budget_cap_raw else None
 
+    print_fn("\n--- prompt bank (M19 Phase 1) ---")
+    prompt_bank_path = _ask_optional(
+        input_fn, "prompt_bank_path (blank = auto-generate before the run)", None
+    )
+    pg_model = _ask(input_fn, "prompt_gen.model", "claude-sonnet-5")
+    pg_max_retries = _ask_int(input_fn, "prompt_gen.max_retries", 2)
+    prompt_gen = PromptGenConfig(model=pg_model, max_retries=pg_max_retries)
+
     print_fn("\n--- execution ---")
     dry_run = _ask_bool(input_fn, "dry_run", False)
     dry_run_n = _ask_int(input_fn, "dry_run_n", 2)
@@ -176,6 +185,8 @@ def elicit_plan(input_fn: InputFn = input, print_fn=print) -> RunPlan:
         error_policy=error_policy,
         notification=notification,
         budget_cap=budget_cap,
+        prompt_bank_path=prompt_bank_path,
+        prompt_gen=prompt_gen,
         dry_run=dry_run,
         dry_run_n=dry_run_n,
         random_seed=random_seed,

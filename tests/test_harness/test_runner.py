@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"
 
 from harness.checkpoint import STATUS_OK, STATUS_SOFT_CONTINUE, load_checkpoint
 from harness.client import BackendConnectivityError, BackendTurnError
+from harness.prompt_bank import PromptBank, PromptBankEntry, save_bank
 from harness.runner import execute_run
 from harness.schema import RunPlan
 
@@ -225,3 +226,43 @@ def test_probe_placeholder_content_used_for_probe_turns(tmp_path):
 
     assert outcome.status == "complete"
     assert any("What is the format rule?" in m for m in client.chat_messages)
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 1 — prompt bank wiring
+# ---------------------------------------------------------------------------
+
+def _write_bank(tmp_path, n=5):
+    entries = [
+        PromptBankEntry(
+            prompt_id=f"cluster_a_{i:04d}", cluster_id="cluster_a",
+            prompt_text=f"real bank prompt {i}", hop_distance=0,
+            criteria=["c1"], seed_fixture_version="v2",
+            generated_by="claude-sonnet-5@2026-07-04", validated=True,
+        )
+        for i in range(n)
+    ]
+    bank = PromptBank(entries=entries, generation_params={}, content_hash="testhash123")
+    return save_bank(bank, tmp_path)
+
+
+def test_bulk_turn_message_equals_bank_entrys_prompt_text(tmp_path):
+    bank_path = _write_bank(tmp_path / "banks")
+    plan = _plan(dry_run=True, dry_run_n=3, probe_ratio=0.0, prompt_bank_path=str(bank_path))
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert all(m.startswith("real bank prompt ") for m in client.chat_messages)
+
+
+def test_missing_prompt_bank_file_hard_stops_before_wipe_graph_is_called(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2, prompt_bank_path=str(tmp_path / "does_not_exist.json"))
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "prompt bank" in outcome.error_summary
+    assert client.wipe_calls == []

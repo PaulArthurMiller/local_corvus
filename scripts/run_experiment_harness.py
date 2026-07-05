@@ -31,6 +31,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from harness.client import BackendClient  # noqa: E402
 from harness.elicit import elicit_plan, offer_to_save_plan  # noqa: E402
+from harness.prompt_bank import bank_path_for_hash  # noqa: E402
+from harness.prompt_gen import generate_bank_for_plan  # noqa: E402
 from harness.runner import execute_run, load_probe_prompts  # noqa: E402
 from harness.schema import RunPlan, format_validation_error  # noqa: E402
 
@@ -42,6 +44,8 @@ logger = logging.getLogger("run_experiment_harness")
 DEFAULT_BACKEND_URL = "http://localhost:8000"
 RUNS_DIR = PROJECT_ROOT / "harness_runs"
 PROBE_SET_PATH = PROJECT_ROOT / "probes" / "probe_set_v2.yaml"
+PROMPT_BANKS_DIR = PROJECT_ROOT / "prompt_banks"
+SEED_FIXTURE_PATH = PROJECT_ROOT / "seed_fixtures" / "seed_v2.json.gz"
 
 
 def load_plan_from_file(plan_path: Path) -> RunPlan:
@@ -66,10 +70,14 @@ def load_plan_from_file(plan_path: Path) -> RunPlan:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Local Corvus experiment harness (M19 Phase 0)")
+    parser = argparse.ArgumentParser(description="Local Corvus experiment harness (M19 Phase 0-1)")
     parser.add_argument("--plan", type=str, default=None, help="Path to a run plan JSON file")
     parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode regardless of the plan")
     parser.add_argument("--backend-url", type=str, default=DEFAULT_BACKEND_URL)
+    parser.add_argument(
+        "--generate-bank", action="store_true",
+        help="Generate (or reuse) the prompt bank for the given plan, then exit without running an experiment",
+    )
     args = parser.parse_args()
 
     if args.plan:
@@ -80,6 +88,17 @@ def main() -> None:
 
     if args.dry_run:
         plan.dry_run = True
+
+    if args.generate_bank:
+        generate_bank_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
+        return
+
+    # If the plan doesn't name an existing bank and wants "auto" subjects,
+    # generate one now (cost-confirmation gate happens inside prompt_gen.py)
+    # before any wipe/seed call.
+    if not plan.prompt_bank_path and plan.conceptual_fields.subjects == "auto":
+        bank = generate_bank_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
+        plan.prompt_bank_path = str(bank_path_for_hash(bank.content_hash, PROMPT_BANKS_DIR))
 
     probes = load_probe_prompts(PROBE_SET_PATH)
     logger.info("run_experiment_harness: loaded %d probe prompt(s) for placeholder content", len(probes))

@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
 from harness.schema import RunPlan
-from harness.turn_resolution import resolve_turn_sequence
+from harness.turn_resolution import TURN_TYPE_BULK, assign_prompt_ids, resolve_turn_sequence
 
 
 def _plan(**overrides):
@@ -88,3 +88,68 @@ def test_probe_turns_never_flagged_for_feedback_by_construction():
     bulk_turns = [t for t in seq if t["turn_type"] == "bulk"]
     assert probe_turns and bulk_turns
     assert set(t["turn_type"] for t in seq) == {"probe", "bulk"}
+
+
+# ---------------------------------------------------------------------------
+# assign_prompt_ids — M19 Phase 1 deterministic prompt_id assignment
+# ---------------------------------------------------------------------------
+
+def _bank_ids(n):
+    return [f"cluster_a_{i:04d}" for i in range(n)]
+
+
+def test_assign_prompt_ids_same_seed_produces_same_sequence():
+    plan = _plan(probe_placement="end", probe_ratio=0.2, turns_per_series=10)
+    seq = resolve_turn_sequence(plan)
+    prompt_ids = _bank_ids(5)
+
+    assigned_1 = assign_prompt_ids(seq, prompt_ids, random_seed=42)
+    assigned_2 = assign_prompt_ids(seq, prompt_ids, random_seed=42)
+
+    assert assigned_1 == assigned_2
+
+
+def test_assign_prompt_ids_different_seed_produces_different_sequence():
+    plan = _plan(probe_placement="end", probe_ratio=0.2, turns_per_series=10)
+    seq = resolve_turn_sequence(plan)
+    prompt_ids = _bank_ids(10)
+
+    assigned_a = assign_prompt_ids(seq, prompt_ids, random_seed=1)
+    assigned_b = assign_prompt_ids(seq, prompt_ids, random_seed=2)
+
+    ids_a = [t.get("prompt_id") for t in assigned_a if t["turn_type"] == TURN_TYPE_BULK]
+    ids_b = [t.get("prompt_id") for t in assigned_b if t["turn_type"] == TURN_TYPE_BULK]
+    assert ids_a != ids_b
+
+
+def test_assign_prompt_ids_only_assigns_bulk_turns():
+    plan = _plan(probe_placement="end", probe_ratio=0.2, turns_per_series=10)
+    seq = resolve_turn_sequence(plan)
+    assigned = assign_prompt_ids(seq, _bank_ids(5), random_seed=42)
+
+    for turn in assigned:
+        if turn["turn_type"] == TURN_TYPE_BULK:
+            assert "prompt_id" in turn
+        else:
+            assert "prompt_id" not in turn
+
+
+def test_assign_prompt_ids_bank_smaller_than_bulk_turns_reshuffles_without_crashing():
+    plan = _plan(probe_placement="end", probe_ratio=0.1, turns_per_series=20, series_count=1)
+    seq = resolve_turn_sequence(plan)
+    bulk_turn_count = sum(1 for t in seq if t["turn_type"] == TURN_TYPE_BULK)
+    prompt_ids = _bank_ids(3)
+    assert bulk_turn_count > len(prompt_ids)
+
+    assigned = assign_prompt_ids(seq, prompt_ids, random_seed=42)
+    assigned_ids = [t["prompt_id"] for t in assigned if t["turn_type"] == TURN_TYPE_BULK]
+
+    assert len(assigned_ids) == bulk_turn_count
+    assert set(assigned_ids) == set(prompt_ids)  # every id used at least once via reshuffling
+
+
+def test_assign_prompt_ids_empty_bank_returns_sequence_unchanged():
+    plan = _plan(probe_placement="end", probe_ratio=0.2, turns_per_series=10)
+    seq = resolve_turn_sequence(plan)
+    assigned = assign_prompt_ids(seq, [], random_seed=42)
+    assert assigned == seq

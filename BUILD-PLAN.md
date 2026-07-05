@@ -3080,11 +3080,636 @@ Required behavior:
 
 ---
 
+# Local Corvus — Milestone 19, Phases 1–3
+## Prompt Bank → Judge → Full Pilot
+
+Planned by /planner on 2026-07-04, from the M19 Phases 1–3 overview.
+Phase 0 (harness skeleton) is complete; these three phases fill in the
+skeleton's placeholders with real content, real judging, and real reporting.
+
+### How the three phases fit together
+
+```
+                    M19 PHASE MAP (1 → 2 → 3, hard dependency chain)
+═══════════════════════════════════════════════════════════════════════════════
+
+ PHASE 1: what goes IN          PHASE 2: what comes BACK       PHASE 3: what it MEANS
+ (prompt bank)                  (judge verdicts)               (reports + pilot)
+
+ seed_v2.json.gz                Gemma response per bulk turn   series complete
+      │                              │                              │
+      ▼                              ▼                              ▼
+ Sonnet generates            Gemma judge evaluates          POST /admin/reports/
+ prompts + criteria          against Phase 1 criteria        generate-series
+ per cluster                        │                              │
+      │                             ▼                        all conditions done
+      ▼                      verdict logged to                     │
+ validation pass             feedback_events                       ▼
+ (coherence + lexical)       (ALL conditions)                POST /admin/reports/
+      │                             │                        generate-experiment
+      ▼                             ▼                        (+ control shadow)
+ prompt_banks/               learned condition ONLY:               │
+ prompt_bank_{hash}.json     weight update fires                   ▼
+      │                             │                         notify() with
+      └──── harness draws ──────────┴──── budget cap ──────── report_path
+            bulk turns                    watches all
+```
+
+**Why this order is a hard chain:** the judge (Phase 2) evaluates responses
+*against the criteria attached to each prompt* — no prompt bank, nothing to
+judge against. The reports (Phase 3) are only meaningful once verdicts and
+weight updates exist — a series report over placeholder turns with no feedback
+events measures nothing. Do not parallelize or reorder.
+
+**Where each phase's code lives.** All three phases extend the same harness
+package built in Phase 0. Nothing moves; new modules slot in beside existing
+ones:
+
+```
+scripts/harness/
+├── schema.py          ← extended each phase (RunPlan is the config contract)
+├── runner.py          ← extended each phase (the orchestration loop)
+├── client.py          ← extended Phase 2 + 3 (new backend endpoints)
+├── prompt_gen.py      ← NEW Phase 1 (Sonnet generation + validation)
+├── prompt_bank.py     ← NEW Phase 1 (bank schema, load/save, content hash)
+├── judge.py           ← NEW Phase 2 (Ollama judge call + verdict parsing)
+├── cost.py            ← NEW Phase 3 (cost estimate + budget-cap tracking;
+│                         Phase 1 ships a simple estimate function it absorbs)
+├── notify.py          ← extended Phase 3 (channel dispatch)
+├── checkpoint.py      ← minor extension Phase 3 (report paths)
+├── manifest.py        ← minor extension Phase 1 (prompt_id in sequence)
+├── turn_resolution.py ← extended Phase 1 (prompt_id assignment)
+└── elicit.py          ← extended as schema grows (new fields prompted)
+```
+
+Backend changes are deliberately small: Phase 2 adds a `feedback_events`
+migration + one endpoint; Phase 3 adds nothing server-side (report endpoints
+already exist from M13–M16).
+
+---
+
+### Milestone 19 Phase 1 — Prompt Bank Generation + Validation
+
+**Branch:** `milestone-19-phase-1-prompt-bank`
+
+**Why now:** The harness runs end-to-end but every bulk turn says "[Phase 0
+placeholder]". Nothing downstream (judging, learning, reports) means anything
+until the agent is answering real, cluster-grounded questions with
+machine-checkable criteria attached. This is also the only phase with real
+external API cost, so the cost-estimate guard is built here, where it's first
+needed.
+
+**The key boundary to understand:** Sonnet is a *fixture builder*, not a
+runtime dependency. It runs once per (seed fixture version + generation
+params), host-side, from your terminal — never from inside Docker, never
+during an experiment turn. The architecture rule "no external API calls"
+applies to the agent under study (Gemma); the prompt bank is built *before*
+the experiment starts, the same way `generate_seed_v2.py` built the seed
+fixture. Once the bank file exists, runs are fully offline again.
+
+```
+GENERATION FLOW (one-time, host-side, before any experiment)
+─────────────────────────────────────────────────────────────
+
+seed_fixtures/seed_v2.json.gz          scripts/generate_seed_v2.py
+(34 MUs, 4 clusters, cluster_id        (CLUSTER_A_FP..D_FP fingerprint
+ on every MU)                           vocabulary — reused, not rebuilt)
+        │                                        │
+        ▼                                        │
+  prompt_gen.py reads cluster MU content         │
+        │                                        │
+        ▼                                        │
+  COST ESTIMATE printed → user confirms [y/N] ───┼─── abort = no API calls,
+        │                                        │    no charges, no files
+        ▼                                        │
+  per cluster: 1 Sonnet call                     │
+  → N prompts, each with 1–3 criteria            │
+    + hop_distance per plan config               │
+        │                                        │
+        ▼                                        ▼
+  validation:                          lexical-distinctness check is
+  ├─ Sonnet call per prompt:           PURE PYTHON — prompt for cluster A
+  │  "coherent + answerable            must contain zero fingerprint terms
+  │   from this cluster content?"      from clusters B/C/D. Deterministic,
+  └─ fingerprint scan (local) ─────────free, testable without mocking.
+        │
+        ├─ fail → regenerate (up to retry limit) → still failing:
+        │         logged + excluded, never silently dropped
+        ▼
+  prompt_banks/prompt_bank_{hash}.json     ← immutable, reusable artifact
+  hash = sha256(fixture manifest hash + generation params)
+```
+
+**Why the lexical check matters (the "why" behind the fingerprint scan):**
+retrieval attribution in this experiment works by BM25 keyword entry points.
+If a prompt aimed at cluster A accidentally contains cluster C's vocabulary
+("rule", "constraint", …), BM25 will surface cluster C MUs and the
+hop-distance measurement is corrupted — you can no longer tell whether the
+graph *learned* a connection or the prompt *leaked* one. The fingerprint
+vocabularies in `generate_seed_v2.py` (`CLUSTER_A_FP` … `CLUSTER_D_FP`)
+already define exactly what "cluster C vocabulary" means, so the check is a
+set-intersection in Python, not an LLM judgment call.
+
+**Build:**
+
+1. **`scripts/harness/prompt_bank.py`** — the artifact layer, no API calls:
+   - `PromptBankEntry` pydantic model: `prompt_id`, `cluster_id`,
+     `prompt_text`, `hop_distance`, `criteria: list[str]` (1–3, validated),
+     `seed_fixture_version`, `generated_by` (model name + date),
+     `validated: bool`.
+   - `PromptBank` model: entries + generation params + `content_hash`.
+   - `compute_bank_hash(fixture_manifest_hash, params) -> str`,
+     `save_bank()`, `load_bank(path)` with specific, field-identifying
+     validation errors (same convention as `schema.py`).
+   - Excluded prompts are retained in the file with `validated: false` and an
+     `exclusion_reason` — auditable, never silently dropped; the runner only
+     ever draws `validated: true` entries.
+
+2. **`scripts/harness/prompt_gen.py`** — the generator (only file that talks
+   to the Anthropic API):
+   - Reads cluster MU content directly from `seed_fixtures/seed_v2.json.gz`
+     (host-side file read, mirrors `verify_seed_v2.py` convention — no
+     backend dependency, works with Docker down).
+   - Imports the fingerprint constants from `generate_seed_v2.py` (they are
+     module-level data behind a main guard). If import proves awkward,
+     extract them to a small shared `scripts/cluster_fingerprints.py` — but
+     try the import first; one source of truth beats a copy.
+   - Model: `claude-sonnet-5` via the `anthropic` Python SDK (new dev
+     dependency, host-side only — do NOT add to `backend/requirements.txt`
+     or the Docker image). API key from `ANTHROPIC_API_KEY` env var;
+     fail fast with a clear message if absent, before any other work.
+   - Per-cluster generation call: cluster MU content + optional manual
+     subject constraint + count + hop-distance targets → JSON array of
+     {prompt_text, criteria, hop_distance}. Validate the JSON against
+     `PromptBankEntry` and retry the call once on malformed output.
+   - Hop-distance targeting: hop-0 prompts are steered toward the cluster's
+     hub MU vocabulary; hop-1 prompts toward a named spoke MU's vocabulary.
+     The generation prompt includes the specific MU text for the target.
+   - `N = total_prompts × (1 − probe_ratio)`, distributed round-robin across
+     the 4 clusters (remainder goes to the earliest clusters — deterministic).
+   - Validation pass: one Sonnet call per prompt (coherent? answerable from
+     this cluster's content?) + the local fingerprint scan. Failures
+     regenerate up to `prompt_gen.max_retries`; persistent failures are
+     excluded with reason.
+   - **Cost estimate + confirmation:** before the first API call, estimate
+     tokens (cluster content + prompts × validation) and print an estimated
+     dollar cost at Sonnet 5 rates ($3/MTok in, $15/MTok out — $2/$10 intro
+     through 2026-08-31; put the rates in config.yaml, not hardcoded, so a
+     price change is a config edit). Require explicit `y` to proceed.
+     Expected magnitude for a ~100-prompt bank: well under $5 — the guard is
+     against config typos (e.g. `total_prompts: 10000`), not routine cost.
+
+3. **`scripts/harness/schema.py`** — extend `RunPlan` (never bypass it):
+   - `prompt_bank_path: Optional[str]` — path to an existing bank. If absent
+     and `conceptual_fields.subjects == "auto"`, the harness generates and
+     saves one before executing (with the cost-confirmation gate).
+   - New `PromptGenConfig` sub-model: `model: str = "claude-sonnet-5"`,
+     `max_retries: int = 2`. Manual `conceptual_fields.subjects` strings
+     (when provided) are passed into the generation prompt as topic
+     constraints.
+
+4. **`scripts/harness/turn_resolution.py` + `runner.py`** — harness
+   integration:
+   - At turn-sequence resolution time, each bulk turn is assigned a
+     `prompt_id` deterministically from `random_seed` (draw without
+     replacement until the bank is exhausted, then reshuffle — same seed,
+     same sequence, always). The assignment lands in the manifest's
+     `resolved_turn_sequence`, so a resumed run replays identical prompts.
+   - `build_turn_message()` replaces `_placeholder_bulk_message()` with a
+     lookup of `prompt_id` → `prompt_text` from the loaded bank. Probe turns
+     unchanged.
+   - Preflight: if the plan names a `prompt_bank_path` that doesn't exist or
+     fails validation, hard-stop before any wipe (routes through the
+     existing error-policy machinery, "connectivity"-class severity).
+
+5. **`scripts/run_experiment_harness.py` + `elicit.py`** — prompt for the
+   new fields in the interactive flow; `--generate-bank` convenience flag to
+   build a bank without running an experiment.
+
+**Tests (all Sonnet calls mocked — no test ever hits the API):**
+- `test_prompt_bank.py`: entry validation (0 criteria rejected, 4 criteria
+  rejected); hash is deterministic and changes when params change;
+  save→load round-trip; excluded entries preserved with reasons.
+- `test_prompt_gen.py`: fingerprint scan pure function (prompt with cluster C
+  term fails for cluster A, passes for cluster C); N-distribution across
+  clusters is exact and deterministic; malformed Sonnet JSON triggers one
+  retry then exclusion; missing API key fails fast with a named error.
+- `test_turn_resolution.py` (extend): same seed → same prompt_id sequence;
+  different seed → different sequence; bank smaller than bulk-turn count
+  reshuffles rather than crashing.
+- `test_runner.py` (extend): bulk turn message equals the bank entry's
+  prompt_text; missing bank file hard-stops before `wipe_graph` is called
+  (assert the fake client saw zero wipe calls).
+
+**Verification protocol (report actual output, not just PASS):**
+1. `--generate-bank` against real seed_v2 with a small plan (e.g. 20 prompts)
+   → cost estimate printed → confirm → bank file written; report per-cluster
+   counts, validation pass/fail counts, and the content hash.
+2. Re-run with identical params → harness detects the existing hash and
+   reuses the bank without any API call.
+3. Dry-run (`dry_run_n=2`) → both bulk turns show real bank prompts in the
+   checkpoint/log, with their `prompt_id`s in the manifest.
+4. Full test suite: 387+ passing, no regressions.
+
+**Done when:** all four checks pass with recorded output; criteria present on
+every validated entry; the placeholder message string no longer appears in
+any dry-run output.
+
+**Risks:**
+- ⚠ Sonnet returns prose around the JSON → parse defensively (extract the
+  JSON array), one retry, then fail that cluster loudly. Never regex-match
+  serialized JSON for content — always `json.loads` then validate.
+- ⚠ Criteria quality is the experiment's Achilles' heel — vague criteria
+  poison Phase 2 verdicts. The generation prompt must demand binary-checkable
+  statements and show 2 worked examples. (The pre-pilot human spot-check in
+  Phase 2's calibration note is the real safety net.)
+- ? Exact hop-1 steering fidelity (does a spoke-vocabulary prompt actually
+  enter at the spoke?) can't be verified until real retrieval runs — note
+  observed entry points during the Phase 3 pilot and record in PROGRESS.md.
+
+**Estimate:** 2 sessions
+
+---
+
+### Milestone 19 Phase 2 — Judge Integration
+
+**Branch:** `milestone-19-phase-2-judge`
+
+**Why second:** With real prompts and criteria in place, the missing link is
+the feedback signal. This phase closes the loop that the whole platform
+exists to study: response → verdict → (learned condition only) weight update.
+
+**Discovery from planning — the overview understates the backend work:** the
+existing `feedback_events` table (M8/M9) has only 6 columns
+(`feedback_event_id`, `run_id`, `verdict`, `verdict_basis`, `turn_index`,
+`is_probe_turn`). Phase 2's required fields — `condition_label`, `rationale`,
+`criterion_triggered`, `judge_source`, `judge_model_name`,
+`judge_temperature`, `judge_pinned_snapshot`, `prompt_id` — do not exist yet.
+So Phase 2 includes a DB migration (the additive-column pattern already
+established in `store.py`'s `_migrate_db()`) and one new backend endpoint.
+Existing rows keep NULLs in the new columns; only `judge_source` gets
+backfilled semantics: any pre-existing row is by definition `"human"` (it
+came from the chat UI thumbs), which matches the standing rule — *any verdict
+not produced by an automated judge call is "human"*.
+
+```
+JUDGE FLOW (per bulk turn, per condition — probe turns NEVER enter this path)
+──────────────────────────────────────────────────────────────────────────────
+
+ runner.py                      judge.py                    backend (Docker)
+ ─────────                      ────────                    ────────────────
+ bulk turn completes
+ (turn_type == "bulk" —
+  guard #1, upstream)
+      │
+      ▼
+ look up prompt entry ────▶ precondition: raise if
+ by prompt_id               turn is probe (guard #2,
+      │                     belt-and-suspenders)
+      │                          │
+      │                          ▼
+      │                     Ollama /api/chat ──▶ localhost:11434 (host-side —
+      │                     judge.model, temp 0    NOT host.docker.internal;
+      │                          │                 that alias is for the
+      │                          ▼                 backend container only)
+      │                     parse JSON verdict:
+      │                     {verdict, rationale,
+      │                      criterion_triggered}
+      │                          │
+      │            unparseable ──┤ parseable
+      │            after retry   │
+      │                 │        ▼
+      │                 ▼   verdict returned
+      │            error_policy
+      │            "judge_unparseable"
+      │            (soft_continue default —
+      │             logged, no verdict record)
+      ▼
+ POST /feedback/verdict  ──────────────────────▶  INSERT feedback_events
+ apply_weight_update =                            (full judge metadata)
+   (condition == "learned"                             │
+    AND verdict in up/down)                            ▼
+      │                                          if apply_weight_update:
+      │                                            SimpleRL.update()
+      ▼                                            weight_updates carry
+ checkpoint records                                feedback_event_id FK
+ verdict + event_id                                (§6.1 orphan check
+                                                    verifies this free)
+```
+
+**Why the condition gate lives in the runner, not the judge:** the judge is
+condition-agnostic by design — it scores response quality identically for all
+three conditions, which is what makes cross-condition quality comparison
+valid. If the judge knew about conditions, a bug there could silently bias
+the measurement. The runner is the orchestrator; "who acts on the verdict" is
+orchestration policy. The backend endpoint takes an explicit
+`apply_weight_update` flag rather than inferring, so the decision is visible
+in every request log.
+
+**Build:**
+
+1. **Backend — `memory/store.py` migration + `analytics/feedback_events.py`:**
+   - `_migrate_db()`: add nullable columns `condition_label`, `rationale`,
+     `criterion_triggered`, `judge_source`, `judge_model_name`,
+     `judge_temperature`, `judge_pinned_snapshot`, `prompt_id` to
+     `feedback_events`. Additive only — existing rows and the 387-test
+     baseline untouched.
+   - Extend the `FeedbackEvent` pydantic model with the same optional fields.
+   - The chat-UI path (`POST /feedback`) starts setting
+     `judge_source="human"` on the events it creates — the field is
+     mandatory going forward, and UI thumbs are human verdicts by rule.
+
+2. **Backend — `api/chat.py`: new `POST /feedback/verdict` endpoint:**
+   - Request: `run_id`, `verdict` (validated against the closed set),
+     `rationale`, `criterion_triggered` (required iff verdict is down;
+     must be one of the prompt's criteria strings — the harness enforces
+     the closed vocabulary, the endpoint validates non-empty),
+     `condition_label`, `judge_source`, `judge_model_name`,
+     `judge_temperature`, `judge_pinned_snapshot`, `prompt_id`,
+     `apply_weight_update: bool`.
+   - Always inserts the feedback event (verdict `"none"` is an explicit
+     stored string — the prior instrumentation audit's NULL-as-none problem
+     must not reappear). Returns `feedback_event_id`.
+   - When `apply_weight_update` is true and verdict is up/down: run the same
+     load-run → SimpleRL → write-weights → update-run path as `POST
+     /feedback`. **Refactor that logic out of the existing `/feedback`
+     handler into a shared helper** rather than duplicating it — two copies
+     of the weight-update path is how the §6.1 ledger check ends up
+     verifying only one of them. `/feedback` itself keeps its exact current
+     request/response contract (the chat UI doesn't change).
+   - Weight-update records carry the returned `feedback_event_id` as the
+     trigger FK — the existing §6.1 orphan-update check then audits the
+     wiring for free.
+   - ⚠ **Verdict vocabulary decision to resolve at build time:** the table
+     today stores `"thumbs_up"/"thumbs_down"/"none"`; the judge speaks
+     `"up"/"down"/"none"`. Before choosing, grep the report code
+     (`series_report.py`, `experiment_report.py`, `control_shadow.py`) for
+     verdict-string matching. If any query matches on `"thumbs_*"`, map
+     judge up/down onto the existing strings at the endpoint boundary (one
+     vocabulary in the DB, `judge_source` distinguishes origin). If nothing
+     matches on the strings, store `"up"/"down"` directly. Record the choice
+     and the grep evidence in PROGRESS.md.
+
+3. **`scripts/harness/judge.py`** — the judge module:
+   - `judge_turn(prompt_text, criteria, response_text, judge_config) ->
+     JudgeVerdict` — raises `ProbeTurnJudgeError` if handed a probe turn
+     (precondition guard; the runner also never routes probes here — both
+     layers, deliberately).
+   - Ollama call to `judge.model` at `judge.temperature` (validate ≤ 0.1 at
+     plan-load time — reproducibility requires near-0), `format: "json"`
+     requested, structured prompt containing: the original prompt, the
+     criteria list verbatim, the response, and explicit instruction that
+     `"none"` is the correct output whenever up/down can't be cleanly
+     determined — none is the honest answer, not a failure.
+   - Response parsing: `verdict` must be in the closed set;
+     `criterion_triggered` required for down and must exactly match one of
+     the supplied criteria strings (closed vocabulary — a freeform complaint
+     is a parse failure). One re-ask on parse failure, then raise
+     `JudgeUnparseableError`.
+   - Judge availability preflight: `GET /api/tags` on Ollama, confirm
+     `judge.model` is present. Runs before any graph mutation; missing model
+     is a hard stop.
+
+4. **`scripts/harness/runner.py` + `client.py`** — wiring:
+   - `client.py`: `post_verdict(...)` method (new endpoint), plus the
+     judge-availability check helper.
+   - After each successful bulk-turn chat call: judge → decide
+     `apply_weight_update = (condition == "learned" and verdict in
+     ("up","down"))` → post verdict → record `feedback_event_id` + verdict in
+     the turn checkpoint.
+   - `JudgeUnparseableError` routes through `error_policy` under a new key
+     `"judge_unparseable"` (default `soft_continue`: prominently logged, no
+     verdict record, turn checkpoint notes the anomaly). `error_policy` is
+     already `dict[str, str]` — extending the key set needs no schema change,
+     only a documented default in `DEFAULT_ERROR_POLICY`.
+   - `--interactive` CLI flag: after each verdict, print it and prompt
+     `Accept judge verdict, or override? [a/o/skip]`. Override replaces the
+     verdict and sets `judge_source="human"` on the logged record. Default
+     mode (no flag) is fully automated — this exists for calibration
+     spot-checks, not routine use.
+
+5. **`scripts/harness/schema.py`:** no new judge fields (binding constraint —
+   `judge.model/temperature/pinned_snapshot` already exist). Only the
+   `judge_unparseable` default lands in `DEFAULT_ERROR_POLICY`, and the
+   temperature validator tightens per item 3.
+
+**Tests:**
+- Backend: migration adds columns and preserves existing rows; `/feedback/
+  verdict` inserts all fields (explicit `"none"` string stored, never NULL);
+  `apply_weight_update=false` → zero weight changes (assert edge weights
+  before/after); `=true` + up/down → weights change and updates carry the
+  FK; `=true` + none → no update (silence is not a signal); down without
+  `criterion_triggered` → 422; `/feedback` (old endpoint) behavior unchanged
+  and now stamps `judge_source="human"`.
+- Harness: `judge.py` with a fake Ollama — clean verdict parses; down with a
+  criterion not in the list → parse failure → one re-ask → error; probe turn
+  → raises; runner + fake client — learned/up posts with
+  `apply_weight_update=true`, static/up posts with `false`, learned/none
+  posts with `false`; unparseable judge soft-continues and the checkpoint
+  records the anomaly; `--interactive` override path sets
+  `judge_source="human"` (scripted input).
+
+**Verification protocol:**
+1. Dry-run (learned condition, `dry_run_n=2`) against the real stack → 2
+   verdict rows in `feedback_events` with `judge_source="model:<name>"`,
+   `judge_model_name`, explicit verdict strings; report the actual rows.
+2. Extend the dry-run scope to all 3 conditions (temporarily lift the
+   dry-run first-condition-only scoping via plan config, or run three plans)
+   → static/random rows logged with zero weight updates; confirm via the
+   §6.2 static-control sanity check.
+3. §5.6 probe-integrity check: zero verdict records on probe turns.
+4. §6.1 ledger: orphan-update count = 0 in the learned condition.
+5. `--interactive` on one turn → override recorded as `"human"`.
+6. Full test suite passing, no regressions.
+
+**Done when:** all six checks pass with recorded output.
+
+**Risks:**
+- ⚠ Gemma judging Gemma is an accepted, documented confound — the
+  `judge_source` + `judge_model_name` on every row is what keeps it auditable
+  after the fact. Don't paper over it; don't re-litigate it.
+- ⚠ Gemma may not reliably emit clean JSON even with `format: "json"` — the
+  re-ask + `judge_unparseable` soft-continue path is the containment. If the
+  unparseable rate in verification exceeds ~10%, stop and tighten the judge
+  prompt before Phase 3; a lossy judge starves the learned condition of
+  signal.
+- ? Verdict-vocabulary mapping (see build item 2) — resolve with grep
+  evidence, record in PROGRESS.md.
+- 📋 **Pre-pilot calibration (human step, not a harness feature):** before
+  any large run, Paul reviews 15–20 judged turns against Gemma's verdicts
+  using `--interactive`, to catch ambiguously-written criteria before they
+  poison a full run. Schedule it between Phase 2 merge and the Phase 3 pilot.
+
+**Estimate:** 2–3 sessions
+
+---
+
+### Milestone 19 Phase 3 — Full Pilot Execution + Reporting Wire-Up
+
+**Branch:** `milestone-19-phase-3-pilot`
+
+**Why last:** Everything upstream now produces real data; this phase makes
+the harness *finish the job* — reports generated at the right moments, budget
+enforced, notification dispatched — and then proves it with the first real
+experiment data the system has ever produced.
+
+```
+RUN LIFECYCLE AFTER PHASE 3 (per plan, all conditions)
+──────────────────────────────────────────────────────
+
+ pre-run                per condition              experiment close
+ ───────                ─────────────              ────────────────
+ cost estimate          wipe+seed                  POST generate-experiment
+ vs budget_cap ──over──▶ HARD STOP                   experiment_id =
+ (before any               │                         {plan_id}_learned
+  graph mutation)          ▼                         control_experiment_ids =
+      │                 series loop:                 {static_weight: ...,
+      ▼                   turns → judge →             random_weight: ...}
+ judge preflight          verdicts                   (assembled from manifest,
+ (Phase 2)                 │                          never user input)
+      │                    ▼ series complete              │
+      ▼                 POST generate-series              ▼
+ execute            ┌── report path → checkpoint     report_path → payload
+      │             │      + manifest                     │
+      │             │   (failure = SOFT continue,        ▼
+      │             │    logged prominently —       notify("complete")
+      │             │    a broken report is         channel dispatch:
+      │             │    re-callable later;         "log" implemented,
+      │             │    an aborted run is not)     email/webhook stubs
+      ▼             │
+ cumulative cost ───┘
+ crosses budget_cap
+ mid-run → hard stop
+ (archive + abort cleanly, notify("aborted"))
+```
+
+**Build:**
+
+1. **Series identity — the wiring gap to close first.** The report endpoint
+   needs `(experiment_id, series_id)`, and `series_report.py` keys everything
+   on `series_id` — but `runner.py` currently calls `client.chat(message)`
+   without passing `series_id` at all, so every harness turn lands in
+   whatever session the backend assigns. Fix: the runner passes a
+   deterministic `series_id` per (condition, series_index) — e.g.
+   `{plan_id}_{condition}_s{series_index}` — on every chat call
+   (`client.chat` already accepts the parameter). Record the mapping in the
+   manifest.
+   - ? **Verify during build:** how runs get stamped with `experiment_id`
+     (M12 added the column — find the mechanism: chat param, admin endpoint,
+     or config). The wipe step already uses `{plan_id}_{condition}` as the
+     experiment identity; the runs and probe results must carry the same
+     value or the reports will query an empty set. This is the highest-risk
+     unknown in the phase — resolve it before writing the reporting calls,
+     and record the answer in PROGRESS.md.
+
+2. **Series-close + experiment-close reporting** (`runner.py`, `client.py`,
+   `checkpoint.py`):
+   - `client.py`: `generate_series_report(experiment_id, series_id)` and
+     `generate_experiment_report(experiment_id, control_experiment_ids)` —
+     both endpoints exist (M13/M14–16); request shapes verified against
+     `backend/api/admin.py`.
+   - Runner detects series completion (last turn of a series index within a
+     condition), calls generate-series, logs the returned `md_path`/`json_path`
+     into the checkpoint and manifest. Report-generation failures are
+     **soft-continue regardless of the connectivity default** — a reporting
+     failure must not abort a run that otherwise succeeded (the report can be
+     re-generated manually; the run cannot). New error-policy key
+     `"report_generation"` defaulting to `soft_continue`, prominently logged.
+   - At experiment close (all conditions finished), call generate-experiment
+     with the learned condition's experiment_id and the controls dict
+     assembled from the manifest (`{plan_id}_{condition}` — deterministic,
+     never asked of the user). The returned report path becomes
+     `report_path` in the notification payload — exactly the field the
+     Phase 0 stub already defined.
+
+3. **Notification channel dispatch** (`notify.py`, `schema.py`):
+   - `NotificationConfig` gains `channel: str = "log"` validated against
+     `("log", "email", "webhook")`.
+   - `notify.py` becomes a dispatch table: `{"log": _notify_log}` where
+     `_notify_log` is the current behavior verbatim. `email`/`webhook`
+     resolve to a handler that logs "channel not implemented, falling back
+     to log" and delegates to `_notify_log` — the structure is the
+     deliverable; adding a real channel later is one new handler function,
+     no refactor. Fires on completion and on hard-stop (both already exist
+     in the Phase 0 flow).
+
+4. **Budget cap enforcement** (`scripts/harness/cost.py`, `runner.py`):
+   - `cost.py`: absorb Phase 1's estimate function into a `CostTracker` —
+     pre-run estimate (Sonnet generation + validation if a bank must be
+     built; judge calls × local-Ollama rate, which is 0 but the structure
+     exists so a hosted judge later is a config change) and cumulative
+     actuals (every Sonnet call reports usage tokens; validation retries
+     count).
+   - Pre-run: estimate > `budget_cap` → hard stop *before any graph
+     mutation*, message names the estimate, the cap, and the plan field to
+     change. `budget_cap: None` = uncapped (already the schema default).
+   - Mid-run: cumulative crossing the cap → hard stop through the existing
+     HardStopError path (checkpoint preserved, notify("aborted") with a
+     budget-breach error_summary). Note the wipe already archives, so
+     "archive+abort cleanly" is inherited, not new code.
+
+5. **Full pilot smoke run — a required done criterion, not optional:**
+   - One real run: all 3 conditions, 1 series each, ≥5 bulk + ≥2 probe turns
+     per condition, real Gemma agent, real Gemma judge, real Sonnet bank.
+   - Confirm: 3 series reports generated; experiment report with populated
+     control shadow; notification log shows `"status": "complete"` with
+     non-null `report_path`; §6.2 control sanity checks pass (zero weight
+     changes in static, re-randomized weights in random, zero
+     feedback→update correlation in both controls).
+   - This is the first real experiment data the system has produced —
+     record the report paths and headline numbers in PROGRESS.md.
+
+**Tests:**
+- Runner + fake client: series completion triggers exactly one
+  generate-series call per (condition, series) with the right IDs; report
+  failure soft-continues and the checkpoint records it; experiment close
+  sends the correct `control_experiment_ids` dict; hard-stop mid-run skips
+  experiment-close reporting but still notifies with `"aborted"`.
+- `notify.py`: channel dispatch — "log" writes the JSONL line (existing
+  behavior); "email" falls back with a logged warning; invalid channel
+  rejected at schema validation with a field-identifying error.
+- `cost.py`: estimate arithmetic; pre-run over-cap → hard stop with zero
+  client calls; mid-run crossing → HardStopError; `budget_cap: None` never
+  stops.
+- `client.chat` passes series_id; turn loop uses the deterministic mapping.
+
+**Verification protocol:**
+1. Multi-series dry-run against the real stack → one series report per
+   completed series, paths in manifest and checkpoint.
+2. Deliberately break report generation (e.g. bogus series_id) → run
+   completes, failure logged prominently, notification still fires.
+3. Plan with `budget_cap: 0.01` and no existing bank → hard stop before any
+   wipe, clear message.
+4. The full pilot smoke run (build item 5) — all confirmations recorded with
+   actual numbers.
+5. Full test suite passing, no regressions.
+
+**Done when:** all five checks pass with recorded output — the pilot run is
+the gate; if it fails, Phase 3 is not complete.
+
+**Risks:**
+- ⚠ The experiment_id stamping mechanism (build item 1's open question) is
+  the phase's critical unknown — if runs aren't tagged the way the reports
+  query, every report comes back empty. Resolve it first, before any other
+  Phase 3 code.
+- ⚠ The pilot is long-running (3 conditions × 7+ turns × local inference +
+  judge calls per bulk turn). Budget wall-clock time; the per-turn
+  checkpoint + resume from Phase 0 is the recovery path if it's interrupted.
+- ? Cross-series retrieval and cross-series edges will appear in the
+  existing §5.3/§5.4 metrics automatically — do NOT add a separate
+  "cross-cluster organic transfer" metric (binding constraint from the
+  overview).
+
+**Estimate:** 2–3 sessions (pilot run and its verification may take a
+session on their own)
+
+---
+
 ## Status
 
 ```
-Current milestone: 19 Phase 0 — Experiment Harness Skeleton — COMPLETE
-Last updated: 2026-07-03
+Current milestone: 19 Phase 2 — Judge Integration (not started)
+Last updated: 2026-07-05
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -3126,3 +3751,5 @@ Last updated: 2026-07-03
 **Milestone 18:** Complete — all 7 verification checks PASS with actual numbers on a freshly wiped + re-seeded graph (see PROGRESS.md 2026-06-29 entry), 332 unit tests passing, no regressions. Branches: `milestone-18-phase-0-infra-fixes` (PR #28), `milestone-18-phase-1-seed-v2-generation` (PR #29), `fix/smoketest-2026-06-29` phases 2–4 and final verification (PR #30, #31, #32) — all merged to main.
 
 **Milestone 19 Phase 0:** Complete — Run Plan schema, harness CLI skeleton (elicit/load, turn resolution, manifest, checkpoint, error policy, notification stub), and dry-run mode, all built and verified against the real Docker backend. Discovered and closed a real infrastructure gap along the way: `/admin/seed-graph` only ever did an idempotent merge, never a wipe — added `POST /admin/graph/wipe` (archive-then-delete) so per-condition graph resets are now real. All 7 §3.4 checks PASS with actual recorded output (see PROGRESS.md 2026-07-03 entry). 387 tests passing (332 baseline + 55 new), no regressions. Branch: `milestone-19-phase-0-harness-skeleton`.
+
+**Milestone 19 Phase 1:** Complete — `prompt_bank.py` (artifact schema, content hash, load/save with field-identifying validation) and `prompt_gen.py` (Sonnet-based generation + validation, cost-estimate confirmation gate, pure-Python fingerprint scan). `schema.py`, `turn_resolution.py`, `runner.py`, `elicit.py`, and `run_experiment_harness.py` wired end-to-end (deterministic `prompt_id` assignment, bank-backed `build_turn_message`, hard-stop preflight on a missing/invalid bank). All 4 verification checks PASS with real output against real seed_v2 + Sonnet 5 (see PROGRESS.md 2026-07-05 entry). 421 tests passing (387 baseline + 34 new), no regressions. Branch: `milestone-19-phase-1-prompt-bank`.

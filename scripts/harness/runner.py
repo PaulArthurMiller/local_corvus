@@ -28,8 +28,9 @@ from harness.checkpoint import (
 from harness.client import BackendClient, BackendConnectivityError, BackendTurnError
 from harness.manifest import RunManifest, compute_config_hash, compute_run_id, now_iso, save_manifest
 from harness.notify import build_notification_payload, notify
+from harness.prompt_bank import PromptBank, load_bank
 from harness.schema import DEFAULT_ERROR_POLICY, RunPlan
-from harness.turn_resolution import TURN_TYPE_PROBE, resolve_turn_sequence
+from harness.turn_resolution import TURN_TYPE_PROBE, assign_prompt_ids, resolve_turn_sequence
 
 logger = logging.getLogger("harness.runner")
 
@@ -86,11 +87,17 @@ def _placeholder_bulk_message(condition: str, turn: dict) -> str:
     )
 
 
-def build_turn_message(probes: list, turn: dict, condition: str) -> str:
-    """Resolve placeholder content for a turn (probe prompt or a labeled stub)."""
+def build_turn_message(probes: list, turn: dict, condition: str, prompt_lookup: Optional[dict] = None) -> str:
+    """
+    Resolve message content for a turn: probe prompt, a real bank prompt
+    (via turn["prompt_id"] -> prompt_lookup), or — with no bank loaded — the
+    Phase 0 labeled placeholder stub.
+    """
     if turn["turn_type"] == TURN_TYPE_PROBE and probes:
         probe = probes[turn["turn_index"] % len(probes)]
         return probe["prompt_text"]
+    if prompt_lookup and turn.get("prompt_id") in prompt_lookup:
+        return prompt_lookup[turn["prompt_id"]]
     return _placeholder_bulk_message(condition, turn)
 
 
@@ -130,6 +137,25 @@ def execute_run(
 
     full_sequence = resolve_turn_sequence(plan)
 
+    # M19 Phase 1 — preflight: load the prompt bank (if the plan names one)
+    # and assign prompt_id to every bulk turn before the manifest is written,
+    # so a resumed run always replays identical prompts. A missing/invalid
+    # bank is deferred to the error-policy check below rather than raised
+    # here, so the manifest/checkpoint are still written for the aborted run.
+    prompt_bank: Optional[PromptBank] = None
+    prompt_bank_error: Optional[str] = None
+    if plan.prompt_bank_path:
+        try:
+            prompt_bank = load_bank(Path(plan.prompt_bank_path))
+        except (FileNotFoundError, ValueError) as exc:
+            prompt_bank_error = f"connectivity: prompt bank invalid or missing: {exc}"
+        else:
+            full_sequence = assign_prompt_ids(
+                full_sequence,
+                [e.prompt_id for e in prompt_bank.validated_entries()],
+                plan.random_seed,
+            )
+
     manifest = RunManifest(
         run_id=run_id,
         plan=plan.model_dump(mode="json"),
@@ -165,7 +191,17 @@ def execute_run(
     aborted = False
     turns_processed = 0
 
+    prompt_lookup = (
+        {e.prompt_id: e.prompt_text for e in prompt_bank.validated_entries()} if prompt_bank else None
+    )
+
     try:
+        if prompt_bank_error and error_policy.get("connectivity") == "hard_stop":
+            error_summary = prompt_bank_error
+            raise HardStopError(error_summary)
+        elif prompt_bank_error:
+            logger.warning("runner: %s (soft_continue per error_policy)", prompt_bank_error)
+
         try:
             client.health()
         except BackendConnectivityError as exc:
@@ -198,7 +234,7 @@ def execute_run(
                 if is_turn_done(checkpoint, *key):
                     continue
 
-                message = build_turn_message(probes, turn, condition)
+                message = build_turn_message(probes, turn, condition, prompt_lookup)
                 status = STATUS_OK
                 detail = None
                 try:

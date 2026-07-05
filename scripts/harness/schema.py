@@ -76,6 +76,15 @@ class NotificationConfig(BaseModel):
     enabled: bool = True
 
 
+class PromptGenConfig(BaseModel):
+    """Sonnet-based prompt generation config (M19 Phase 1). Manual
+    conceptual_fields.subjects strings (when provided) are passed into the
+    generation prompt as topic constraints."""
+
+    model: str = "claude-sonnet-5"
+    max_retries: int = Field(default=2, ge=0)
+
+
 class RunPlan(BaseModel):
     """
     Full Experiment Run Plan schema.
@@ -115,6 +124,12 @@ class RunPlan(BaseModel):
     notification: NotificationConfig = Field(default_factory=NotificationConfig)
 
     budget_cap: Optional[float] = Field(default=None, ge=0.0)
+
+    # M19 Phase 1 — path to an existing prompt bank. If absent and
+    # conceptual_fields.subjects == "auto", the harness generates and saves
+    # one before executing (with the cost-confirmation gate in prompt_gen.py).
+    prompt_bank_path: Optional[str] = None
+    prompt_gen: PromptGenConfig = Field(default_factory=PromptGenConfig)
 
     dry_run: bool = False
     dry_run_n: int = Field(default=2, gt=0)

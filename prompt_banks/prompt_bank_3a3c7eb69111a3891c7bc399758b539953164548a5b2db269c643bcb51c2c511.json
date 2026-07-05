@@ -1,0 +1,244 @@
+{
+  "entries": [
+    {
+      "prompt_id": "cluster_a_0000",
+      "cluster_id": "cluster_a",
+      "prompt_text": "If I want an export file to parse reliably every time, what do I need to nail down for each column and for the separator between them?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions defining explicit data type/format rules for each field",
+        "mentions using a single uniform delimiter across all records"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0001",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Why is it so important that fields always show up in the same sequence in every record of a structured file?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions consistent/fixed field ordering",
+        "mentions that consuming systems rely on predictable placement to map data",
+        "mentions consequences like misreading or unusable output if order changes"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0002",
+      "cluster_id": "cluster_a",
+      "prompt_text": "I'm designing an export file that other systems will parse. What do I need to nail down for each column, and what separator convention should I follow across all rows?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions defining explicit data type/format rules for each field",
+        "mentions using a single uniform delimiter across all records"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0003",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Why does it matter that every record in an exported file lists its columns in the exact same sequence?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions that changing field sequence causes the consuming application to mismap or skip data",
+        "mentions that fixed/predictable placement lets the system reliably interpret each field's meaning and data type"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0000",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Why is it important for a dataset's structural blueprint to precisely define the expected form and kind of every field before any validation happens?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions that a well-defined schema specifies expected shape and type for every element",
+        "mentions that this pre-definition removes ambiguity in determining conformance during validation"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": false,
+      "exclusion_reason": "fingerprint leak: ['field']"
+    },
+    {
+      "prompt_id": "cluster_b_0001",
+      "cluster_id": "cluster_b",
+      "prompt_text": "If a validator lets a wrong-typed value slip through during checks, what kinds of problems does that create for the systems that later consume the data?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions that consumers relying on explicit types (e.g., integer math or date comparisons) will encounter unexpected errors",
+        "mentions resulting brittle behavior or system failures",
+        "mentions the error is hard to trace back to the original acceptance point"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0002",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Explain what role a strict structural definition plays in making sure a validation check can clearly decide if incoming records are correctly formed.",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions the definition specifying expected shape and type for every element",
+        "mentions that this makes the validation outcome unambiguous"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0003",
+      "cluster_id": "cluster_b",
+      "prompt_text": "How does enforcing exact type matching during validation help prevent hard-to-diagnose failures later in a system?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions strict matching of arriving data to the type defined in the schema",
+        "mentions that silent acceptance of a wrong type leads to brittle behavior and errors that are difficult to trace"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0000",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Why can't a system just trust that everyone will follow its underlying guidelines on their own instead of actively watching for problems?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions that voluntary adherence is insufficient",
+        "mentions that failures must be actively detected/reported rather than ignored",
+        "mentions systems collapsing into inconsistency without active oversight"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0001",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Why is it important for an API to thoroughly check incoming data at the boundary before it reaches the core business logic?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions that checks/validation must happen at the entry point before processing",
+        "mentions that failing to check allows malformed or malicious data to reach business logic",
+        "mentions that this protects the integrity of the application layer/system"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": false,
+      "exclusion_reason": "fingerprint leak: ['data']"
+    },
+    {
+      "prompt_id": "cluster_c_0002",
+      "cluster_id": "cluster_c",
+      "prompt_text": "What ultimately keeps guidelines meaningful in a system \u2014 people choosing to follow them, or something else?",
+      "hop_distance": 0,
+      "criteria": [
+        "states that enforcement/detection, not voluntary choice, is what maintains order",
+        "mentions that unreported breaches lead to systemic collapse or inconsistency"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0003",
+      "cluster_id": "cluster_c",
+      "prompt_text": "What risk arises if an API skips checking incoming requests before passing them to its internal processing logic?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions malformed or malicious input reaching core logic",
+        "mentions that core logic cannot reliably handle unpredictable/corrupt input",
+        "mentions the need to screen data preemptively at the boundary"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0000",
+      "cluster_id": "cluster_d",
+      "prompt_text": "In an analytical system, why must every conclusion be linked back to an identifiable starting point?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions that claims/assertions must document their foundational input or original point",
+        "mentions that this makes the conclusion's lineage traceable back to its origin"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0001",
+      "cluster_id": "cluster_d",
+      "prompt_text": "What happens to the trustworthiness of a piece of evidence if the link between it and its original source breaks down?",
+      "hop_distance": 1,
+      "criteria": [
+        "states that broken chains compromise reliability/validity",
+        "mentions resulting claims become untrustworthy or unverified"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0002",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Explain why an analytical framework requires each stated point to reference where it originally came from.",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions rigorous citation of the source for each claim",
+        "explains this preserves structural integrity and traceability back to origin"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0003",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Why is it important for researchers to establish a clear path connecting their conclusions back to the original evidence they used?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions academic integrity being maintained",
+        "mentions the path from conclusion to origin must be verifiable/traceable"
+      ],
+      "seed_fixture_version": "v2",
+      "generated_by": "claude-sonnet-5@2026-07-05",
+      "validated": true,
+      "exclusion_reason": null
+    }
+  ],
+  "generation_params": {
+    "total_prompts": 20,
+    "probe_ratio": 0.2,
+    "hop_distance_levels": [
+      0,
+      1
+    ],
+    "subjects": "auto",
+    "model": "claude-sonnet-5"
+  },
+  "content_hash": "3a3c7eb69111a3891c7bc399758b539953164548a5b2db269c643bcb51c2c511"
+}

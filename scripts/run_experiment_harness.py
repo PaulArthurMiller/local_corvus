@@ -30,12 +30,14 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from harness.client import BackendClient  # noqa: E402
+from harness.cost import BudgetExceededError, check_prerun_budget, estimate_prerun_cost  # noqa: E402
 from harness.elicit import elicit_plan, offer_to_save_plan  # noqa: E402
 from harness.judge import DEFAULT_JUDGE_HOST, OllamaJudgeClient  # noqa: E402
 from harness.prompt_bank import bank_path_for_hash  # noqa: E402
-from harness.prompt_gen import generate_bank_for_plan  # noqa: E402
-from harness.runner import execute_run, load_probe_prompts  # noqa: E402
+from harness.prompt_gen import estimate_bank_cost_for_plan, generate_bank_for_plan  # noqa: E402
+from harness.runner import execute_run, load_probe_prompts, scope_for_dry_run  # noqa: E402
 from harness.schema import RunPlan, format_validation_error  # noqa: E402
+from harness.turn_resolution import TURN_TYPE_PROBE, resolve_turn_sequence  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -84,6 +86,17 @@ def main() -> None:
         "--interactive", action="store_true",
         help="After each judge verdict, prompt to accept or override it (calibration mode, not routine use)",
     )
+    parser.add_argument(
+        "--no-docker-restart", action="store_true",
+        help=(
+            "Skip restarting the backend container between conditions. Backend/core/"
+            "orchestrator.py resolves EXPERIMENT_ID once at process startup with no "
+            "per-request override, so without a restart every condition in a real "
+            "multi-condition run would be stamped with the same experiment_id. Only "
+            "safe for single-condition runs, or when EXPERIMENT_ID is being managed "
+            "manually outside the harness."
+        ),
+    )
     args = parser.parse_args()
 
     if args.plan:
@@ -99,20 +112,50 @@ def main() -> None:
         generate_bank_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
         return
 
+    # M19 Phase 3 — pre-run budget gate, before ANY Sonnet spend (bank
+    # generation's own confirm_cost prompt happens further down) or graph
+    # mutation. Mirrors the same estimate execute_run() checks internally,
+    # so a run launched directly via execute_run() (bypassing this CLI) is
+    # still protected — this is the earliest possible exit for the CLI path.
+    needs_bank_generation = not plan.prompt_bank_path and plan.conceptual_fields.subjects == "auto"
+    bank_generation_cost_usd = 0.0
+    if needs_bank_generation:
+        bank_estimate = estimate_bank_cost_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
+        bank_generation_cost_usd = (bank_estimate or {}).get("estimated_cost_usd", 0.0)
+
+    full_sequence = resolve_turn_sequence(plan)
+    conditions, scoped_sequence = scope_for_dry_run(plan, plan.condition_order, full_sequence)
+    n_judge_calls = len(conditions) * sum(1 for t in scoped_sequence if t["turn_type"] != TURN_TYPE_PROBE)
+    prerun_estimate = estimate_prerun_cost(bank_generation_cost_usd, n_judge_calls)
+    print(
+        f"Pre-run cost estimate: bank_generation=${prerun_estimate['bank_generation_cost_usd']:.4f} "
+        f"judge_calls=${prerun_estimate['judge_calls_cost_usd']:.4f} "
+        f"total=${prerun_estimate['estimated_total_cost_usd']:.4f} budget_cap={plan.budget_cap}"
+    )
+    try:
+        check_prerun_budget(prerun_estimate, plan.budget_cap)
+    except BudgetExceededError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+
     # If the plan doesn't name an existing bank and wants "auto" subjects,
     # generate one now (cost-confirmation gate happens inside prompt_gen.py)
     # before any wipe/seed call.
-    if not plan.prompt_bank_path and plan.conceptual_fields.subjects == "auto":
+    if needs_bank_generation:
         bank = generate_bank_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
         plan.prompt_bank_path = str(bank_path_for_hash(bank.content_hash, PROMPT_BANKS_DIR))
 
     probes = load_probe_prompts(PROBE_SET_PATH)
     logger.info("run_experiment_harness: loaded %d probe prompt(s) for placeholder content", len(probes))
 
+    docker_project_root = None if args.no_docker_restart else PROJECT_ROOT
+
     with BackendClient(base_url=args.backend_url) as client, OllamaJudgeClient(host=args.judge_host) as judge_client:
         outcome = execute_run(
             plan, client, RUNS_DIR, probes=probes,
             judge_client=judge_client, interactive=args.interactive,
+            docker_project_root=docker_project_root,
+            bank_generation_cost_usd=bank_generation_cost_usd,
         )
 
     if outcome.status == "aborted":

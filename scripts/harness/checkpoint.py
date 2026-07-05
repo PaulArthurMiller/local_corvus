@@ -39,9 +39,40 @@ class TurnCheckpoint(BaseModel):
     judge_error: Optional[str] = None
 
 
+class SeriesReportRecord(BaseModel):
+    """M19 Phase 3 — outcome of one generate-series report call, recorded
+    when the last turn of a (condition, series_index) completes."""
+
+    condition: str
+    series_index: int
+    experiment_id: str
+    series_id: str
+    status: str  # "ok" | "error_soft_continue"
+    timestamp: str = Field(default_factory=now_iso)
+    report_id: Optional[str] = None
+    json_path: Optional[str] = None
+    md_path: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ExperimentReportRecord(BaseModel):
+    """M19 Phase 3 — outcome of the single generate-experiment report call
+    made at experiment close (only when the learned condition ran)."""
+
+    experiment_id: str
+    status: str  # "ok" | "error_soft_continue"
+    timestamp: str = Field(default_factory=now_iso)
+    report_id: Optional[str] = None
+    json_path: Optional[str] = None
+    md_path: Optional[str] = None
+    error: Optional[str] = None
+
+
 class CheckpointState(BaseModel):
     run_id: str
     turns: list[TurnCheckpoint] = Field(default_factory=list)
+    series_reports: list[SeriesReportRecord] = Field(default_factory=list)
+    experiment_report: Optional[ExperimentReportRecord] = None
     # None while running; "complete" | "aborted" once the run ends.
     final_status: Optional[str] = None
 

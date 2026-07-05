@@ -17,6 +17,7 @@ from core.session import (
     Session,
     append_session_message,
     create_session,
+    get_or_create_session,
     get_session,
     get_session_messages,
 )
@@ -161,3 +162,52 @@ class TestSessionMessages:
         print(f"[test] ordered messages: {[m['content'] for m in messages]}")
         for i, msg in enumerate(messages):
             assert msg["content"] == f"message {i}"
+
+
+# ---------------------------------------------------------------------------
+# get_or_create_session (M19 Phase 3) — lets a caller supply its own
+# deterministic series_id (e.g. the experiment harness's
+# "{plan_id}_{condition}_s{series_index}") instead of always getting a
+# fresh random UUID on first use.
+# ---------------------------------------------------------------------------
+
+
+class TestGetOrCreateSession:
+
+    def test_no_requested_id_behaves_like_create_session(self, monkeypatch):
+        _fresh_registry(monkeypatch)
+        sid = get_or_create_session()
+        print(f"[test] created session_id={sid}")
+        assert isinstance(sid, str)
+        assert len(sid) == 36  # UUID format
+        assert get_session(sid) is not None
+
+    def test_unregistered_requested_id_is_used_verbatim_not_discarded(self, monkeypatch):
+        _fresh_registry(monkeypatch)
+        sid = get_or_create_session("p1_learned_s0")
+        print(f"[test] session_id={sid}")
+        assert sid == "p1_learned_s0"
+        assert get_session("p1_learned_s0") is not None
+
+    def test_repeated_calls_with_same_requested_id_reuse_one_session(self, monkeypatch):
+        _fresh_registry(monkeypatch)
+        sid1 = get_or_create_session("p1_learned_s0")
+        append_session_message(sid1, {"role": "user", "content": "turn 1"})
+
+        sid2 = get_or_create_session("p1_learned_s0")
+        append_session_message(sid2, {"role": "user", "content": "turn 2"})
+
+        print(f"[test] sid1={sid1} sid2={sid2}")
+        assert sid1 == sid2 == "p1_learned_s0"
+        messages = get_session_messages("p1_learned_s0")
+        assert [m["content"] for m in messages] == ["turn 1", "turn 2"]
+
+    def test_requested_id_matching_existing_uuid_session_is_reused(self, monkeypatch):
+        """Mirrors the chat UI's own flow: it only ever resends an ID the
+        backend already issued via create_session()."""
+        _fresh_registry(monkeypatch)
+        sid = create_session()
+
+        result = get_or_create_session(sid)
+
+        assert result == sid

@@ -25,6 +25,7 @@ from harness.prompt_gen import (
     compute_fixture_manifest_hash,
     distribute_counts,
     distribute_hop_levels,
+    estimate_bank_cost_for_plan,
     estimate_generation_cost,
     fingerprint_scan,
     generate_cluster_prompts_safely,
@@ -251,3 +252,38 @@ def test_build_bank_aborts_with_no_files_when_cost_declined(tmp_path):
 
     assert list(tmp_path.iterdir()) == []
     assert client.messages.calls == []
+
+
+# ---------------------------------------------------------------------------
+# M19 Phase 3 — estimate_bank_cost_for_plan: pure pre-run estimate, no API
+# calls, no file writes, used by the budget_cap preflight in cost.py.
+# ---------------------------------------------------------------------------
+
+def test_estimate_bank_cost_for_plan_returns_none_when_bank_already_exists(tmp_path):
+    plan = _plan(total_prompts=10)
+    fixture_hash = compute_fixture_manifest_hash(FIXTURE_PATH)
+    params = _generation_params(plan)
+    content_hash = compute_bank_hash(fixture_hash, params)
+
+    existing_entry = PromptBankEntry(
+        prompt_id="cluster_a_0000", cluster_id="cluster_a", prompt_text="existing prompt",
+        hop_distance=0, criteria=["c1"], seed_fixture_version="v2",
+        generated_by="claude-sonnet-5@2026-01-01", validated=True,
+    )
+    existing_bank = PromptBank(entries=[existing_entry], generation_params=params, content_hash=content_hash)
+    save_bank(existing_bank, tmp_path)
+
+    estimate = estimate_bank_cost_for_plan(plan, FIXTURE_PATH, tmp_path)
+
+    assert estimate is None
+
+
+def test_estimate_bank_cost_for_plan_returns_cost_estimate_when_no_bank_exists(tmp_path):
+    plan = _plan(total_prompts=10)
+
+    estimate = estimate_bank_cost_for_plan(plan, FIXTURE_PATH, tmp_path)
+
+    assert estimate is not None
+    assert estimate["estimated_cost_usd"] > 0
+    assert estimate["total_prompts"] == 8  # 10 total * (1 - probe_ratio=0.2)
+    assert list(tmp_path.iterdir()) == []  # no files written, no API calls possible

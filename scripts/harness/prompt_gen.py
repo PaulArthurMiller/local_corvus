@@ -436,6 +436,32 @@ def _generation_params(plan: RunPlan) -> dict:
     }
 
 
+def estimate_bank_cost_for_plan(
+    plan: RunPlan, fixture_path: Path, output_dir: Path
+) -> Optional[dict]:
+    """
+    M19 Phase 3 — pure pre-run cost estimate for a plan's prompt bank: no
+    API calls, no file writes. Returns None when an identical-hash bank
+    already exists (no Sonnet spend will occur for this run) so
+    budget_cap checks in cost.py don't count cost that was never going to
+    be incurred. Mirrors build_bank's own estimate computation up to (but
+    not including) the confirm_cost prompt and the actual generation
+    calls.
+    """
+    fixture_manifest_hash = compute_fixture_manifest_hash(fixture_path)
+    params = _generation_params(plan)
+    content_hash = compute_bank_hash(fixture_manifest_hash, params)
+    if bank_path_for_hash(content_hash, output_dir).exists():
+        return None
+
+    cluster_content = read_cluster_content(fixture_path)
+    n_bulk = round((plan.total_prompts or 0) * (1 - plan.probe_ratio))
+    counts = distribute_counts(n_bulk)
+    price_in, price_out = load_pricing()
+    full_content_by_cluster = {c: cluster_content[c]["full_content"] for c in CLUSTERS}
+    return estimate_generation_cost(full_content_by_cluster, counts, price_in, price_out)
+
+
 def build_bank(
     plan: RunPlan,
     fixture_path: Path,

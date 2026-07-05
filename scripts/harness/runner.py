@@ -454,6 +454,21 @@ def execute_run(
                 raise HardStopError(error_summary)
 
         for condition in conditions:
+            # M19 Phase 3 — resume optimization: if every turn for this
+            # condition is already recorded in the checkpoint, skip the
+            # restart/wipe/seed entirely rather than churning the graph for
+            # a condition with nothing left to do. Not just a speed-up: it
+            # also means a resumed run never re-wipes a condition whose
+            # series report has already been generated (wipe_graph() itself
+            # never touches analytics/feedback_events, so no data was ever
+            # at risk here — this only removes wasted work).
+            if all(
+                is_turn_done(checkpoint, condition, t["series_index"], t["turn_index"])
+                for t in scoped_sequence
+            ):
+                print_fn(f"\n=== Condition: {condition} — already complete, skipping ===")
+                continue
+
             print_fn(f"\n=== Condition: {condition} ===")
             experiment_id = f"{plan.plan_id}_{condition}"
 

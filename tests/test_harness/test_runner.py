@@ -225,6 +225,42 @@ def test_resume_skips_already_completed_turns_after_hard_stop(tmp_path):
     assert healthy_client.chat_call_count == 2
 
 
+def test_resume_skips_restart_wipe_seed_for_already_complete_condition(tmp_path):
+    """M19 Phase 3 — a resumed run must not restart/wipe/seed a condition
+    whose turns are all already checkpointed; only the still-pending
+    condition should touch the graph again."""
+    plan = _plan(series_count=1, turns_per_series=2, probe_ratio=0.0, conditions=["learned", "static_weight"])
+
+    # First run: "learned" completes both its turns (chat indices 0, 1);
+    # "static_weight"'s first turn (chat index 2) hits a connectivity error
+    # and aborts the run before any of its turns are checkpointed.
+    failing_client = FakeBackendClient(chat_errors={2: BackendConnectivityError("dropped")})
+    first_outcome = execute_run(plan, failing_client, tmp_path, print_fn=_noop_print)
+
+    assert first_outcome.status == "aborted"
+    assert failing_client.wipe_calls == ["p1_learned", "p1_static_weight"]
+    conditions_done = {t.condition for t in first_outcome.checkpoint.turns}
+    assert conditions_done == {"learned"}
+
+    # Second run: resume. "learned" is fully done — its restart/wipe/seed
+    # must not be repeated. "static_weight" resumes normally.
+    healthy_client = FakeBackendClient()
+    restart_calls = []
+
+    second_outcome = execute_run(
+        plan, healthy_client, tmp_path,
+        resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+        docker_project_root=Path("/fake/project"),
+        restart_backend_fn=lambda root, env: restart_calls.append(env),
+    )
+
+    assert second_outcome.status == "complete"
+    assert healthy_client.wipe_calls == ["p1_static_weight"]  # "learned" skipped entirely
+    assert healthy_client.seed_calls == 1
+    assert restart_calls == [{"EXPERIMENT_ID": "p1_static_weight"}]
+    assert healthy_client.chat_call_count == 2  # only static_weight's 2 turns
+
+
 def test_resume_declined_starts_fresh(tmp_path):
     plan = _plan(dry_run=True, dry_run_n=2)
 

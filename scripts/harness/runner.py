@@ -435,6 +435,16 @@ def execute_run(
 
     checkpoint = existing if resume else CheckpointState(run_id=run_id)
 
+    # M19 Phase 3 — snapshot, before this invocation processes a single new
+    # turn, which (condition, series_index) pairs already have at least one
+    # turn recorded. Used below to tell "this series is brand new" from
+    # "this series is being resumed mid-flight" — resuming must never wipe
+    # the graph or re-randomize edges out from under a series that's
+    # already in progress, since that would erase the experimental context
+    # (retrieved MUs, reinforced edges, the random_weight baseline) that
+    # the remaining turns are supposed to continue building on.
+    series_previously_started = {(t.condition, t.series_index) for t in checkpoint.turns}
+
     error_policy = resolve_error_policy(plan)
     conditions, scoped_sequence = scope_for_dry_run(plan, plan.condition_order, full_sequence)
 
@@ -497,6 +507,10 @@ def execute_run(
                 raise HardStopError(error_summary)
 
         for condition in conditions:
+            condition_turn_done_flags = [
+                is_turn_done(checkpoint, condition, t["series_index"], t["turn_index"])
+                for t in scoped_sequence
+            ]
             # M19 Phase 3 — resume optimization: if every turn for this
             # condition is already recorded in the checkpoint, skip the
             # restart/wipe/seed entirely rather than churning the graph for
@@ -505,12 +519,20 @@ def execute_run(
             # series report has already been generated (wipe_graph() itself
             # never touches analytics/feedback_events, so no data was ever
             # at risk here — this only removes wasted work).
-            if all(
-                is_turn_done(checkpoint, condition, t["series_index"], t["turn_index"])
-                for t in scoped_sequence
-            ):
+            if condition_turn_done_flags and all(condition_turn_done_flags):
                 print_fn(f"\n=== Condition: {condition} — already complete, skipping ===")
                 continue
+
+            # A condition with SOME (but not all) turns already done is
+            # being resumed mid-flight: wipe_graph()/seed_graph() must be
+            # skipped so the remaining turns see the same graph state
+            # (retrieved MUs, reinforced edges) the completed turns left
+            # behind, not a freshly reset one. The backend still gets
+            # restarted (if configured) so EXPERIMENT_ID is correct for the
+            # remaining turns' analytics rows — that restart never touches
+            # the graph itself (bind-mounted volume, untouched by a
+            # container recreate).
+            resuming_condition = any(condition_turn_done_flags)
 
             print_fn(f"\n=== Condition: {condition} ===")
             experiment_id = f"{run_identity}_{condition}"
@@ -529,28 +551,37 @@ def execute_run(
                     raise HardStopError(error_summary) from exc
                 print_fn(f"Backend restarted for condition={condition} EXPERIMENT_ID={experiment_id}")
 
-            try:
-                wipe_result = client.wipe_graph(experiment_id=experiment_id)
-                seed_result = client.seed_graph(version="v2")
-                stats = client.graph_stats()
-            except BackendConnectivityError as exc:
-                error_summary = f"connectivity during wipe/seed for condition {condition}: {exc}"
-                raise HardStopError(error_summary) from exc
+            if resuming_condition:
+                print_fn(
+                    f"Resuming condition={condition} mid-flight — wipe/seed skipped so "
+                    f"the graph context built by already-completed turns is preserved."
+                )
+            else:
+                try:
+                    wipe_result = client.wipe_graph(experiment_id=experiment_id)
+                    seed_result = client.seed_graph(version="v2")
+                    stats = client.graph_stats()
+                except BackendConnectivityError as exc:
+                    error_summary = f"connectivity during wipe/seed for condition {condition}: {exc}"
+                    raise HardStopError(error_summary) from exc
 
-            print_fn(
-                f"Wiped graph for condition={condition}: "
-                f"mus_deleted={wipe_result.get('mus_deleted')} "
-                f"edges_deleted={wipe_result.get('edges_deleted')} "
-                f"archive={wipe_result.get('archive_path')}"
-            )
-            print_fn(
-                f"Seeded graph for condition={condition}: "
-                f"mu_count={seed_result.get('mu_count')} stats_mu_count={stats.get('mu_count')}"
-            )
+                print_fn(
+                    f"Wiped graph for condition={condition}: "
+                    f"mus_deleted={wipe_result.get('mus_deleted')} "
+                    f"edges_deleted={wipe_result.get('edges_deleted')} "
+                    f"archive={wipe_result.get('archive_path')}"
+                )
+                print_fn(
+                    f"Seeded graph for condition={condition}: "
+                    f"mu_count={seed_result.get('mu_count')} stats_mu_count={stats.get('mu_count')}"
+                )
 
             # M19 Phase 3 — random_weight control: re-randomize edge weights
-            # at the start of each series (tracked per condition so a
-            # resumed run never re-randomizes a series already in progress).
+            # once at the start of each series. series_previously_started
+            # (snapshotted before this invocation's own turns) is what
+            # actually prevents re-randomizing a series resumed mid-flight —
+            # randomized_series_this_condition only dedupes within this
+            # same loop pass, it doesn't know about prior invocations.
             randomized_series_this_condition: set = set()
 
             for turn in scoped_sequence:
@@ -563,21 +594,28 @@ def execute_run(
                     and turn["series_index"] not in randomized_series_this_condition
                 ):
                     randomized_series_this_condition.add(turn["series_index"])
-                    try:
-                        randomize_result = client.randomize_edges()
+                    if (condition, turn["series_index"]) in series_previously_started:
                         print_fn(
-                            f"  Randomized edge weights for condition={condition} "
-                            f"series_index={turn['series_index']}: "
-                            f"edges_randomized={randomize_result.get('edges_randomized')}"
+                            f"  Skipping edge randomization for condition={condition} "
+                            f"series_index={turn['series_index']} — series already in "
+                            f"progress from a prior session."
                         )
-                    except BackendConnectivityError as exc:
-                        if error_policy.get("connectivity") == "hard_stop":
-                            error_summary = (
-                                f"connectivity during edge randomization for condition="
-                                f"{condition} series_index={turn['series_index']}: {exc}"
+                    else:
+                        try:
+                            randomize_result = client.randomize_edges()
+                            print_fn(
+                                f"  Randomized edge weights for condition={condition} "
+                                f"series_index={turn['series_index']}: "
+                                f"edges_randomized={randomize_result.get('edges_randomized')}"
                             )
-                            raise HardStopError(error_summary) from exc
-                        print_fn(f"  edge randomization failed (soft-continue): {exc}")
+                        except BackendConnectivityError as exc:
+                            if error_policy.get("connectivity") == "hard_stop":
+                                error_summary = (
+                                    f"connectivity during edge randomization for condition="
+                                    f"{condition} series_index={turn['series_index']}: {exc}"
+                                )
+                                raise HardStopError(error_summary) from exc
+                            print_fn(f"  edge randomization failed (soft-continue): {exc}")
 
                 series_id = series_id_map[f"{condition}:{turn['series_index']}"]
                 message = build_turn_message(probes, turn, condition, prompt_lookup)

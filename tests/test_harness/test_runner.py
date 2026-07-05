@@ -341,7 +341,10 @@ def test_rerunning_an_already_complete_plan_gets_a_new_run_id_and_experiment_id(
 def test_resuming_an_incomplete_run_keeps_the_same_run_id_and_experiment_id(tmp_path):
     """Accepting a resume must NOT bump the attempt number — this is the
     common, everyday case and has to stay byte-for-byte the original
-    run_id/experiment_id convention."""
+    run_id/experiment_id convention. wipe/seed must NOT be repeated for a
+    condition resumed mid-flight (see
+    test_resume_mid_series_preserves_graph_and_skips_wipe_seed for the
+    graph-preservation rationale)."""
     plan = _plan(dry_run=True, dry_run_n=2, conditions=["learned"])
 
     failing_client = FakeBackendClient(chat_errors={1: BackendConnectivityError("dropped")})
@@ -356,7 +359,61 @@ def test_resuming_an_incomplete_run_keeps_the_same_run_id_and_experiment_id(tmp_
 
     assert second_outcome.status == "complete"
     assert second_outcome.run_id == first_outcome.run_id
-    assert healthy_client.wipe_calls == ["p1_learned"]
+    assert healthy_client.wipe_calls == []
+    assert healthy_client.seed_calls == 0
+
+
+def test_resume_mid_series_preserves_graph_and_skips_wipe_seed(tmp_path):
+    """A condition resumed mid-flight (some turns already done, some
+    pending) must not wipe/reseed the graph — doing so would erase the
+    context (retrieved MUs, reinforced edges) the completed turns built up
+    before the interruption. The backend restart still happens when
+    configured, since that's needed for correct EXPERIMENT_ID stamping on
+    the remaining turns and never touches the graph itself."""
+    plan = _plan(dry_run=True, dry_run_n=3, conditions=["learned"])
+
+    failing_client = FakeBackendClient(chat_errors={1: BackendConnectivityError("dropped")})
+    first_outcome = execute_run(plan, failing_client, tmp_path, print_fn=_noop_print)
+    assert first_outcome.status == "aborted"
+    assert len(first_outcome.checkpoint.turns) == 1
+    assert failing_client.wipe_calls == ["p1_learned"]  # first attempt: brand new, wipes normally
+
+    healthy_client = FakeBackendClient()
+    restart_calls = []
+    second_outcome = execute_run(
+        plan, healthy_client, tmp_path,
+        resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+        docker_project_root=Path("/fake/project"),
+        restart_backend_fn=lambda root, env: restart_calls.append(env),
+    )
+
+    assert second_outcome.status == "complete"
+    assert healthy_client.wipe_calls == []  # graph preserved, not reset
+    assert healthy_client.seed_calls == 0
+    assert restart_calls == [{"EXPERIMENT_ID": "p1_learned"}]  # still restarted for correct stamping
+    assert healthy_client.chat_call_count == 2  # only the 2 remaining turns
+
+
+def test_resume_mid_series_does_not_re_randomize_edges(tmp_path):
+    """The random_weight control's re-randomization must happen exactly
+    once per series — resuming mid-series must not re-randomize, or the
+    turns before and after the interruption would see different random
+    baselines within what's supposed to be one comparable series."""
+    plan = _plan(dry_run=True, dry_run_n=3, conditions=["random_weight"])
+
+    failing_client = FakeBackendClient(chat_errors={1: BackendConnectivityError("dropped")})
+    first_outcome = execute_run(plan, failing_client, tmp_path, print_fn=_noop_print)
+    assert first_outcome.status == "aborted"
+    assert failing_client.randomize_calls == 1
+
+    healthy_client = FakeBackendClient()
+    second_outcome = execute_run(
+        plan, healthy_client, tmp_path,
+        resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+    )
+
+    assert second_outcome.status == "complete"
+    assert healthy_client.randomize_calls == 0
 
 
 def test_wipe_is_called_before_seed_for_each_condition(tmp_path):

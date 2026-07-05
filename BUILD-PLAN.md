@@ -3708,8 +3708,8 @@ session on their own)
 ## Status
 
 ```
-Current milestone: 19 Phase 1 — Prompt Bank Generation + Validation (not started)
-Last updated: 2026-07-04
+Current milestone: 19 Phase 2 — Judge Integration (not started)
+Last updated: 2026-07-05
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -3751,3 +3751,5 @@ Last updated: 2026-07-04
 **Milestone 18:** Complete — all 7 verification checks PASS with actual numbers on a freshly wiped + re-seeded graph (see PROGRESS.md 2026-06-29 entry), 332 unit tests passing, no regressions. Branches: `milestone-18-phase-0-infra-fixes` (PR #28), `milestone-18-phase-1-seed-v2-generation` (PR #29), `fix/smoketest-2026-06-29` phases 2–4 and final verification (PR #30, #31, #32) — all merged to main.
 
 **Milestone 19 Phase 0:** Complete — Run Plan schema, harness CLI skeleton (elicit/load, turn resolution, manifest, checkpoint, error policy, notification stub), and dry-run mode, all built and verified against the real Docker backend. Discovered and closed a real infrastructure gap along the way: `/admin/seed-graph` only ever did an idempotent merge, never a wipe — added `POST /admin/graph/wipe` (archive-then-delete) so per-condition graph resets are now real. All 7 §3.4 checks PASS with actual recorded output (see PROGRESS.md 2026-07-03 entry). 387 tests passing (332 baseline + 55 new), no regressions. Branch: `milestone-19-phase-0-harness-skeleton`.
+
+**Milestone 19 Phase 1:** Complete — `prompt_bank.py` (artifact schema, content hash, load/save with field-identifying validation) and `prompt_gen.py` (Sonnet-based generation + validation, cost-estimate confirmation gate, pure-Python fingerprint scan). `schema.py`, `turn_resolution.py`, `runner.py`, `elicit.py`, and `run_experiment_harness.py` wired end-to-end (deterministic `prompt_id` assignment, bank-backed `build_turn_message`, hard-stop preflight on a missing/invalid bank). All 4 verification checks PASS with real output against real seed_v2 + Sonnet 5 (see PROGRESS.md 2026-07-05 entry). 421 tests passing (387 baseline + 34 new), no regressions. Branch: `milestone-19-phase-1-prompt-bank`.

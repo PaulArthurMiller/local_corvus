@@ -242,3 +242,13 @@ reporting:
   # flagged as "possibly static" — the re-randomisation may not have fired.
   # Range: 0.01–0.2.
   random_control_variance_floor: 0.05
+
+prompt_gen:
+  # M19 Phase 1 — Sonnet-based prompt bank generation. Host-side only; the
+  # `anthropic` SDK is a dev dependency, never installed in the Docker image.
+  # Per-MTok rates used by scripts/harness/prompt_gen.py's cost-estimate
+  # confirmation gate before any API call. Update if Anthropic's published
+  # rates change (introductory pricing through 2026-08-31 is $2/$10;
+  # standard is $3/$15).
+  sonnet_price_per_mtok_in: 2.0
+  sonnet_price_per_mtok_out: 10.0

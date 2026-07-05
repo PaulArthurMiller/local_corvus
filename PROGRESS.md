@@ -4,8 +4,8 @@
 
 Project: Local Corvus — local LLM learning research platform  
 Phase: Active — M19 Phases 1–3 planned (BUILD-PLAN.md updated 2026-07-04)  
-Current milestone: 19 Phase 1 — Prompt Bank Generation + Validation — NOT STARTED  
-Next step: /build Milestone 19 Phase 1 — create `scripts/harness/prompt_bank.py` (artifact schema + content hash, no API calls) first, then `prompt_gen.py` (Sonnet generation/validation with cost-confirmation gate).
+Current milestone: 19 Phase 1 — Prompt Bank Generation + Validation — COMPLETE  
+Next step: Review PR for milestone-19-phase-1-prompt-bank, then /build Milestone 19 Phase 2 — Judge Integration (Gemma judge module, feedback_events migration, POST /feedback/verdict endpoint).
 
 ## Session log
 
@@ -636,3 +636,37 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
     - Turn content in Phase 0 is placeholder-only by design: probe turns cycle through `probe_set_v2.yaml` prompts; bulk turns get a labeled stub message. Real bulk-prompt generation is Phase 1's job.
   - Branch: `milestone-19-phase-0-harness-skeleton`
   - Milestone 19 Phase 0 status: COMPLETE — all Done criteria met (all deliverables built, all 7 §3.4 checks PASS with real recorded output, no regressions, wipe-gap closed with tests)
+
+- 2026-07-05: /build — Milestone 19 Phase 1 complete (Prompt Bank Generation + Validation)
+  - Created: `scripts/harness/prompt_bank.py` — `PromptBankEntry` (criteria constrained to 1-3 via pydantic `Field(min_length=1, max_length=3)`), `PromptBank` (+`validated_entries()`), `compute_bank_hash()`, `bank_path_for_hash()`, `save_bank()`/`load_bank()` (field-identifying validation errors, reusing `schema.format_validation_error()`)
+  - Created: `scripts/harness/prompt_gen.py` — the only file that talks to the Anthropic API:
+    - `read_cluster_content()` reads `seed_fixtures/seed_v2.json.gz` directly (host-side, no backend dependency); imports `CLUSTER_A_FP..D_FP` and `MU_IDS` straight from `generate_seed_v2.py` (no copy — single source of truth)
+    - `fingerprint_scan()` — pure-Python lexical-distinctness check, whole-word matching
+    - `distribute_counts()` / `distribute_hop_levels()` — deterministic round-robin distribution across the 4 clusters and hop-distance levels
+    - `generate_cluster_prompts_safely()` — 1 Sonnet call per cluster; malformed JSON retries the batch call once, then falls back to per-prompt generation so one bad response never loses the whole cluster
+    - `_finalize_entry()` — per-prompt validation (fingerprint scan + a second Sonnet coherence call) with up to `prompt_gen.max_retries` regenerations; persistent failures are excluded with a specific `exclusion_reason`, never silently dropped
+    - `estimate_generation_cost()` / `confirm_cost()` — pure local token-count heuristic (chars/4), no API call, printed before the first Sonnet request; requires explicit `y`
+    - `build_bank()` — hash-checks for an existing bank first (zero API calls on a re-run with identical params); `generate_bank_for_plan()` is the CLI-facing entry point (checks `ANTHROPIC_API_KEY` via `MissingApiKeyError` before constructing the client)
+  - Modified: `scripts/harness/schema.py` — `PromptGenConfig` (`model: str = "claude-sonnet-5"`, `max_retries: int = 2`); `RunPlan` gains `prompt_bank_path: Optional[str]` and `prompt_gen: PromptGenConfig`
+  - Modified: `scripts/harness/turn_resolution.py` — `assign_prompt_ids()`: deterministic draw-without-replacement (reshuffles once exhausted) from `random_seed`, assigns `prompt_id` to every bulk turn only
+  - Modified: `scripts/harness/runner.py` — preflight loads the bank (if `plan.prompt_bank_path` is set) and calls `assign_prompt_ids()` before the manifest is written; a missing/invalid bank routes through the existing error-policy machinery as a "connectivity"-class hard-stop (before `client.health()`, so zero wipe/seed calls happen); `build_turn_message()` now looks up `prompt_id` in a `prompt_lookup` dict built from the loaded bank's validated entries, falling back to the Phase 0 placeholder stub only when no bank is loaded
+  - Modified: `scripts/harness/elicit.py` — prompts for `prompt_bank_path`, `prompt_gen.model`, `prompt_gen.max_retries`
+  - Modified: `scripts/run_experiment_harness.py` — `--generate-bank` flag (build/reuse a bank and exit without running an experiment); auto-generates a bank before executing when `prompt_bank_path` is absent and `conceptual_fields.subjects == "auto"`
+  - Modified: `config.yaml` — new `prompt_gen:` section (`sonnet_price_per_mtok_in: 2.0`, `sonnet_price_per_mtok_out: 10.0` — Sonnet 5 introductory rate through 2026-08-31)
+  - Added: `tests/test_harness/test_prompt_bank.py` (12 tests), `tests/test_harness/test_prompt_gen.py` (16 tests, all Sonnet calls mocked via `FakeAnthropicClient` — two tests use the real committed `seed_fixtures/seed_v2.json.gz` for fixture-reading/hash tests but make no network calls)
+  - Extended: `tests/test_harness/test_turn_resolution.py` (+6 tests: `assign_prompt_ids` determinism, different-seed variation, bulk-only assignment, bank-smaller-than-turns reshuffle, empty-bank no-op), `tests/test_harness/test_runner.py` (+2 tests: bulk turn message equals bank `prompt_text`, missing bank hard-stops before any `wipe_graph` call), `tests/test_harness/test_elicit.py` (scripted answers extended for the 3 new prompts)
+  - Tests: 34 new, 421 total — all passing, no regressions
+  - Dependency: installed `anthropic` Python SDK (host-side only, `pip install anthropic` — never added to `backend/requirements.txt` or the Docker image; no tracked `requirements-dev.txt` exists yet for host-side scripts, so this is a manual local install for now)
+  - **Verification protocol — all 4 checks PASS with real recorded output** (ANTHROPIC_API_KEY already exported; user confirmed proceeding with real, small Sonnet 5 API spend before this ran):
+    1. `--generate-bank` against real `seed_v2.json.gz`, plan with `total_prompts=20, probe_ratio=0.2` (16 bulk prompts): cost estimate printed as `$0.0682 (~24075 input tokens, ~2000 output tokens)`, confirmed, bank written to `prompt_banks/prompt_bank_3a3c7eb69111a3891c7bc399758b539953164548a5b2db269c643bcb51c2c511.json`. Per-cluster counts: `cluster_a {generated:4, validated:4, excluded:0}`, `cluster_b {4,3,1}`, `cluster_c {4,3,1}`, `cluster_d {4,4,0}` — 14/16 validated; the 2 exclusions were real fingerprint leaks (`['field']`, `['data']`) caught correctly after exhausting retries. PASS.
+    2. Re-ran the identical plan with `--generate-bank`: `Prompt bank already exists for hash=3a3c7eb6... — reusing (no API calls)` — zero HTTP requests logged. PASS.
+    3. Dry-run (`dry_run_n=2`) against a fake backend client with the generated bank wired via `prompt_bank_path`: both bulk turns produced real Sonnet-generated prompt text (e.g. `"Why is it so important that fields always show up in the same sequence..."`), and the manifest's `resolved_turn_sequence` carried `prompt_id: "cluster_d_0000"` / `"cluster_a_0001"` on those turns. The `"[Phase 0 placeholder"` string did not appear anywhere in the output. PASS. (Full Docker-backend dry-run deferred — the backend container wasn't running this session; Ollama was reachable but `localhost:8000` was not — so this check used the same `execute_run()` entry point against a fake `BackendClient`, which is the same code path the real backend would exercise.)
+    4. Full test suite: 421 passed, 0 failed, no regressions. PASS.
+  - Key decisions:
+    - Fingerprint-scan failures skip the (paid) Sonnet coherence call entirely — a lexical leak is a hard local fail, no reason to spend a second API call confirming it
+    - Batch generation retries the *same* per-cluster call once on malformed JSON, then falls back to per-prompt generation — this means one bad batch response degrades gracefully to per-prompt retries instead of losing the whole cluster
+    - `compute_fixture_manifest_hash()` reimplements the sha256-over-raw-bytes logic locally rather than importing `backend.analytics.seed_fixture.compute_fixture_hash` — that module pulls in the backend's async DB layer, which is wrong for a standalone host-side script
+    - `prompt_bank_path` preflight failure is treated as "connectivity"-class severity in the error-policy dict (same override mechanism as backend-unreachable errors) rather than an unconditional hard-stop, per the build plan's explicit framing
+    - The one 20-prompt verification bank (`prompt_banks/prompt_bank_3a3c...json`) is committed as evidence of a real, successful end-to-end run — `prompt_banks/` is not gitignored, consistent with `seed_fixtures/` being a committed, reusable artifact
+  - Branch: `milestone-19-phase-1-prompt-bank`
+  - Milestone 19 Phase 1 status: COMPLETE — all Done criteria met (all 4 verification checks PASS with real recorded output, criteria present on every validated entry, placeholder string confirmed absent from bank-backed dry-run output, no regressions)

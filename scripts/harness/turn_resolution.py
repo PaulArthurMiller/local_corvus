@@ -91,3 +91,30 @@ def resolve_turn_sequence(plan: RunPlan) -> list:
             })
 
     return sequence
+
+
+def assign_prompt_ids(sequence: list, prompt_ids: list, random_seed: int) -> list:
+    """
+    Assign a `prompt_id` to every bulk turn in `sequence`, deterministically
+    drawn without replacement from `prompt_ids` (reshuffling once exhausted).
+    Probe turns are left untouched. Same (sequence, prompt_ids, random_seed)
+    always produces the same assignment, which is what allows a resumed run
+    to replay identical prompts.
+
+    Returns a new list of dicts — does not mutate the input dicts in place.
+    """
+    if not prompt_ids:
+        return sequence
+
+    rng = random.Random(random_seed)
+    pool: list = []
+    result = []
+    for turn in sequence:
+        new_turn = dict(turn)
+        if turn["turn_type"] == TURN_TYPE_BULK:
+            if not pool:
+                pool = list(prompt_ids)
+                rng.shuffle(pool)
+            new_turn["prompt_id"] = pool.pop()
+        result.append(new_turn)
+    return result

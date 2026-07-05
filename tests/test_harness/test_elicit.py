@@ -42,6 +42,9 @@ _ANSWERS = [
     "",                 # error_policy overrides
     "n",                # notification.enabled
     "",                 # budget_cap
+    "",                 # prompt_bank_path
+    "",                 # prompt_gen.model
+    "",                 # prompt_gen.max_retries
     "y",                # dry_run
     "3",                # dry_run_n
     "7",                # random_seed
@@ -68,6 +71,9 @@ def test_elicit_plan_produces_validated_plan_matching_scripted_answers():
     assert plan.condition_order == ["learned", "static_weight"]
     assert plan.notification.enabled is False
     assert plan.budget_cap is None
+    assert plan.prompt_bank_path is None
+    assert plan.prompt_gen.model == "claude-sonnet-5"
+    assert plan.prompt_gen.max_retries == 2
     assert plan.dry_run is True
     assert plan.dry_run_n == 3
     assert plan.random_seed == 7

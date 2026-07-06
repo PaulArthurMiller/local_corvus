@@ -197,6 +197,28 @@ def _scrub_prompt_for_storage(messages: list[dict]) -> list[dict]:
     return scrubbed
 
 
+def _prompt_mu_content(condensed_context: str, user_content: str) -> str:
+    """
+    Content stored on a turn's prompt MU — the model-facing prompt WITHOUT
+    the injected memory context.
+
+    MU content is retrievable: if the prompt MU stored the full assembled
+    prompt, every retrieved MU's text (and the "--- Context from memory ---"
+    markers) would be copied into a new graph node, and retrieving that node
+    on a later turn would inject old context — markers and all — inside the
+    new turn's context block, compounding each time. The assembled prompt is
+    still fully audited in analytics.assembled_prompt_json, and which MUs
+    contributed context is recorded structurally by the prompt MU's edges.
+
+    The "[User message]" label is kept when context was injected so the
+    stored content matches the user-message portion of the prompt that was
+    actually sent (see Step 4 in run_interaction).
+    """
+    if condensed_context:
+        return f"[User message]\n{user_content}"
+    return user_content
+
+
 @dataclass
 class AttachmentInput:
     """Raw attachment data from the API layer, before sanitization."""
@@ -352,8 +374,15 @@ async def run_interaction(
     session_turn_index = await graph_store.get_series_turn_count(series_id)
 
     # --- Step 5: Create prompt MU + edges to contributing MUs ---
+    # The stored MU deliberately excludes the injected memory context: MU
+    # content is retrievable, so storing the assembled prompt would re-embed
+    # every retrieved MU (plus the "--- Context from memory ---" markers)
+    # into the graph, and a later retrieval of this MU would nest old context
+    # inside new context. The full assembled prompt is still audited — it
+    # lives in analytics.assembled_prompt_json; the context linkage lives in
+    # this MU's prompt->retrieved-MU edges.
     prompt_um = create_um(
-        content=prompt_text,
+        content=_prompt_mu_content(condensed_context, input_result.content),
         source_type="prompt",
         boundary="agent->llm",
         direction="out",

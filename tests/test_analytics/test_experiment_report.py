@@ -733,3 +733,111 @@ def test_learning_measures_fall_back_to_condition_label_for_legacy_rows():
         assert p01["session_indices"] == [1]
         assert measures["probe_pass_rates"]["p01"] == 1.0
         print(f"[PASS] §6.1 legacy condition_label fallback: {p01}")
+
+
+# ---------------------------------------------------------------------------
+# §5 aggregation must use stored series reports, not the wiped live graph
+# ---------------------------------------------------------------------------
+
+
+def _make_stored_series_report(experiment_id: str, series_id: str, s5_3: dict) -> dict:
+    """Build a persisted-series-report dict with the section shape
+    write_series_report() produces (full section names under 'sections')."""
+    return {
+        "report_id": str(uuid.uuid4()),
+        "report_type": "series",
+        "experiment_id": experiment_id,
+        "series_id": series_id,
+        "generated_at": "2026-07-06T09:00:00+00:00",
+        "run_count": 1,
+        "sections": {
+            "s5_1_failure_summary": {
+                "failed_turn_count": 0, "ghost_mu_count": 0,
+                "failed_turns": [], "ghost_incidents": [],
+            },
+            "s5_2_retrieval_trace_digest": {"turn_count": 1, "traces": []},
+            "s5_3_retrieval_rate_classification": s5_3,
+            "s5_4_cross_series_edges": {"cross_series_edge_count": 0, "edges": []},
+            "s5_5_edge_weight_deltas": {"activated_edge_count": 0, "deltas": []},
+            "s5_6_probe_integrity": {"status": "PASS", "violation_count": 0},
+            "s5_7_mode3_trigger_count": {"mode3_mu_count": 0, "anomaly_count": 0},
+            "s5_8_num_ctx_pressure": {"pressure_turn_count": 0, "context_window_tokens": 8192},
+        },
+    }
+
+
+def test_experiment_report_prefers_stored_series_reports_over_wiped_graph():
+    """Regression (2026-07-06 pilot): the experiment report runs after later
+    conditions have wiped this condition's MUs. Recomputing §5.3 from the
+    live graph then classifies every deleted MU as 'unknown' and reports a
+    0.0 intra-series rate — the stored series-close report must win."""
+    with TempDB() as store:
+        experiment_id = "exp-wiped"
+        series_id = "series-W"
+        # Run whose activated MUs no longer exist in memory_units — the state
+        # a non-final condition is in once a later condition has wiped the graph.
+        run(store.insert_run(_make_minimal_run(
+            series_id=series_id, experiment_id=experiment_id,
+            activated_mu_ids=[_mu_id(), _mu_id(), _mu_id()],
+        )))
+
+        stored = _make_stored_series_report(experiment_id, series_id, s5_3={
+            "total_retrieved": 3, "intra_series_count": 1, "seed_fixture_count": 2,
+            "cross_series_count": 0, "unknown_count": 0,
+            "intra_series_rate": 0.3333, "per_turn": [],
+        })
+
+        with tempfile.TemporaryDirectory() as reports_dir:
+            json_path = Path(reports_dir) / f"series_report_{series_id}.json"
+            json_path.write_text(json.dumps(stored), encoding="utf-8")
+            run(store.insert_generated_report({
+                "report_id": stored["report_id"], "report_type": "series",
+                "experiment_id": experiment_id, "series_id": series_id,
+                "generated_at": stored["generated_at"],
+                "json_path": str(json_path), "md_path": str(json_path),
+            }))
+
+            with mock.patch(
+                "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+            ):
+                report = run(generate_experiment_report(experiment_id, store))
+
+    agg = report["series_summary"]["s5_3_retrieval_rate_aggregation"]
+    per = {p["series_id"]: p for p in agg["per_series"]}
+    print(f"stored-report aggregation: {per[series_id]}")
+    # Values come from the stored snapshot — NOT the live-graph recompute,
+    # which would produce intra=0 / unknown=3 here.
+    assert per[series_id]["intra_series_rate"] == 0.3333
+    assert per[series_id]["intra_series_count"] == 1
+    assert per[series_id]["unknown_count"] == 0
+    assert agg["mean_intra_series_rate"] == 0.3333
+
+
+def test_experiment_report_recomputes_when_stored_report_unreadable():
+    """A registered series report whose JSON file is missing must not break
+    generation — the section falls back to the live-graph recompute."""
+    with TempDB() as store:
+        experiment_id = "exp-fallback"
+        series_id = "series-F"
+        run(store.insert_run(_make_minimal_run(
+            series_id=series_id, experiment_id=experiment_id,
+        )))
+        run(store.insert_generated_report({
+            "report_id": str(uuid.uuid4()), "report_type": "series",
+            "experiment_id": experiment_id, "series_id": series_id,
+            "generated_at": "2026-07-06T09:00:00+00:00",
+            "json_path": "/nonexistent/path/series_report.json",
+            "md_path": "/nonexistent/path/series_report.md",
+        }))
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report(experiment_id, store))
+
+    agg = report["series_summary"]["s5_3_retrieval_rate_aggregation"]
+    per = {p["series_id"]: p for p in agg["per_series"]}
+    print(f"fallback aggregation: {per[series_id]}")
+    # Recomputed from the live graph (no activated MUs → 0 retrieved), and
+    # generation completed without raising.
+    assert per[series_id]["total_retrieved"] == 0

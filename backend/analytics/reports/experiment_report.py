@@ -56,6 +56,87 @@ def _load_config() -> dict:
         return yaml.safe_load(f)
 
 
+# Maps the short per-series section keys used by the §5 aggregators to the
+# full section names used in persisted series report JSON files.
+_SERIES_SECTION_KEY_MAP = {
+    "s5_1": "s5_1_failure_summary",
+    "s5_3": "s5_3_retrieval_rate_classification",
+    "s5_5": "s5_5_edge_weight_deltas",
+    "s5_6": "s5_6_probe_integrity",
+    "s5_7": "s5_7_mode3_trigger_count",
+    "s5_8": "s5_8_num_ctx_pressure",
+}
+
+
+async def _load_stored_series_data(
+    experiment_id: str, store: GraphStore
+) -> dict[str, dict]:
+    """
+    Load per-series §5 section data from series reports persisted at
+    series-close time.
+
+    The experiment report runs at the end of a multi-condition harness run,
+    after later conditions' wipe_graph() calls have already deleted this
+    condition's MUs — recomputing MU-dependent sections (§5.3 retrieval
+    classification, §5.7 Mode-3 counts) from the live graph at that point
+    misclassifies every deleted MU as "unknown". The stored series report is
+    the snapshot taken while the series' MUs still existed, so it is the
+    authoritative source; recomputation remains the fallback for any series
+    without a readable stored report (e.g. ad-hoc report generation via the
+    admin API before series reports exist).
+
+    Returns {series_id: {"run_count": int, "sections": {short_key: data}}}
+    for every series whose newest stored report is readable and complete.
+    """
+    stored: dict[str, dict] = {}
+    rows = await store.query_generated_reports(
+        report_type="series", experiment_id=experiment_id
+    )
+
+    # Rows are ordered generated_at DESC — the first row seen for a series
+    # is its newest report and wins.
+    for row in rows:
+        sid = row.get("series_id")
+        json_path = row.get("json_path")
+        if not sid or sid in stored or not json_path:
+            continue
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "experiment_report: stored series report unreadable, will "
+                "recompute series=%s path=%s error=%s",
+                sid, json_path, exc,
+            )
+            continue
+
+        sections = report.get("sections") or {}
+        if "run_count" not in report or not all(
+            long_key in sections for long_key in _SERIES_SECTION_KEY_MAP.values()
+        ):
+            logger.warning(
+                "experiment_report: stored series report incomplete, will "
+                "recompute series=%s path=%s",
+                sid, json_path,
+            )
+            continue
+
+        stored[sid] = {
+            "run_count": report["run_count"],
+            "sections": {
+                short: sections[long_key]
+                for short, long_key in _SERIES_SECTION_KEY_MAP.items()
+            },
+        }
+
+    logger.info(
+        "experiment_report: loaded %d stored series report(s) for experiment_id=%s",
+        len(stored), experiment_id,
+    )
+    return stored
+
+
 # ---------------------------------------------------------------------------
 # §5 aggregation helpers
 # ---------------------------------------------------------------------------
@@ -1111,9 +1192,21 @@ async def generate_experiment_report(
     series_ids = await store.get_all_series_for_experiment(experiment_id)
     logger.info("experiment_report: found %d series: %s", len(series_ids), series_ids)
 
-    # Gather per-series section data (re-query directly — always current)
+    # Gather per-series section data. Prefer the series reports persisted at
+    # series-close time: recomputing from the live graph here is wrong for
+    # any condition that isn't the last one run, because each subsequent
+    # condition's wipe_graph() deletes this condition's MUs and every
+    # MU-dependent classification silently degrades to "unknown".
+    stored_series_data = await _load_stored_series_data(experiment_id, store)
     series_data: dict[str, dict] = {}
     for sid in series_ids:
+        if sid in stored_series_data:
+            series_data[sid] = stored_series_data[sid]
+            continue
+        logger.info(
+            "experiment_report: no stored series report for series=%s — "
+            "recomputing from the live graph", sid,
+        )
         runs = await store.get_all_runs_for_series(sid)
         series_data[sid] = {
             "run_count": len(runs),

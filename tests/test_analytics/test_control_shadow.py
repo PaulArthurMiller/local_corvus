@@ -28,6 +28,7 @@ from analytics.reports.control_shadow import (
     _check_static_zero_weight_changes,
     _check_random_weights_rerandomized,
     _check_zero_feedback_edge_correlation,
+    _collect_probe_results_for_experiment,
     _compute_comparative_deltas,
 )
 
@@ -437,3 +438,71 @@ class TestComputeComparativeDeltas:
         assert "bridge_mu_rank_delta" in deltas
         assert "edge_weight_delta_magnitude" in deltas
         assert "mean_gold_mu_rank_delta" in deltas
+
+
+# ---------------------------------------------------------------------------
+# _collect_probe_results_for_experiment — §6.2 experiment_id scoping
+# ---------------------------------------------------------------------------
+
+
+def _insert_probe_row(store, probe_id, session_idx, condition_label,
+                      experiment_id=None, gold_mu_rank=None):
+    async_run(store.insert_probe_result({
+        "result_id": str(uuid.uuid4()),
+        "probe_id": probe_id,
+        "run_id": None,
+        "measurement_session_index": session_idx,
+        "condition_label": condition_label,
+        "retrieved_mu_ids": [],
+        "gold_mu_rank": gold_mu_rank,
+        "retrieval_precision": None,
+        "retrieval_recall": None,
+        "bm25_scores_per_mu": {},
+        "experiment_id": experiment_id,
+    }))
+
+
+_PROBE_DEF = {
+    "probe_id": "p01", "probe_set_version": "v2",
+    "phenomenon_type": "ranking_improvement", "prompt_text": "test probe",
+    "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+}
+
+
+class TestCollectProbeResultsForExperiment:
+    def test_scoped_to_experiment_id_not_condition_label(self):
+        """Rows from another attempt sharing the condition_label are excluded —
+        comparative deltas must only see this experiment's measurements."""
+        with TempDB() as store:
+            async_run(store.sync_probes([_PROBE_DEF]))
+            _insert_probe_row(store, "p01", 1, "learned",
+                              experiment_id="plan1_learned", gold_mu_rank=1)
+            # Same condition_label, different attempt — must not appear.
+            _insert_probe_row(store, "p01", 1, "learned",
+                              experiment_id="plan1_attempt2_learned", gold_mu_rank=9)
+
+            all_probes = async_run(store.get_all_probes())
+            results = async_run(_collect_probe_results_for_experiment(
+                store, all_probes, "plan1_learned", "learned"
+            ))
+
+            print(f"scoped results: {[(r['experiment_id'], r['gold_mu_rank']) for r in results]}")
+            assert len(results) == 1
+            assert results[0]["experiment_id"] == "plan1_learned"
+            assert results[0]["gold_mu_rank"] == 1
+
+    def test_falls_back_to_condition_label_for_legacy_rows(self):
+        """Pre-M21 rows (experiment_id=NULL) are still found via the
+        condition_label fallback when no experiment-stamped rows exist."""
+        with TempDB() as store:
+            async_run(store.sync_probes([_PROBE_DEF]))
+            _insert_probe_row(store, "p01", 1, "learning", gold_mu_rank=2)
+
+            all_probes = async_run(store.get_all_probes())
+            results = async_run(_collect_probe_results_for_experiment(
+                store, all_probes, "legacy_experiment", "learning"
+            ))
+
+            print(f"legacy fallback results: {len(results)}")
+            assert len(results) == 1
+            assert results[0]["gold_mu_rank"] == 2

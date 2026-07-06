@@ -17,6 +17,7 @@ Next step: Review PR for fix/smoketest-2026-07-06 (3 report-layer fixes surfaced
   - Experiment report regenerated via `POST /admin/reports/generate-experiment` after the fixes: §5.3 mean intra-series rate 31.8% (0 unknowns), §6.1 probe_count 10 / 4 bridge probes, §6.2 deltas experiment-scoped. The 0.0 pass-rate/bridge-rank deltas vs both controls are genuine (identical final gold ranks across conditions), not artifacts — see the science note under Next step.
   - Tests: 617 total (611 baseline + 6 new: 2 stored-series-report, 2 §6.2 scoping, 2 §6.1 battery filtering), all passing, no regressions.
   - Branch: fix/smoketest-2026-07-06
+  - PR: https://github.com/PaulArthurMiller/local_corvus/pull/41
 
 - 2026-07-05: /build — Milestone 21 complete (Harness Probe Battery Wiring + prompt-MU nesting fix; the two gaps surfaced by the PR #39 stub pilot)
   - **Gap 1 (the milestone): the harness never called `POST /admin/run-probe`.** Probe turns were Phase-0 `/chat` placeholders — they mutated the graph, weren't stamped `is_probe_turn`, and recorded no `probe_results` rows, so §6.1 `probe_pass_rates` were all null and state-transition/bridge trajectories were empty.

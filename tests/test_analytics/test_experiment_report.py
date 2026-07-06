@@ -735,6 +735,64 @@ def test_learning_measures_fall_back_to_condition_label_for_legacy_rows():
         print(f"[PASS] §6.1 legacy condition_label fallback: {p01}")
 
 
+def test_learning_measures_exclude_probes_from_batteries_not_run():
+    """Probes synced from another probe-set version, with no results for this
+    experiment, must not appear in §6.1 (they render as insufficient_data
+    noise and inflate probe/bridge counts)."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        # Two synced probe sets: only the v2 probe recorded measurements.
+        run(store.sync_probes([
+            {"probe_id": "p01", "probe_set_version": "v1",
+             "phenomenon_type": "ranking_improvement", "prompt_text": "stale v1 probe",
+             "gold_mu_ids": [], "is_bridge_probe": True, "bridge_pair_id": "pair1"},
+            {"probe_id": "p06", "probe_set_version": "v2",
+             "phenomenon_type": "ranking_improvement", "prompt_text": "active v2 probe",
+             "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None},
+        ]))
+        _insert_probe_row(store, "p06", 1, "learned", experiment_id=experiment_id, gold_mu_rank=1)
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        probe_ids = [p["probe_id"] for p in measures["state_transitions"]["per_probe"]]
+        print(f"probes in §6.1: {probe_ids}")
+        assert probe_ids == ["p06"]
+        assert measures["probe_count"] == 1
+        # The stale v1 bridge probe must not inflate the bridge analysis either.
+        assert measures["bridge_mu_analysis"]["bridge_probe_count"] == 0
+        assert "p01" not in measures["probe_pass_rates"]
+
+
+def test_learning_measures_keep_all_probes_when_no_results_exist():
+    """With zero probe results anywhere, §6.1 still generates with the full
+    probe list and empty data — the pre-existing empty-section contract."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "exp-no-probes-run"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([
+            {"probe_id": "p01", "probe_set_version": "v1",
+             "phenomenon_type": "ranking_improvement", "prompt_text": "probe",
+             "gold_mu_ids": [], "is_bridge_probe": False, "bridge_pair_id": None},
+        ]))
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        print(f"probe_count with no results: {measures['probe_count']}")
+        assert measures["probe_count"] == 1
+        assert measures["probe_pass_rates"] == {"p01": None}
+
+
 # ---------------------------------------------------------------------------
 # §5 aggregation must use stored series reports, not the wiped live graph
 # ---------------------------------------------------------------------------

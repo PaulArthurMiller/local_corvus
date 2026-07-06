@@ -1080,6 +1080,20 @@ async def _section_61_learning_measures(
                 condition_label=condition_label,
             )
 
+    # Restrict §6.1 to probes that actually recorded measurements for this
+    # experiment. The probes table accumulates every synced probe-set version
+    # (v1 + v2 + ...), so probes from batteries this experiment never ran
+    # would otherwise render as insufficient_data noise and inflate the
+    # probe/bridge counts. When no probe has results at all, keep the full
+    # list — the section still generates with empty data (existing contract).
+    if any(results_by_probe.values()):
+        probes = [p for p in probes if results_by_probe.get(p["probe_id"])]
+        logger.info(
+            "experiment_report §6.1: %d probe(s) with results for this "
+            "experiment (of %d synced probe definitions)",
+            len(probes), len(results_by_probe),
+        )
+
     # Collect all MU IDs referenced in probe results and weight_updates for info lookup
     all_mu_ids: set[str] = set()
     for results in results_by_probe.values():

@@ -316,6 +316,39 @@ def _compute_comparative_deltas(
     }
 
 
+async def _collect_probe_results_for_experiment(
+    store: GraphStore,
+    all_probes: list[dict],
+    experiment_id: str,
+    condition_label: Optional[str],
+) -> list[dict]:
+    """
+    Collect every probe result belonging to one experiment, for the
+    comparative-delta computation.
+
+    Scoped by experiment_id first (M21): condition_label is shared by every
+    attempt/dry-run of a condition, so filtering by it alone would mix probe
+    rows from unrelated runs of the same plan into the deltas — the same
+    contamination class §6.1/§6.3 already guard against. condition_label
+    remains as a fallback for rows recorded before experiment_id stamping.
+    """
+    collected: list[dict] = []
+    for probe in all_probes:
+        results = await store.query_probe_results(
+            probe_id=probe["probe_id"],
+            experiment_id=experiment_id,
+        )
+        collected.extend(results)
+    if not collected and condition_label:
+        for probe in all_probes:
+            results = await store.query_probe_results(
+                probe_id=probe["probe_id"],
+                condition_label=condition_label,
+            )
+            collected.extend(results)
+    return collected
+
+
 # ---------------------------------------------------------------------------
 # Main control shadow generator
 # ---------------------------------------------------------------------------
@@ -349,16 +382,15 @@ async def generate_control_shadow(
     # The DB does not track probe_set_version per condition — use the YAML version.
     # For now we just check that probes exist; version mismatch guard is a warning.
 
-    # Collect probe results per condition label for comparative deltas
+    # Collect probe results per condition for comparative deltas — scoped by
+    # experiment_id (with a legacy condition_label fallback) so another
+    # attempt/dry-run of the same plan can never contaminate the deltas.
     probe_results_by_condition: dict[str, list[dict]] = {}
-    learned_cond_results = []
-    for probe in all_probes:
-        results = await store.query_probe_results(
-            probe_id=probe["probe_id"],
-            condition_label=learned_condition,
+    probe_results_by_condition[learned_condition] = (
+        await _collect_probe_results_for_experiment(
+            store, all_probes, learned_experiment_id, learned_condition
         )
-        learned_cond_results.extend(results)
-    probe_results_by_condition[learned_condition] = learned_cond_results
+    )
 
     control_shadow: dict[str, dict] = {}
 
@@ -377,16 +409,13 @@ async def generate_control_shadow(
             control_eid, store, config
         )
 
-        # Probe results for this control condition
-        control_cond_results = []
-        if control_condition:
-            for probe in all_probes:
-                results = await store.query_probe_results(
-                    probe_id=probe["probe_id"],
-                    condition_label=control_condition,
-                )
-                control_cond_results.extend(results)
-        probe_results_by_condition[control_condition or control_name] = control_cond_results
+        # Probe results for this control experiment (experiment_id-scoped,
+        # legacy condition_label fallback)
+        probe_results_by_condition[control_condition or control_name] = (
+            await _collect_probe_results_for_experiment(
+                store, all_probes, control_eid, control_condition
+            )
+        )
 
         # Sanity checks
         sanity_checks: dict[str, Any] = {}

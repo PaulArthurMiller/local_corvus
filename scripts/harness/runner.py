@@ -57,7 +57,12 @@ from harness.manifest import (
 from harness.notify import build_notification_payload, notify
 from harness.prompt_bank import PromptBank, PromptBankEntry, load_bank
 from harness.schema import DEFAULT_ERROR_POLICY, RunPlan
-from harness.turn_resolution import TURN_TYPE_PROBE, assign_prompt_ids, resolve_turn_sequence
+from harness.turn_resolution import (
+    TURN_TYPE_PROBE,
+    assign_probe_schedule,
+    assign_prompt_ids,
+    resolve_turn_sequence,
+)
 
 logger = logging.getLogger("harness.runner")
 
@@ -83,18 +88,20 @@ def resolve_error_policy(plan: RunPlan) -> dict:
     return policy
 
 
-def load_probe_prompts(probe_set_path: Path) -> list:
+def load_probe_battery(probe_set_path: Path) -> list:
     """
-    Load {probe_id, prompt_text} pairs from a probe_set_*.yaml file.
+    Load the probe battery — ordered {probe_id, prompt_text} entries — from
+    a probe_set_*.yaml file.
 
     Standalone parse (no backend import) — mirrors the existing convention
     of scripts/generate_seed_v2.py and scripts/verify_seed_v2.py, which read
     fixture/probe files directly rather than importing backend internals.
-    Used only as placeholder turn content in Phase 0 (real bulk-prompt
-    generation is Phase 1).
+    M21: the battery's ordering drives assign_probe_schedule(); the backend
+    loads its own copy of the same file when POST /admin/run-probe executes,
+    so only probe_id (not prompt_text) crosses the API boundary.
     """
     if not probe_set_path.exists():
-        logger.warning("runner: probe set not found at %s — no placeholder content available", probe_set_path)
+        logger.warning("runner: probe set not found at %s — probe turns cannot run", probe_set_path)
         return []
     with open(probe_set_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -114,15 +121,13 @@ def _placeholder_bulk_message(condition: str, turn: dict) -> str:
     )
 
 
-def build_turn_message(probes: list, turn: dict, condition: str, prompt_lookup: Optional[dict] = None) -> str:
+def build_turn_message(turn: dict, condition: str, prompt_lookup: Optional[dict] = None) -> str:
     """
-    Resolve message content for a turn: probe prompt, a real bank prompt
-    (via turn["prompt_id"] -> prompt_lookup), or — with no bank loaded — the
-    Phase 0 labeled placeholder stub.
+    Resolve message content for a bulk turn: a real bank prompt (via
+    turn["prompt_id"] -> prompt_lookup), or — with no bank loaded — the
+    Phase 0 labeled placeholder stub. Probe turns never build a chat
+    message (M21 — they go through client.run_probe(), not client.chat()).
     """
-    if turn["turn_type"] == TURN_TYPE_PROBE and probes:
-        probe = probes[turn["turn_index"] % len(probes)]
-        return probe["prompt_text"]
     if prompt_lookup and turn.get("prompt_id") in prompt_lookup:
         return prompt_lookup[turn["prompt_id"]]
     return _placeholder_bulk_message(condition, turn)
@@ -310,8 +315,14 @@ def execute_run(
     Run the full harness skeleton against `client` and return a RunOutcome.
 
     `client` is injected so tests can pass a fake/stub BackendClient without
-    a real Docker stack. probes is an optional pre-loaded list of
-    {probe_id, prompt_text} used as placeholder content for probe turns.
+    a real Docker stack. probes is the pre-loaded probe battery (ordered
+    {probe_id, prompt_text} entries from load_probe_battery()) — M21: probe
+    turns run through POST /admin/run-probe (read-only retrieval, records a
+    probe_results row, never mutates the graph), scheduled deterministically
+    by assign_probe_schedule(). A plan whose resolved sequence contains
+    probe turns hard-stops before any graph mutation if no battery is
+    loaded — silently running an experiment without its measurement
+    instrument is never acceptable.
 
     judge_client (M19 Phase 2) is an optional injected OllamaJudgeClient (or
     fake). When None, no judging happens — this keeps every Phase 0/1 test
@@ -411,6 +422,14 @@ def execute_run(
                 plan.random_seed,
             )
 
+    # M21 — stamp probe_id + measurement_session_index onto every probe turn
+    # before the manifest is written, so a resumed run always replays the
+    # identical probe schedule (same guarantee assign_prompt_ids gives bulk
+    # turns). Purely positional and deterministic — no RNG involved.
+    full_sequence = assign_probe_schedule(
+        full_sequence, [p["probe_id"] for p in probes]
+    )
+
     # M19 Phase 3 — deterministic series_id per (condition, series_index),
     # e.g. "{run_identity}_{condition}_s{series_index}". Covers every
     # condition in the plan (not just what a scoped dry-run executes) so
@@ -492,6 +511,19 @@ def execute_run(
         elif prompt_bank_error:
             logger.warning("runner: %s (soft_continue per error_policy)", prompt_bank_error)
 
+        # M21 — probe battery preflight. Unconditional hard stop (not subject
+        # to error_policy override), before any graph mutation: executing a
+        # plan's probe turns as anything other than real probe measurements
+        # would silently produce an experiment with no learning data — the
+        # exact gap this milestone closes.
+        if not probes and any(t["turn_type"] == TURN_TYPE_PROBE for t in scoped_sequence):
+            error_summary = (
+                f"probe battery required: the resolved sequence contains probe "
+                f"turns but no probe set was loaded (probe_set_version="
+                f"{plan.probe_set_version!r})"
+            )
+            raise HardStopError(error_summary)
+
         try:
             client.health()
         except BackendConnectivityError as exc:
@@ -546,11 +578,19 @@ def execute_run(
             # the backend's effective_weight() dispatch (learned vs.
             # static_weight vs. random_weight) matches the condition
             # actually being run; the backend has no other way to know.
+            # M21 — CONDITION_LABEL too: it stamps every analytics row, and
+            # the experiment report resolves an experiment's condition from
+            # those rows to label/filter probe data — without it, all three
+            # conditions inherit config.yaml's single default label.
             if docker_project_root is not None:
                 try:
                     restart_backend_fn(
                         docker_project_root,
-                        {"EXPERIMENT_ID": experiment_id, "RUN_CONDITION": condition},
+                        {
+                            "EXPERIMENT_ID": experiment_id,
+                            "RUN_CONDITION": condition,
+                            "CONDITION_LABEL": condition,
+                        },
                     )
                     wait_for_health_fn(client)
                 except DockerLifecycleError as exc:
@@ -625,23 +665,47 @@ def execute_run(
                             print_fn(f"  edge randomization failed (soft-continue): {exc}")
 
                 series_id = series_id_map[f"{condition}:{turn['series_index']}"]
-                message = build_turn_message(probes, turn, condition, prompt_lookup)
                 status = STATUS_OK
                 detail = None
                 response = None
-                try:
-                    response = client.chat(message, series_id=series_id)
-                    detail = response.get("run_id")
-                except BackendConnectivityError as exc:
-                    if error_policy.get("connectivity") == "hard_stop":
-                        error_summary = f"connectivity during turn {key}: {exc}"
-                        raise HardStopError(error_summary) from exc
-                    status, detail = STATUS_SOFT_CONTINUE, str(exc)
-                except BackendTurnError as exc:
-                    if error_policy.get("turn_ambiguous") == "hard_stop":
-                        error_summary = f"turn error {key}: {exc}"
-                        raise HardStopError(error_summary) from exc
-                    status, detail = STATUS_SOFT_CONTINUE, str(exc)
+                if turn["turn_type"] == TURN_TYPE_PROBE:
+                    # M21 — probe turns are real measurements: read-only
+                    # retrieval via POST /admin/run-probe, recording a
+                    # probe_results row. Never /chat (which would create MUs
+                    # and edges), never judged (guarded again below).
+                    try:
+                        probe_response = client.run_probe(
+                            probe_id=turn["probe_id"],
+                            measurement_session_index=turn["measurement_session_index"],
+                            condition_label=condition,
+                            probe_set_version=plan.probe_set_version,
+                        )
+                        detail = probe_response.get("result_id")
+                    except BackendConnectivityError as exc:
+                        if error_policy.get("connectivity") == "hard_stop":
+                            error_summary = f"connectivity during probe turn {key}: {exc}"
+                            raise HardStopError(error_summary) from exc
+                        status, detail = STATUS_SOFT_CONTINUE, str(exc)
+                    except BackendTurnError as exc:
+                        if error_policy.get("turn_ambiguous") == "hard_stop":
+                            error_summary = f"probe turn error {key}: {exc}"
+                            raise HardStopError(error_summary) from exc
+                        status, detail = STATUS_SOFT_CONTINUE, str(exc)
+                else:
+                    message = build_turn_message(turn, condition, prompt_lookup)
+                    try:
+                        response = client.chat(message, series_id=series_id)
+                        detail = response.get("run_id")
+                    except BackendConnectivityError as exc:
+                        if error_policy.get("connectivity") == "hard_stop":
+                            error_summary = f"connectivity during turn {key}: {exc}"
+                            raise HardStopError(error_summary) from exc
+                        status, detail = STATUS_SOFT_CONTINUE, str(exc)
+                    except BackendTurnError as exc:
+                        if error_policy.get("turn_ambiguous") == "hard_stop":
+                            error_summary = f"turn error {key}: {exc}"
+                            raise HardStopError(error_summary) from exc
+                        status, detail = STATUS_SOFT_CONTINUE, str(exc)
 
                 # M19 Phase 2 — judge the response and post the verdict.
                 # Bulk turns only (guard #1 — probes are never judged); the
@@ -702,11 +766,17 @@ def execute_run(
                     verdict=verdict_str,
                     feedback_event_id=feedback_event_id,
                     judge_error=judge_error,
+                    probe_id=turn.get("probe_id"),
+                    measurement_session_index=turn.get("measurement_session_index"),
                 ))
                 save_checkpoint(checkpoint, run_base_dir)
                 turns_processed += 1
                 verdict_note = f" verdict={verdict_str}" if verdict_str else ""
-                print_fn(f"  turn {key} type={turn['turn_type']} -> {status}{verdict_note}")
+                probe_note = (
+                    f" probe={turn['probe_id']} session={turn['measurement_session_index']}"
+                    if turn["turn_type"] == TURN_TYPE_PROBE else ""
+                )
+                print_fn(f"  turn {key} type={turn['turn_type']} -> {status}{verdict_note}{probe_note}")
 
                 # M19 Phase 3 — series-close reporting. "Complete" is judged
                 # against the plan's true turns_per_series boundary, not the

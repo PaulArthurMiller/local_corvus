@@ -93,6 +93,60 @@ def resolve_turn_sequence(plan: RunPlan) -> list:
     return sequence
 
 
+def assign_probe_schedule(sequence: list, probe_ids: list) -> list:
+    """
+    Stamp every probe turn in `sequence` with a `probe_id` and a
+    `measurement_session_index` (M21 — real probe batteries).
+
+    Mapping is purely positional, so it is deterministic with no RNG:
+    within each series, probe turns (in turn order) walk the battery in
+    order — the k-th probe turn of a series runs probe_ids[k % B] (B =
+    battery size). Each completed walk of the battery is one measurement
+    session; measurement_session_index is 1-based and globally contiguous
+    across series (1, 2, 3, ... — the §6.3 probe-replay-index check
+    requires no gaps). A plan whose per-series probe count is smaller than
+    the battery runs the same leading subset every series (a partial but
+    consistent battery — still one session per series).
+
+    Bulk turns are left untouched. Returns a new list of dicts — does not
+    mutate the input dicts in place. Empty probe_ids returns the sequence
+    unchanged (the runner refuses to execute probe turns without a battery).
+    """
+    if not probe_ids:
+        return sequence
+
+    battery_size = len(probe_ids)
+
+    # Per-series probe counts are identical by construction (every series
+    # resolves the same n_probes), so batteries-per-series is a constant —
+    # computed from the max for safety if that ever changes.
+    probes_per_series: dict[int, int] = {}
+    for turn in sequence:
+        if turn["turn_type"] == TURN_TYPE_PROBE:
+            probes_per_series[turn["series_index"]] = (
+                probes_per_series.get(turn["series_index"], 0) + 1
+            )
+    if not probes_per_series:
+        return sequence
+    max_probes = max(probes_per_series.values())
+    batteries_per_series = -(-max_probes // battery_size)  # ceil division
+
+    result = []
+    probe_ordinal_in_series: dict[int, int] = {}
+    for turn in sequence:
+        new_turn = dict(turn)
+        if turn["turn_type"] == TURN_TYPE_PROBE:
+            series_index = turn["series_index"]
+            ordinal = probe_ordinal_in_series.get(series_index, 0)
+            probe_ordinal_in_series[series_index] = ordinal + 1
+            new_turn["probe_id"] = probe_ids[ordinal % battery_size]
+            new_turn["measurement_session_index"] = (
+                series_index * batteries_per_series + (ordinal // battery_size) + 1
+            )
+        result.append(new_turn)
+    return result
+
+
 def assign_prompt_ids(sequence: list, prompt_ids: list, random_seed: int) -> list:
     """
     Assign a `prompt_id` to every bulk turn in `sequence`, deterministically

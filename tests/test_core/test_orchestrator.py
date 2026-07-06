@@ -356,3 +356,44 @@ class TestMilestone20Orchestrator:
         import random
         from core.orchestrator import EDGE_RNG
         assert isinstance(EDGE_RNG, random.Random)
+
+
+# ---------------------------------------------------------------------------
+# M21 — _prompt_mu_content: prompt MUs must not store injected memory context
+# ---------------------------------------------------------------------------
+
+
+class TestPromptMuContent:
+    """The stored prompt MU excludes the injected context block. MU content is
+    retrievable, so storing the assembled prompt would copy every retrieved
+    MU (plus the context markers) into a new node — and retrieving that node
+    later would nest old context inside new context, compounding per turn."""
+
+    def test_context_markers_never_stored_on_prompt_mu(self):
+        from core.orchestrator import _prompt_mu_content
+
+        content = _prompt_mu_content(
+            condensed_context="water boils at 100 degrees",
+            user_content="what temperature does water boil?",
+        )
+        print(f"[test] prompt MU content: {content!r}")
+        assert "Context from memory" not in content
+        assert "water boils at 100 degrees" not in content  # retrieved text not re-embedded
+
+    def test_user_message_portion_is_preserved_with_label(self):
+        from core.orchestrator import _prompt_mu_content
+
+        content = _prompt_mu_content(
+            condensed_context="some retrieved fact",
+            user_content="what is the capital of France?",
+        )
+        assert content == "[User message]\nwhat is the capital of France?"
+
+    def test_no_context_stores_bare_user_content(self):
+        from core.orchestrator import _prompt_mu_content
+
+        content = _prompt_mu_content(
+            condensed_context="",
+            user_content="hello there",
+        )
+        assert content == "hello there"

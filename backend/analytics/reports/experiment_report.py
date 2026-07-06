@@ -384,21 +384,29 @@ async def _check_probe_replay_index(experiment_id: str, store: GraphStore) -> di
     §6.3 — Probe-replay-index normalization check.
 
     Verifies measurement_session_index values are contiguous (no gaps).
-    Uses the experiment's condition_label to filter probe_results.
+
+    M21: probe_results are scoped by experiment_id first — condition_label
+    is shared across every attempt/dry-run of a condition, so filtering by
+    it alone would mix measurement sessions from unrelated runs. The
+    condition_label path remains as a fallback for rows recorded before
+    experiment_id stamping existed.
     """
     condition_label = await store.get_condition_label_for_experiment(experiment_id)
-    if condition_label is None:
-        return {
-            "status": "SKIP",
-            "reason": "No condition_label found for this experiment_id",
-            "condition_label": None,
-            "session_indices_found": [],
-            "gaps": [],
-        }
+    indices = await store.get_probe_session_indices_for_experiment(experiment_id)
 
-    indices = await store.get_probe_session_indices_for_condition(condition_label)
+    if not indices and condition_label is not None:
+        # Legacy fallback: pre-M21 probe rows carry no experiment_id.
+        indices = await store.get_probe_session_indices_for_condition(condition_label)
 
     if not indices:
+        if condition_label is None:
+            return {
+                "status": "SKIP",
+                "reason": "No condition_label found for this experiment_id",
+                "condition_label": None,
+                "session_indices_found": [],
+                "gaps": [],
+            }
         return {
             "status": "PASS",
             "reason": "No probe results found (probe set may not have been run yet)",
@@ -971,14 +979,25 @@ async def _section_61_learning_measures(
     # All probe definitions
     probes = await store.get_all_probes()
 
-    # Probe results grouped by probe_id (filter by condition_label)
+    # Probe results grouped by probe_id — scoped by experiment_id (M21).
+    # condition_label is shared across every attempt/dry-run of a condition,
+    # so filtering by it alone would mix probe measurements from unrelated
+    # runs into this experiment's learning curves. The condition_label path
+    # remains as a fallback for rows recorded before experiment_id stamping.
     results_by_probe: dict[str, list[dict]] = {}
     for probe in probes:
         pid = probe["probe_id"]
         results_by_probe[pid] = await store.query_probe_results(
             probe_id=pid,
-            condition_label=condition_label,
+            experiment_id=experiment_id,
         )
+    if not any(results_by_probe.values()) and condition_label is not None:
+        for probe in probes:
+            pid = probe["probe_id"]
+            results_by_probe[pid] = await store.query_probe_results(
+                probe_id=pid,
+                condition_label=condition_label,
+            )
 
     # Collect all MU IDs referenced in probe results and weight_updates for info lookup
     all_mu_ids: set[str] = set()

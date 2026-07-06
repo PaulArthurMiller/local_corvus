@@ -622,3 +622,114 @@ def test_json_structure_complete():
     assert not missing
     assert report["report_type"] == "experiment"
     assert report["experiment_id"] == "exp-structure"
+
+
+# ---------------------------------------------------------------------------
+# M21 — probe results scoped by experiment_id (contamination guard)
+# ---------------------------------------------------------------------------
+
+
+def _insert_probe_row(store, probe_id, session_idx, condition_label, experiment_id=None, gold_mu_rank=None):
+    run(store.insert_probe_result({
+        "result_id": str(uuid.uuid4()),
+        "probe_id": probe_id,
+        "run_id": None,
+        "measurement_session_index": session_idx,
+        "condition_label": condition_label,
+        "retrieved_mu_ids": [],
+        "gold_mu_rank": gold_mu_rank,
+        "retrieval_precision": None,
+        "retrieval_recall": None,
+        "bm25_scores_per_mu": {},
+        "experiment_id": experiment_id,
+    }))
+
+
+def test_probe_replay_index_scoped_to_experiment_id():
+    """§6.3 must not see another attempt's probe sessions: two experiments
+    share condition_label 'learned', but only this experiment's indices count."""
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v2",
+            "phenomenon_type": "ranking_improvement", "prompt_text": "test probe",
+            "gold_mu_ids": [], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+
+        for session_idx in [1, 2]:
+            _insert_probe_row(store, "p01", session_idx, "learned", experiment_id=experiment_id)
+        # A different attempt of the same condition — session 9 would create a
+        # bogus gap (3..8) if condition_label were the only filter.
+        _insert_probe_row(store, "p01", 9, "learned", experiment_id="plan1_attempt2_learned")
+
+        result = run(_check_probe_replay_index(experiment_id, store))
+        print(f"probe_replay scoped: {result}")
+        assert result["status"] == "PASS"
+        assert result["session_indices_found"] == [1, 2]
+
+
+def test_learning_measures_probe_results_scoped_to_experiment_id():
+    """§6.1 probe_pass_rates must only aggregate this experiment's probe rows,
+    even when another run shares the condition_label."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v2",
+            "phenomenon_type": "ranking_improvement", "prompt_text": "test probe",
+            "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+
+        # This experiment: 2 sessions, both passing (rank 1).
+        _insert_probe_row(store, "p01", 1, "learned", experiment_id=experiment_id, gold_mu_rank=1)
+        _insert_probe_row(store, "p01", 2, "learned", experiment_id=experiment_id, gold_mu_rank=1)
+        # Contaminating attempt: same condition_label, all failing (rank None).
+        _insert_probe_row(store, "p01", 1, "learned", experiment_id="plan1_attempt2_learned")
+        _insert_probe_row(store, "p01", 2, "learned", experiment_id="plan1_attempt2_learned")
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        p01 = next(
+            p for p in measures["state_transitions"]["per_probe"] if p["probe_id"] == "p01"
+        )
+        assert p01["session_indices"] == [1, 2]  # not 4 rows — other attempt excluded
+        assert p01["outcome_sequence"] == ["pass", "pass"]
+        assert measures["probe_pass_rates"]["p01"] == 1.0  # would be 0.5 if contaminated
+        print(f"[PASS] §6.1 scoped to experiment_id: {p01}")
+
+
+def test_learning_measures_fall_back_to_condition_label_for_legacy_rows():
+    """Pre-M21 probe rows (experiment_id=NULL) are still found via the
+    condition_label fallback when no experiment-stamped rows exist."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "legacy_experiment"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learning", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v1",
+            "phenomenon_type": "ranking_improvement", "prompt_text": "test probe",
+            "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+        _insert_probe_row(store, "p01", 1, "learning", gold_mu_rank=1)  # no experiment_id
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        p01 = next(
+            p for p in measures["state_transitions"]["per_probe"] if p["probe_id"] == "p01"
+        )
+        assert p01["session_indices"] == [1]
+        assert measures["probe_pass_rates"]["p01"] == 1.0
+        print(f"[PASS] §6.1 legacy condition_label fallback: {p01}")

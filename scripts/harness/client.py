@@ -123,6 +123,49 @@ class BackendClient:
 
         return data
 
+    def run_probe(
+        self,
+        probe_id: str,
+        measurement_session_index: int,
+        condition_label: str,
+        probe_set_version: str = "v2",
+    ) -> dict:
+        """POST /admin/run-probe (M21) — run one probe through the backend's
+        read-only retrieval path and record a probe_results row. No MUs are
+        created and no edges are written (the endpoint enforces this), so a
+        probe turn never mutates the graph the way a /chat turn does."""
+        body = {
+            "probe_id": probe_id,
+            "measurement_session_index": measurement_session_index,
+            "condition_label": condition_label,
+            "probe_set_version": probe_set_version,
+        }
+        try:
+            resp = self._client.post("/admin/run-probe", json=body)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise BackendConnectivityError(f"run-probe call failed (connectivity): {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise BackendConnectivityError(f"run-probe call failed: {exc}") from exc
+
+        if resp.status_code >= 500:
+            raise BackendConnectivityError(
+                f"run-probe failed with server error {resp.status_code}: {resp.text[:200]}"
+            )
+        if resp.status_code >= 400:
+            raise BackendTurnError(
+                f"run-probe failed with client error {resp.status_code}: {resp.text[:200]}"
+            )
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise BackendTurnError(f"run-probe response was not valid JSON: {exc}") from exc
+
+        if "result_id" not in data:
+            raise BackendTurnError(f"run-probe response missing result_id: {data}")
+
+        return data
+
     def post_verdict(
         self,
         run_id: str,

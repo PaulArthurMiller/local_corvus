@@ -35,7 +35,7 @@ from harness.elicit import elicit_plan, offer_to_save_plan  # noqa: E402
 from harness.judge import DEFAULT_JUDGE_HOST, OllamaJudgeClient  # noqa: E402
 from harness.prompt_bank import bank_path_for_hash  # noqa: E402
 from harness.prompt_gen import estimate_bank_cost_for_plan, generate_bank_for_plan  # noqa: E402
-from harness.runner import execute_run, load_probe_prompts, scope_for_dry_run  # noqa: E402
+from harness.runner import execute_run, load_probe_battery, scope_for_dry_run  # noqa: E402
 from harness.schema import RunPlan, format_validation_error  # noqa: E402
 from harness.turn_resolution import TURN_TYPE_PROBE, resolve_turn_sequence  # noqa: E402
 
@@ -46,7 +46,7 @@ logger = logging.getLogger("run_experiment_harness")
 
 DEFAULT_BACKEND_URL = "http://localhost:8000"
 RUNS_DIR = PROJECT_ROOT / "harness_runs"
-PROBE_SET_PATH = PROJECT_ROOT / "probes" / "probe_set_v2.yaml"
+PROBES_DIR = PROJECT_ROOT / "probes"
 PROMPT_BANKS_DIR = PROJECT_ROOT / "prompt_banks"
 SEED_FIXTURE_PATH = PROJECT_ROOT / "seed_fixtures" / "seed_v2.json.gz"
 
@@ -145,8 +145,15 @@ def main() -> None:
         bank = generate_bank_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
         plan.prompt_bank_path = str(bank_path_for_hash(bank.content_hash, PROMPT_BANKS_DIR))
 
-    probes = load_probe_prompts(PROBE_SET_PATH)
-    logger.info("run_experiment_harness: loaded %d probe prompt(s) for placeholder content", len(probes))
+    # M21 — the probe battery drives real POST /admin/run-probe measurements;
+    # the version comes from the plan so the manifest records exactly which
+    # battery the schedule was built against.
+    probe_set_path = PROBES_DIR / f"probe_set_{plan.probe_set_version}.yaml"
+    probes = load_probe_battery(probe_set_path)
+    logger.info(
+        "run_experiment_harness: loaded probe battery %s (%d probe(s))",
+        probe_set_path.name, len(probes),
+    )
 
     docker_project_root = None if args.no_docker_restart else PROJECT_ROOT
 

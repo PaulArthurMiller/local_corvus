@@ -190,3 +190,17 @@ def test_invalid_notification_channel_raises_field_identifying_error():
     message = format_validation_error(exc_info.value)
     assert "channel" in message
     assert "carrier_pigeon" in message
+
+
+# ---------------------------------------------------------------------------
+# M21 — probe_set_version
+# ---------------------------------------------------------------------------
+
+def test_probe_set_version_defaults_to_v2():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.probe_set_version == "v2"
+
+
+def test_probe_set_version_accepts_explicit_value():
+    plan = RunPlan(**_base_kwargs(probe_set_version="v3"))
+    assert plan.probe_set_version == "v3"

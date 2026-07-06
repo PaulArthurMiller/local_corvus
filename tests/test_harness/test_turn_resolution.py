@@ -6,7 +6,13 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
 from harness.schema import RunPlan
-from harness.turn_resolution import TURN_TYPE_BULK, assign_prompt_ids, resolve_turn_sequence
+from harness.turn_resolution import (
+    TURN_TYPE_BULK,
+    TURN_TYPE_PROBE,
+    assign_probe_schedule,
+    assign_prompt_ids,
+    resolve_turn_sequence,
+)
 
 
 def _plan(**overrides):
@@ -153,3 +159,64 @@ def test_assign_prompt_ids_empty_bank_returns_sequence_unchanged():
     seq = resolve_turn_sequence(plan)
     assigned = assign_prompt_ids(seq, [], random_seed=42)
     assert assigned == seq
+
+
+# ---------------------------------------------------------------------------
+# M21 — assign_probe_schedule: probe_id + measurement_session_index stamping
+# ---------------------------------------------------------------------------
+
+def test_assign_probe_schedule_stamps_battery_in_order_per_series():
+    plan = _plan(series_count=2, turns_per_series=5, probe_ratio=0.4, probe_placement="end")
+    seq = assign_probe_schedule(resolve_turn_sequence(plan), ["p06", "p07"])
+
+    probe_turns = [t for t in seq if t["turn_type"] == TURN_TYPE_PROBE]
+    assert [t["probe_id"] for t in probe_turns] == ["p06", "p07", "p06", "p07"]
+    assert [t["measurement_session_index"] for t in probe_turns] == [1, 1, 2, 2]
+
+
+def test_assign_probe_schedule_session_indices_are_contiguous_with_partial_battery():
+    # 3 probe slots per series against a 2-probe battery: two sessions per
+    # series (the second one partial), still gap-free across the experiment.
+    plan = _plan(series_count=2, turns_per_series=5, probe_ratio=0.6, probe_placement="end")
+    seq = assign_probe_schedule(resolve_turn_sequence(plan), ["p06", "p07"])
+
+    probe_turns = [t for t in seq if t["turn_type"] == TURN_TYPE_PROBE]
+    assert [t["probe_id"] for t in probe_turns] == ["p06", "p07", "p06", "p06", "p07", "p06"]
+    sessions = [t["measurement_session_index"] for t in probe_turns]
+    assert sessions == [1, 1, 2, 3, 3, 4]
+    assert sorted(set(sessions)) == list(range(1, max(sessions) + 1))  # no gaps (§6.3)
+
+
+def test_assign_probe_schedule_battery_larger_than_series_probe_count_runs_leading_subset():
+    plan = _plan(series_count=2, turns_per_series=5, probe_ratio=0.2, probe_placement="end")
+    seq = assign_probe_schedule(resolve_turn_sequence(plan), ["p06", "p07", "p08"])
+
+    probe_turns = [t for t in seq if t["turn_type"] == TURN_TYPE_PROBE]
+    # Every series runs the same leading subset — one session per series.
+    assert [t["probe_id"] for t in probe_turns] == ["p06", "p06"]
+    assert [t["measurement_session_index"] for t in probe_turns] == [1, 2]
+
+
+def test_assign_probe_schedule_is_deterministic_and_does_not_mutate_input():
+    plan = _plan(probe_placement="random")
+    base = resolve_turn_sequence(plan)
+    stamped_1 = assign_probe_schedule(base, ["p06", "p07"])
+    stamped_2 = assign_probe_schedule(base, ["p06", "p07"])
+
+    assert stamped_1 == stamped_2
+    assert all("probe_id" not in t for t in base)  # input untouched
+
+
+def test_assign_probe_schedule_leaves_bulk_turns_untouched():
+    plan = _plan(series_count=1, turns_per_series=5, probe_ratio=0.4, probe_placement="end")
+    seq = assign_probe_schedule(resolve_turn_sequence(plan), ["p06"])
+
+    bulk_turns = [t for t in seq if t["turn_type"] == TURN_TYPE_BULK]
+    assert bulk_turns and all("probe_id" not in t for t in bulk_turns)
+    assert all("measurement_session_index" not in t for t in bulk_turns)
+
+
+def test_assign_probe_schedule_empty_battery_returns_sequence_unchanged():
+    plan = _plan()
+    base = resolve_turn_sequence(plan)
+    assert assign_probe_schedule(base, []) == base

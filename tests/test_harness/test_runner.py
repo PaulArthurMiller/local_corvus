@@ -25,7 +25,7 @@ class FakeBackendClient:
     def __init__(
         self, health_error=None, wipe_error=None, seed_error=None, chat_errors=None,
         verdict_errors=None, series_report_error=None, experiment_report_error=None,
-        randomize_error=None,
+        randomize_error=None, probe_errors=None,
     ):
         self.health_error = health_error
         self.wipe_error = wipe_error
@@ -35,6 +35,7 @@ class FakeBackendClient:
         self.series_report_error = series_report_error
         self.experiment_report_error = experiment_report_error
         self.randomize_error = randomize_error
+        self.probe_errors = probe_errors or {}  # call-index -> exception instance
         self.chat_call_count = 0
         self.chat_messages = []
         self.chat_series_ids = []
@@ -44,6 +45,7 @@ class FakeBackendClient:
         self.series_report_calls = []
         self.experiment_report_calls = []
         self.randomize_calls = 0
+        self.probe_calls = []
 
     def health(self):
         if self.health_error:
@@ -111,6 +113,18 @@ class FakeBackendClient:
             raise self.randomize_error
         return {"edges_randomized": 32}
 
+    def run_probe(self, probe_id, measurement_session_index, condition_label, probe_set_version="v2"):
+        idx = len(self.probe_calls)
+        self.probe_calls.append({
+            "probe_id": probe_id,
+            "measurement_session_index": measurement_session_index,
+            "condition_label": condition_label,
+            "probe_set_version": probe_set_version,
+        })
+        if idx in self.probe_errors:
+            raise self.probe_errors[idx]
+        return {"result_id": f"probe-result-{idx}", "probe_id": probe_id, "gold_mu_rank": 1}
+
 
 def _plan(**overrides):
     kwargs = dict(
@@ -130,6 +144,14 @@ def _plan(**overrides):
 
 def _noop_print(*_a, **_k):
     pass
+
+
+# M21 — a small probe battery for tests whose plans contain probe turns
+# (execute_run hard-stops if probe turns exist but no battery is loaded).
+_BATTERY = [
+    {"probe_id": "p06", "prompt_text": "What is the format rule?"},
+    {"probe_id": "p07", "prompt_text": "What governs the retry backoff?"},
+]
 
 
 def test_dry_run_scopes_to_one_condition_and_dry_run_n_turns(tmp_path):
@@ -257,7 +279,11 @@ def test_resume_skips_restart_wipe_seed_for_already_complete_condition(tmp_path)
     assert second_outcome.status == "complete"
     assert healthy_client.wipe_calls == ["p1_static_weight"]  # "learned" skipped entirely
     assert healthy_client.seed_calls == 1
-    assert restart_calls == [{"EXPERIMENT_ID": "p1_static_weight", "RUN_CONDITION": "static_weight"}]
+    assert restart_calls == [{
+        "EXPERIMENT_ID": "p1_static_weight",
+        "RUN_CONDITION": "static_weight",
+        "CONDITION_LABEL": "static_weight",
+    }]
     assert healthy_client.chat_call_count == 2  # only static_weight's 2 turns
 
 
@@ -390,7 +416,11 @@ def test_resume_mid_series_preserves_graph_and_skips_wipe_seed(tmp_path):
     assert second_outcome.status == "complete"
     assert healthy_client.wipe_calls == []  # graph preserved, not reset
     assert healthy_client.seed_calls == 0
-    assert restart_calls == [{"EXPERIMENT_ID": "p1_dryrun_learned", "RUN_CONDITION": "learned"}]  # still restarted for correct stamping
+    assert restart_calls == [{
+        "EXPERIMENT_ID": "p1_dryrun_learned",
+        "RUN_CONDITION": "learned",
+        "CONDITION_LABEL": "learned",
+    }]  # still restarted for correct stamping
     assert healthy_client.chat_call_count == 2  # only the 2 remaining turns
 
 
@@ -439,15 +469,118 @@ def test_hard_stop_when_wipe_fails(tmp_path):
     assert client.seed_calls == 0  # seed must never run if wipe failed
 
 
-def test_probe_placeholder_content_used_for_probe_turns(tmp_path):
+# ---------------------------------------------------------------------------
+# M21 — real probe batteries: probe turns run POST /admin/run-probe, never /chat
+# ---------------------------------------------------------------------------
+
+def test_probe_turns_call_run_probe_and_never_chat(tmp_path):
     plan = _plan(dry_run=True, dry_run_n=5, probe_ratio=1.0, probe_placement="end")
     client = FakeBackendClient()
-    probes = [{"probe_id": "p06", "prompt_text": "What is the format rule?"}]
 
-    outcome = execute_run(plan, client, tmp_path, probes=probes, print_fn=_noop_print)
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
 
     assert outcome.status == "complete"
-    assert any("What is the format rule?" in m for m in client.chat_messages)
+    assert client.chat_call_count == 0  # probe turns must not mutate the graph via /chat
+    assert len(client.probe_calls) == 5
+    # Battery walked in order, wrapping: p06, p07, p06, p07, p06
+    assert [c["probe_id"] for c in client.probe_calls] == ["p06", "p07", "p06", "p07", "p06"]
+    assert all(c["condition_label"] == "learned" for c in client.probe_calls)
+    assert all(c["probe_set_version"] == "v2" for c in client.probe_calls)
+
+
+def test_probe_turn_checkpoint_records_probe_id_session_and_result_id(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    first = outcome.checkpoint.turns[0]
+    assert first.turn_type == "probe"
+    assert first.probe_id == "p06"
+    assert first.measurement_session_index == 1
+    assert first.detail == "probe-result-0"  # the probe-turn analogue of a chat run_id
+
+
+def test_probe_turns_without_battery_hard_stop_before_any_graph_mutation(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=5, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, probes=None, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "probe battery required" in outcome.error_summary
+    assert client.wipe_calls == []
+    assert client.chat_call_count == 0
+    assert client.probe_calls == []
+
+
+def test_bulk_only_plan_needs_no_battery(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2, probe_ratio=0.0)
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, probes=None, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+
+
+def test_measurement_session_index_is_contiguous_across_series(tmp_path):
+    # 2 series × 5 turns, probe_ratio 0.4 → 2 probe turns per series; a
+    # 2-probe battery makes each series exactly one full measurement session.
+    plan = _plan(
+        series_count=2, turns_per_series=5, probe_ratio=0.4,
+        probe_placement="end", conditions=["learned"],
+    )
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    sessions = [c["measurement_session_index"] for c in client.probe_calls]
+    assert sessions == [1, 1, 2, 2]  # series 0 → session 1, series 1 → session 2, no gaps
+
+
+def test_probe_turn_error_soft_continues_per_turn_ambiguous_policy(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient(probe_errors={0: BackendTurnError("malformed probe response")})
+
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert outcome.checkpoint.turns[0].status == STATUS_SOFT_CONTINUE
+    assert "malformed probe response" in outcome.checkpoint.turns[0].detail
+    assert outcome.checkpoint.turns[1].status == STATUS_OK
+
+
+def test_probe_turn_connectivity_error_hard_stops_by_default(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=2, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient(probe_errors={0: BackendConnectivityError("backend down")})
+
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "connectivity during probe turn" in outcome.error_summary
+
+
+def test_resume_skips_already_completed_probe_turns_and_replays_same_schedule(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=3, probe_ratio=1.0, probe_placement="end")
+
+    failing_client = FakeBackendClient(probe_errors={1: BackendConnectivityError("dropped")})
+    first_outcome = execute_run(plan, failing_client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
+    assert first_outcome.status == "aborted"
+    assert [c["probe_id"] for c in failing_client.probe_calls] == ["p06", "p07"]
+
+    healthy_client = FakeBackendClient()
+    second_outcome = execute_run(
+        plan, healthy_client, tmp_path, probes=_BATTERY,
+        resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+    )
+
+    assert second_outcome.status == "complete"
+    # Only the 2 not-yet-checkpointed probes run, at the same schedule
+    # positions the interrupted run would have given them.
+    assert [c["probe_id"] for c in healthy_client.probe_calls] == ["p07", "p06"]
+    assert [c["measurement_session_index"] for c in healthy_client.probe_calls] == [1, 2]
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +873,7 @@ def test_series_completion_triggers_series_report_with_correct_ids(tmp_path):
     plan = _plan(dry_run=True, dry_run_n=5)
     client = FakeBackendClient()
 
-    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
 
     assert outcome.status == "complete"
     assert client.series_report_calls == [("p1_dryrun_learned", "p1_dryrun_learned_s0")]
@@ -771,7 +904,7 @@ def test_series_report_failure_soft_continues_and_checkpoint_records_error(tmp_p
     plan = _plan(dry_run=True, dry_run_n=5)
     client = FakeBackendClient(series_report_error=ReportGenerationError("bogus series_id"))
 
-    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
 
     assert outcome.status == "complete"  # the run itself still completes
     assert len(outcome.checkpoint.series_reports) == 1
@@ -784,7 +917,7 @@ def test_series_report_failure_hard_stops_when_policy_overridden(tmp_path):
     plan = _plan(dry_run=True, dry_run_n=5, error_policy={"report_generation": "hard_stop"})
     client = FakeBackendClient(series_report_error=ReportGenerationError("boom"))
 
-    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
 
     assert outcome.status == "aborted"
     assert "report_generation" in outcome.error_summary
@@ -881,7 +1014,11 @@ def test_docker_restart_called_once_per_condition_when_project_root_given(tmp_pa
 
     assert outcome.status == "complete"
     assert restart_calls == [
-        (Path("/fake/project"), {"EXPERIMENT_ID": "p1_dryrun_learned", "RUN_CONDITION": "learned"})
+        (Path("/fake/project"), {
+            "EXPERIMENT_ID": "p1_dryrun_learned",
+            "RUN_CONDITION": "learned",
+            "CONDITION_LABEL": "learned",
+        })
     ]
     assert len(health_calls) == 1
 

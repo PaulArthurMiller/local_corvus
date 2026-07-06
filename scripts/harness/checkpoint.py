@@ -37,6 +37,11 @@ class TurnCheckpoint(BaseModel):
     verdict: Optional[str] = None
     feedback_event_id: Optional[str] = None
     judge_error: Optional[str] = None
+    # M21 — probe turns only: which probe ran and which measurement session
+    # it belonged to. `detail` holds the probe result_id (the probe-turn
+    # analogue of a chat turn's run_id).
+    probe_id: Optional[str] = None
+    measurement_session_index: Optional[int] = None
 
 
 class SeriesReportRecord(BaseModel):

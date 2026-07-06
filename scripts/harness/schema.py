@@ -136,6 +136,10 @@ class RunPlan(BaseModel):
     probe_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
     probe_placement: str = Field(default="end")
     probe_checkpoint_positions: Optional[list[int]] = None
+    # M21 — which probes/probe_set_{version}.yaml battery the probe turns run.
+    # Passed through to POST /admin/run-probe; the backend loads its own copy
+    # of the same file (both sides read probes/ — one mounted, one local).
+    probe_set_version: str = Field(default="v2", min_length=1)
 
     difficulty: DifficultyConfig = Field(default_factory=DifficultyConfig)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)

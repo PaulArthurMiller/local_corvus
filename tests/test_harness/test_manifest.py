@@ -104,3 +104,13 @@ def test_run_identity_for_attempt_1_is_plain_plan_id():
 def test_run_identity_for_attempt_2_is_suffixed():
     plan = _plan()
     assert run_identity_for(plan, attempt=2) == "p1_attempt2"
+
+
+def test_run_identity_for_dry_run_gets_its_own_namespace():
+    """A dry run must never share an experiment_id namespace with the real
+    run of the same plan: analytics/feedback_events survive wipe_graph(), so
+    a shared identity would mix dry-run turns into the real run's reports."""
+    plan = _plan()
+    plan.dry_run = True
+    assert run_identity_for(plan) == "p1_dryrun"
+    assert run_identity_for(plan, attempt=2) == "p1_attempt2_dryrun"

@@ -769,3 +769,131 @@ class TestEdgeUpdateEvents:
 
             events = run(s.get_edge_update_events_for_edge("edge-1"))
             assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# M21: experiment_id on probe_results
+# ---------------------------------------------------------------------------
+
+
+class TestProbeResultExperimentId:
+    """probe_results rows carry the experiment they were measured under, so
+    reports never mix probe data across attempts/dry-runs that share a
+    condition_label."""
+
+    @staticmethod
+    def _probe_result(result_id, session, condition="learned", experiment_id=None):
+        return {
+            "result_id": result_id,
+            "probe_id": "p06",
+            "run_id": None,
+            "measurement_session_index": session,
+            "condition_label": condition,
+            "retrieved_mu_ids": ["mu-a"],
+            "gold_mu_rank": 1,
+            "retrieval_precision": 1.0,
+            "retrieval_recall": 1.0,
+            "bm25_scores_per_mu": {"mu-a": 2.0},
+            "experiment_id": experiment_id,
+        }
+
+    @staticmethod
+    def _sync_probe(store):
+        run(store.sync_probes([{
+            "probe_id": "p06",
+            "probe_set_version": "v2",
+            "phenomenon_type": "ranking_improvement",
+            "prompt_text": "test",
+            "gold_mu_ids": ["mu-a"],
+            "is_bridge_probe": False,
+            "bridge_pair_id": None,
+        }]))
+
+    def test_insert_and_query_by_experiment_id(self):
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            run(store.insert_probe_result(self._probe_result("r1", 1, experiment_id="plan1_learned")))
+            run(store.insert_probe_result(self._probe_result("r2", 1, experiment_id="plan1_attempt2_learned")))
+
+            results = run(store.query_probe_results(experiment_id="plan1_learned"))
+            assert [r["result_id"] for r in results] == ["r1"]
+            assert results[0]["experiment_id"] == "plan1_learned"
+            print("[PASS] query_probe_results filters by experiment_id")
+
+    def test_experiment_id_filter_excludes_legacy_null_rows(self):
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            run(store.insert_probe_result(self._probe_result("legacy", 1)))  # experiment_id None
+            run(store.insert_probe_result(self._probe_result("new", 2, experiment_id="plan1_learned")))
+
+            results = run(store.query_probe_results(experiment_id="plan1_learned"))
+            assert [r["result_id"] for r in results] == ["new"]
+            # No filter still returns both
+            all_results = run(store.query_probe_results())
+            assert {r["result_id"] for r in all_results} == {"legacy", "new"}
+            print("[PASS] experiment_id filter excludes legacy NULL rows; unfiltered query returns all")
+
+    def test_get_probe_session_indices_for_experiment(self):
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            run(store.insert_probe_result(self._probe_result("r1", 1, experiment_id="plan1_learned")))
+            run(store.insert_probe_result(self._probe_result("r2", 2, experiment_id="plan1_learned")))
+            run(store.insert_probe_result(self._probe_result("r3", 2, experiment_id="plan1_learned")))
+            run(store.insert_probe_result(self._probe_result("other", 9, experiment_id="other_experiment")))
+
+            indices = run(store.get_probe_session_indices_for_experiment("plan1_learned"))
+            assert indices == [1, 2]  # distinct, sorted, scoped to one experiment
+            print("[PASS] get_probe_session_indices_for_experiment returns distinct scoped indices")
+
+    def test_migration_adds_experiment_id_to_existing_probe_results_table(self):
+        """A pre-M21 DB (probe_results without experiment_id) gains the column
+        on next open, and its existing rows read back with experiment_id=None."""
+        import aiosqlite
+
+        async def _build_old_db(db_path):
+            db = await aiosqlite.connect(db_path)
+            await db.execute("""
+                CREATE TABLE probes (
+                    probe_id TEXT PRIMARY KEY,
+                    probe_set_version TEXT NOT NULL,
+                    phenomenon_type TEXT NOT NULL,
+                    prompt_text TEXT NOT NULL,
+                    gold_mu_ids TEXT NOT NULL DEFAULT '[]',
+                    is_bridge_probe INTEGER NOT NULL DEFAULT 0,
+                    bridge_pair_id TEXT
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE probe_results (
+                    result_id TEXT PRIMARY KEY,
+                    probe_id TEXT NOT NULL REFERENCES probes(probe_id),
+                    run_id TEXT,
+                    measurement_session_index INTEGER NOT NULL,
+                    condition_label TEXT NOT NULL,
+                    retrieved_mu_ids TEXT NOT NULL DEFAULT '[]',
+                    gold_mu_rank INTEGER,
+                    retrieval_precision REAL,
+                    retrieval_recall REAL,
+                    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}',
+                    outcome_override TEXT
+                )
+            """)
+            await db.execute(
+                "INSERT INTO probe_results (result_id, probe_id, measurement_session_index, condition_label) "
+                "VALUES ('old-row', 'p06', 1, 'learning')"
+            )
+            await db.commit()
+            await db.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "old_graph.db"
+            run(_build_old_db(db_path))
+
+            with mock.patch.object(store_module, "_DB_PATH", db_path):
+                store = GraphStore()
+                results = run(store.query_probe_results(probe_id="p06"))
+
+            assert len(results) == 1
+            assert results[0]["result_id"] == "old-row"
+            assert results[0]["experiment_id"] is None
+            print("[PASS] migration adds probe_results.experiment_id; legacy rows read back as None")

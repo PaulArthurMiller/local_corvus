@@ -36,7 +36,7 @@ from analytics.reports.experiment_report import generate_experiment_report, writ
 from analytics.reports.series_report import generate_series_report, write_series_report
 from analytics.run_log import query_runs
 from analytics.seed_fixture import register_fixture
-from core.orchestrator import EDGE_RNG, RUN_CONDITION
+from core.orchestrator import EDGE_RNG, EXPERIMENT_ID, RUN_CONDITION
 from memory.retrieval import retrieve
 from memory.snapshot import take_archive_snapshot, take_battery_snapshot
 from memory.store import store as graph_store
@@ -307,13 +307,18 @@ async def run_probe(body: RunProbeRequest):
         logger.error("admin/run-probe: retrieval failed — %s", exc)
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {exc}")
 
-    # Compute probe metrics
+    # Compute probe metrics. experiment_id is stamped server-side from the
+    # process-level EXPERIMENT_ID (the harness restarts the backend with the
+    # right one per condition) — mirrors how analytics rows are stamped, and
+    # keeps probe measurements from different attempts/dry-runs separable
+    # even though they share a condition_label.
     probe_result = await compute_probe_result(
         probe=probe,
         retrieval_result=retrieval_result,
         run_id=None,
         measurement_session_index=body.measurement_session_index,
         condition_label=body.condition_label,
+        experiment_id=EXPERIMENT_ID,
     )
 
     # Persist the result

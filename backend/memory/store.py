@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS probe_results (
     retrieval_precision REAL,
     retrieval_recall REAL,
     bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}',
-    outcome_override TEXT
+    outcome_override TEXT,
+    experiment_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
@@ -236,6 +237,10 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("edges", "beta", "REAL NOT NULL DEFAULT 1.0"),
         ("edges", "evidence_updated_at_turn", "INTEGER"),
         ("analytics", "edge_weights_used", "TEXT NOT NULL DEFAULT '{}'"),
+        # M21: probe results carry the experiment they were measured under, so
+        # reports never mix probe rows across attempts/dry-runs that share a
+        # condition_label (same contamination class as the M19 attempt fix).
+        ("probe_results", "experiment_id", "TEXT"),
     ]
     for table, column, col_type in add_column_migrations:
         try:
@@ -245,6 +250,19 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         except Exception:
             # Column already exists — expected on fresh installs
             pass
+
+    # --- M21: index on the migrated probe_results.experiment_id column ---
+    # Must live here, NOT in _INIT_SQL: _open_db() runs _INIT_SQL before
+    # _migrate_db(), so an index referencing a migrated column would fail
+    # executescript() on every pre-M21 database before the column exists.
+    try:
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_probe_results_experiment "
+            "ON probe_results(experiment_id)"
+        )
+        await db.commit()
+    except Exception:
+        logger.warning("store: could not create idx_probe_results_experiment", exc_info=True)
 
     # --- M12: rename analytics.session_id → series_id (SQLite >= 3.25) ---
     try:
@@ -281,10 +299,17 @@ async def _open_db() -> aiosqlite.Connection:
     """
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(str(_DB_PATH))
-    db.row_factory = aiosqlite.Row
-    await db.executescript(_INIT_SQL)
-    await db.commit()
-    await _migrate_db(db)
+    try:
+        db.row_factory = aiosqlite.Row
+        await db.executescript(_INIT_SQL)
+        await db.commit()
+        await _migrate_db(db)
+    except BaseException:
+        # Close on any init failure — an unclosed aiosqlite connection leaves
+        # its non-daemon worker thread alive, which keeps the whole process
+        # from exiting (and holds the DB file lock on Windows).
+        await db.close()
+        raise
     return db
 
 
@@ -984,8 +1009,8 @@ class GraphStore:
                     (result_id, probe_id, run_id, measurement_session_index,
                      condition_label, retrieved_mu_ids, gold_mu_rank,
                      retrieval_precision, retrieval_recall, bm25_scores_per_mu,
-                     outcome_override)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     outcome_override, experiment_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result["result_id"],
@@ -999,6 +1024,7 @@ class GraphStore:
                     result.get("retrieval_recall"),
                     _json.dumps(result.get("bm25_scores_per_mu", {})),
                     result.get("outcome_override"),
+                    result.get("experiment_id"),
                 ),
             )
             await db.commit()
@@ -1015,6 +1041,7 @@ class GraphStore:
         probe_id: Optional[str] = None,
         condition_label: Optional[str] = None,
         measurement_session_index: Optional[int] = None,
+        experiment_id: Optional[str] = None,
     ) -> list[dict]:
         """Query probe results with optional filters."""
         import json as _json
@@ -1029,6 +1056,9 @@ class GraphStore:
         if measurement_session_index is not None:
             conditions.append("measurement_session_index = ?")
             params.append(measurement_session_index)
+        if experiment_id:
+            conditions.append("experiment_id = ?")
+            params.append(experiment_id)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = f"SELECT * FROM probe_results {where} ORDER BY measurement_session_index ASC"
@@ -1455,6 +1485,33 @@ class GraphStore:
                 ORDER BY measurement_session_index ASC
                 """,
                 (condition_label,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return [row[0] for row in rows]
+
+    async def get_probe_session_indices_for_experiment(
+        self, experiment_id: str
+    ) -> list[int]:
+        """
+        Return distinct measurement_session_index values for one experiment, sorted ASC.
+
+        M21 — preferred over the condition_label variant above: experiment_id
+        uniquely identifies one (plan, attempt, condition) run, while a
+        condition_label like "learned" is shared across every attempt/dry-run
+        that ever ran that condition.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT DISTINCT measurement_session_index
+                FROM probe_results
+                WHERE experiment_id = ?
+                ORDER BY measurement_session_index ASC
+                """,
+                (experiment_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
         finally:

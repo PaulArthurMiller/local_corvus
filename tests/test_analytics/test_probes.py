@@ -336,3 +336,59 @@ def test_record_probe_result_calls_store():
         assert call_arg["gold_mu_rank"] == 1
 
     print("[PASS] record_probe_result calls graph_store.insert_probe_result with correct data")
+
+
+# ---------------------------------------------------------------------------
+# M21 — experiment_id stamping on probe results
+# ---------------------------------------------------------------------------
+
+def test_compute_probe_result_stamps_experiment_id():
+    """compute_probe_result() carries the experiment_id through to the ProbeResult
+    so reports can scope probe measurements to one (plan, attempt, condition) run."""
+    probe = ProbeDefinition(
+        probe_id="p01",
+        phenomenon_type="ranking_improvement",
+        prompt_text="test prompt",
+        gold_mu_ids=["mu-gold"],
+        is_bridge_probe=False,
+        probe_set_version="v1",
+    )
+    retrieval_result = _make_retrieval_result(["mu-gold"])
+
+    result = run(compute_probe_result(
+        probe=probe,
+        retrieval_result=retrieval_result,
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learned",
+        experiment_id="plan1_learned",
+    ))
+
+    assert result.experiment_id == "plan1_learned"
+    assert result.model_dump()["experiment_id"] == "plan1_learned"
+    print("[PASS] compute_probe_result stamps experiment_id into the ProbeResult")
+
+
+def test_compute_probe_result_experiment_id_defaults_to_none():
+    """Callers that predate M21 (no experiment_id argument) still work — the field
+    defaults to None, matching pre-M21 rows in the probe_results table."""
+    probe = ProbeDefinition(
+        probe_id="p01",
+        phenomenon_type="ranking_improvement",
+        prompt_text="test prompt",
+        gold_mu_ids=["mu-gold"],
+        is_bridge_probe=False,
+        probe_set_version="v1",
+    )
+    retrieval_result = _make_retrieval_result(["mu-gold"])
+
+    result = run(compute_probe_result(
+        probe=probe,
+        retrieval_result=retrieval_result,
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learning",
+    ))
+
+    assert result.experiment_id is None
+    print("[PASS] experiment_id defaults to None for legacy callers")

@@ -52,6 +52,9 @@ class ProbeResult(BaseModel):
     retrieval_precision: Optional[float] = None
     retrieval_recall: Optional[float] = None
     bm25_scores_per_mu: dict[str, float] = Field(default_factory=dict)
+    # M21 — which experiment this measurement belongs to. condition_label alone
+    # is shared across attempts/dry-runs, so reports scope by experiment_id.
+    experiment_id: Optional[str] = None
 
 
 def load_probe_set(version: str = "v1") -> list[ProbeDefinition]:
@@ -100,6 +103,7 @@ async def compute_probe_result(
     run_id: Optional[str],
     measurement_session_index: int,
     condition_label: str,
+    experiment_id: Optional[str] = None,
 ) -> ProbeResult:
     """
     Compute precision, recall, and gold_mu_rank from a retrieval result.
@@ -135,4 +139,5 @@ async def compute_probe_result(
         retrieval_precision=retrieval_precision,
         retrieval_recall=retrieval_recall,
         bm25_scores_per_mu=dict(retrieval_result.bm25_scores_per_mu),
+        experiment_id=experiment_id,
     )

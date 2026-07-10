@@ -54,6 +54,28 @@ _CONFIG = _load_config()
 _MODEL_CFG = _CONFIG.get("model", {})
 _HP = _CONFIG.get("hyperparameters", {})
 
+# Seed MUs (both seed_v2.json.gz and the seed_v2_draft.json fixture) are not
+# distinguishable from real interaction MUs by source_type — every seed MU is
+# stamped source_type="agent_output", identical to a genuine turn's response.
+# series_id (prefix "seed:") is the only field that actually distinguishes
+# seed-origin content — the same mechanism series_report.py §5.3 already uses.
+# This prefix is a stated requirement for the seed v3 generator (see
+# seed_v3_mu_spec.md) precisely because this label derivation depends on it.
+_SEED_SERIES_PREFIX = "seed:"
+
+# Bracketed source-kind labels prefixed onto each condensed chunk so mixed
+# seed/interaction content stays legible to Gemma. Failed-output source types
+# (agent_output_failed_token_limit/agent_output_failed_empty_output) have no
+# entry here by design — they're excluded from retrieval candidacy entirely
+# (see config.yaml: retrieval_exclude_source_types) rather than labeled, so
+# they should never reach this function.
+_LABEL_SEED_REFERENCE = "[memory — reference]"
+_LABEL_PRIOR_USER_MESSAGE = "[memory — prior user message]"
+_LABEL_PRIOR_RESPONSE = "[memory — prior response]"
+_LABEL_SYNTHESIZED_SUMMARY = "[memory — synthesized summary]"
+_LABEL_TOOL_RECORD = "[memory — tool record]"
+_LABEL_OTHER = "[memory — other]"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,9 +93,32 @@ def _contains_keyword(sentence: str, keywords: list[str]) -> bool:
     return any(kw.lower() in lower for kw in keywords)
 
 
+def _source_kind_label(mu: dict) -> str:
+    """
+    Bracketed label describing an MU's origin, prefixed onto its condensed
+    chunk. series_id is checked before source_type — it's the only field
+    that distinguishes seed-origin content (see _SEED_SERIES_PREFIX above).
+    """
+    series_id = mu.get("series_id") or ""
+    if series_id.startswith(_SEED_SERIES_PREFIX):
+        return _LABEL_SEED_REFERENCE
+
+    source_type = mu.get("source_type")
+    if source_type == "user_input":
+        return _LABEL_PRIOR_USER_MESSAGE
+    if source_type == "agent_output":
+        return _LABEL_PRIOR_RESPONSE
+    if source_type == "system":
+        return _LABEL_SYNTHESIZED_SUMMARY
+    if source_type in ("tool_call", "tool_result"):
+        return _LABEL_TOOL_RECORD
+    return _LABEL_OTHER
+
+
 def _mode1_extract(mus: list[dict], keywords: list[str]) -> list[str]:
     """
-    Return keyword-adjacent sentences from each MU.
+    Return keyword-adjacent sentences from each MU, prefixed with a
+    source-kind label.
 
     Keeps any sentence containing a keyword, plus its ±1 neighbors.
     """
@@ -89,13 +134,15 @@ def _mode1_extract(mus: list[dict], keywords: list[str]) -> list[str]:
                 keep.add(i)
                 keep.add(min(len(sentences) - 1, i + 1))
         if keep:
-            chunks.append(" ".join(sentences[i] for i in sorted(keep)))
+            text = " ".join(sentences[i] for i in sorted(keep))
+            chunks.append(f"{_source_kind_label(mu)}\n{text}")
     return chunks
 
 
 def _mode2_extract(mus: list[dict]) -> list[str]:
     """
-    Return first + last sentence of each MU as a fallback.
+    Return first + last sentence of each MU as a fallback, prefixed with a
+    source-kind label.
 
     For single-sentence MUs the sentence appears once.
     """
@@ -105,9 +152,10 @@ def _mode2_extract(mus: list[dict]) -> list[str]:
         if not sentences:
             continue
         if len(sentences) == 1:
-            chunks.append(sentences[0])
+            text = sentences[0]
         else:
-            chunks.append(f"{sentences[0]} ... {sentences[-1]}")
+            text = f"{sentences[0]} ... {sentences[-1]}"
+        chunks.append(f"{_source_kind_label(mu)}\n{text}")
     return chunks
 
 
@@ -121,6 +169,7 @@ async def extract(
     keywords: list[str],
     store=None,
     session_id: str = "",
+    run_id: Optional[str] = None,
     ollama_host: Optional[str] = None,
     model_name: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
@@ -173,8 +222,10 @@ async def extract(
         )
         return await _summarize(
             condensed,
+            mus=mus,
             store=store,
             session_id=session_id,
+            run_id=run_id,
             ollama_host=ollama_host,
             model_name=model_name,
         )
@@ -189,13 +240,20 @@ async def extract(
 
 async def _summarize(
     text: str,
+    mus: list[dict],
     store,
     session_id: str,
+    run_id: Optional[str],
     ollama_host: Optional[str],
     model_name: Optional[str],
 ) -> tuple[str, Optional[str]]:
     """
     Call Gemma to summarize `text`. Store result as a new system MU.
+
+    mus is the pre-summarization list the condensed text was built from —
+    used to wire summary->source edges so the new MU isn't an edge-orphan
+    (found only lexically via BM25, never by traversal; the same disease
+    M22 cured on the output MU).
 
     Returns (summary_text, summary_mu_id).
     On Ollama failure, returns (original_text, None) as safe fallback.
@@ -231,7 +289,10 @@ async def _summarize(
         logger.error("extractor: summarization failed — %s — using original text", exc)
         return text, None
 
-    # Store summary as a system MU so it is retrievable in future turns
+    # Store summary as a system MU so it is retrievable in future turns.
+    # Pre-existing gap, not fixed here (out of this milestone's scope): unlike
+    # every other create_mu() call site, this one passes no series_id/
+    # experiment_id, so the summary MU is stamped series_id=NULL.
     mu_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     await store.create_mu(
@@ -241,4 +302,32 @@ async def _summarize(
         created_at=now,
     )
     logger.info("extractor: summary MU stored mu_id=%s", mu_id)
+
+    # Edges: summary -> each source MU it was built from. Without these the
+    # summary MU is an edge-orphan — reachable only by lexical BM25 match,
+    # never by K2 traversal, so a later turn that enters retrieval at this
+    # summary can't route back to the MUs it condensed. Same priors pattern
+    # (edge_update.prior_alpha/prior_beta) used at every other edge-creation
+    # call site; orchestrator.py already hard-fails startup on invalid
+    # edge_update config, so no second validation pass is needed here.
+    edge_update_cfg = _CONFIG.get("edge_update", {})
+    prior_alpha = edge_update_cfg.get("prior_alpha", 1.0)
+    prior_beta = edge_update_cfg.get("prior_beta", 1.0)
+    initial_edge_weight = float(_HP.get("initial_edge_weight", 0.5))
+    for mu in mus:
+        await store.create_edge(
+            source_mu_id=mu_id,
+            target_mu_id=mu["mu_id"],
+            weight=initial_edge_weight,
+            direction="forward",
+            creation_run_id=run_id,
+            creation_trigger="co_activation",
+            alpha=prior_alpha,
+            beta=prior_beta,
+        )
+    logger.info(
+        "extractor: created %d summary->source edges for mu_id=%s",
+        len(mus), mu_id,
+    )
+
     return summary, mu_id

@@ -500,3 +500,58 @@ class TestSourceTypeExclusionFilter:
             candidate0 = next(c for c in result.candidate_set_before_ranking if c["mu_id"] == ids[0])
             print(f"[test] MU0 edge_weight_sum with excluded-MU edge: {candidate0['edge_weight_sum']}")
             assert candidate0["edge_weight_sum"] >= 0.95
+
+
+# ---------------------------------------------------------------------------
+# M23 — failed-output source types excluded from candidacy by default
+# ---------------------------------------------------------------------------
+
+
+class TestFailedOutputExclusionFilter:
+    """Failed-turn MUs (token-limit / empty-output failures) are excluded
+    from retrieval candidacy rather than given a labeled extractor branch —
+    a failed turn has no meaningful content to inject as memory context."""
+
+    def test_token_limit_failure_mus_excluded_from_result_by_default(self):
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            failed_id = _mu_id()
+            run(s.create_mu(
+                mu_id=failed_id, source_type="agent_output_failed_token_limit",
+                raw_content="elephant mammal Africa failed duplicate",
+            ))
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config()))
+            retrieved_ids = {m["mu_id"] for m in result.mus}
+            print(f"[test] retrieved ids: {retrieved_ids}")
+            assert failed_id not in retrieved_ids
+            assert failed_id not in result.entry_point_mu_ids
+            assert ids[0] in retrieved_ids
+
+    def test_empty_output_failure_mus_excluded_from_result_by_default(self):
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            failed_id = _mu_id()
+            run(s.create_mu(
+                mu_id=failed_id, source_type="agent_output_failed_empty_output",
+                raw_content="elephant mammal Africa failed duplicate",
+            ))
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config()))
+            retrieved_ids = {m["mu_id"] for m in result.mus}
+            print(f"[test] retrieved ids: {retrieved_ids}")
+            assert failed_id not in retrieved_ids
+
+    def test_empty_exclusion_list_admits_failed_output_mus_too(self):
+        """retrieval_exclude_source_types: [] restores candidacy for every
+        source_type, prompt and failed-output alike."""
+        with TempDBStore() as s:
+            _populate_10_mus(s)
+            failed_id = _mu_id()
+            run(s.create_mu(
+                mu_id=failed_id, source_type="agent_output_failed_token_limit",
+                raw_content="zephyr quokka narwhal zephyr quokka",
+            ))
+            cfg = _minimal_config()
+            cfg["hyperparameters"]["retrieval_exclude_source_types"] = []
+            result = run(retrieve("zephyr quokka narwhal", s, cfg))
+            print(f"[test] result mus with empty exclusion: {[m['mu_id'] for m in result.mus]}")
+            assert failed_id in {m["mu_id"] for m in result.mus}

@@ -6,8 +6,14 @@ Ollama on each turn. The key invariant: retrieved memory context appears once
 in the system role only; the user role carries only the clean user input.
 """
 
+import asyncio
 import os
 import sys
+import tempfile
+import uuid
+from pathlib import Path
+from unittest import mock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -397,3 +403,190 @@ class TestPromptMuContent:
             user_content="hello there",
         )
         assert content == "hello there"
+
+
+# ---------------------------------------------------------------------------
+# M22 — Output-MU routing edges + prompt MU as routing dead end
+#
+# Full run_interaction() pipeline against a real temp-file SQLite GraphStore
+# (audit/snapshot paths also redirected to the same temp dir), with
+# retrieve()/extract() mocked to a known, deterministic shape and Ollama
+# mocked via httpx — the same pattern as the M20 §8 trace test
+# (tests/test_learning/test_edge_update_trace.py) and the failure-detection
+# httpx mock (test_failure_detection.py).
+# ---------------------------------------------------------------------------
+
+
+def _run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+class _TempFullStore:
+    """Context manager: GraphStore + audit log + snapshots all pointed at one
+    temp dir, so a full run_interaction() call never touches /app/data."""
+
+    def __enter__(self):
+        import gate.audit as audit_module
+        import memory.snapshot as snapshot_module
+        import memory.store as store_module
+        from memory.store import GraphStore
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp_path = Path(self._tmpdir.name)
+        self._patchers = [
+            mock.patch.object(store_module, "_DB_PATH", tmp_path / "graph.db"),
+            mock.patch.object(audit_module, "_AUDIT_LOG_PATH", tmp_path / "audit.log"),
+            mock.patch.object(snapshot_module, "_SNAPSHOTS_DIR", tmp_path / "snapshots"),
+        ]
+        for p in self._patchers:
+            p.start()
+        self._store = GraphStore()
+        return self._store
+
+    def __exit__(self, *args):
+        for p in reversed(self._patchers):
+            p.stop()
+        self._tmpdir.cleanup()
+
+
+def _make_ollama_response(content: str, finish_reason="stop") -> dict:
+    return {
+        "choices": [{
+            "finish_reason": finish_reason,
+            "message": {"content": content, "tool_calls": None},
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+
+
+def _patch_httpx(response_json: dict):
+    mock_response = MagicMock()
+    mock_response.json.return_value = response_json
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    return mock.patch("core.orchestrator.httpx.AsyncClient", return_value=mock_client)
+
+
+def _fake_retrieval_result(activated_mu_ids):
+    from memory.retrieval import RetrievalResult
+    return RetrievalResult(
+        mus=[],
+        keywords=["test"],
+        activated_mu_ids=list(activated_mu_ids),
+        activated_edge_ids=[],
+    )
+
+
+def _run_interaction(message, series_id, activated_mu_ids, summary_mu_id=None, ollama_response=None):
+    from core.orchestrator import run_interaction
+
+    retrieval_result = _fake_retrieval_result(activated_mu_ids)
+    ollama_response = ollama_response or _make_ollama_response("a reply")
+    with mock.patch("core.orchestrator.retrieve", AsyncMock(return_value=retrieval_result)), \
+         mock.patch("core.orchestrator.extract", AsyncMock(return_value=("condensed context", summary_mu_id))), \
+         _patch_httpx(ollama_response):
+        return _run(run_interaction(message=message, series_id=series_id))
+
+
+class TestMilestone22OutputRoutingEdges:
+    """Context-linkage edges relocate from prompt->retrieved to
+    output->retrieved (+ output->summary when Mode 3 fires); the prompt MU
+    becomes a routing dead end (its only edge is prompt->input)."""
+
+    def test_n_retrieved_mus_no_summary_produces_n_plus_2_edges(self):
+        with _TempFullStore() as s:
+            mu1, mu2 = str(uuid.uuid4()), str(uuid.uuid4())
+            _run(s.create_mu(mu_id=mu1, source_type="agent_output", raw_content="alpha"))
+            _run(s.create_mu(mu_id=mu2, source_type="user_input", raw_content="beta"))
+
+            result = _run_interaction("hi there", "series-1", [mu1, mu2])
+
+            edges = _run(s.get_all_edges())
+            print(f"[test] edges: {edges}")
+            assert len(edges) == 4  # prompt->input, input->output, 2x output->retrieved
+
+            by_trigger = {}
+            for e in edges:
+                by_trigger.setdefault(e["creation_trigger"], []).append(e)
+            assert len(by_trigger.get("prompt_construction", [])) == 2
+            co_activation = by_trigger.get("co_activation", [])
+            assert len(co_activation) == 2
+            assert {e["target_mu_id"] for e in co_activation} == {mu1, mu2}
+            assert {e["source_mu_id"] for e in co_activation} == {result.output_mu_id}
+
+    def test_mode3_summary_produces_n_plus_3_edges(self):
+        with _TempFullStore() as s:
+            mu1 = str(uuid.uuid4())
+            summary_mu = str(uuid.uuid4())
+            _run(s.create_mu(mu_id=mu1, source_type="agent_output", raw_content="alpha"))
+            _run(s.create_mu(mu_id=summary_mu, source_type="system", raw_content="condensed summary"))
+
+            result = _run_interaction("hi there", "series-2", [mu1], summary_mu_id=summary_mu)
+
+            edges = _run(s.get_all_edges())
+            print(f"[test] edges: {edges}")
+            assert len(edges) == 4  # prompt->input, input->output, output->mu1, output->summary
+
+            co_activation = [e for e in edges if e["creation_trigger"] == "co_activation"]
+            assert {e["target_mu_id"] for e in co_activation} == {mu1, summary_mu}
+            assert {e["source_mu_id"] for e in co_activation} == {result.output_mu_id}
+
+    def test_prompt_mu_has_no_outgoing_edges_except_to_input(self):
+        with _TempFullStore() as s:
+            mu1 = str(uuid.uuid4())
+            _run(s.create_mu(mu_id=mu1, source_type="agent_output", raw_content="alpha"))
+
+            result = _run_interaction("hi there", "series-3", [mu1])
+
+            edges = _run(s.get_all_edges())
+            prompt_sourced = [e for e in edges if e["source_mu_id"] == result.prompt_mu_id]
+            print(f"[test] edges sourced from the prompt MU: {prompt_sourced}")
+            assert len(prompt_sourced) == 1
+            assert prompt_sourced[0]["target_mu_id"] == result.input_mu_id
+
+    def test_failed_output_produces_same_edge_shape(self):
+        """A failed-output turn (empty content, finish_reason=length) still
+        gets the full output fan-out — failed/empty MUs are retained
+        analytic fixtures, not suppressed."""
+        with _TempFullStore() as s:
+            mu1 = str(uuid.uuid4())
+            _run(s.create_mu(mu_id=mu1, source_type="agent_output", raw_content="alpha"))
+
+            failed_response = _make_ollama_response("", finish_reason="length")
+            result = _run_interaction("hi there", "series-4", [mu1], ollama_response=failed_response)
+
+            edges = _run(s.get_all_edges())
+            print(f"[test] edges (failed output): {edges}")
+            assert len(edges) == 3  # prompt->input, input->output, output->mu1
+            co_activation = [e for e in edges if e["creation_trigger"] == "co_activation"]
+            assert len(co_activation) == 1
+            assert co_activation[0]["source_mu_id"] == result.output_mu_id
+            assert co_activation[0]["target_mu_id"] == mu1
+
+    def test_edge_values_identical_across_run_conditions(self):
+        """weight/alpha/beta on the new output->retrieved edges must not
+        vary by RUN_CONDITION — M22's wiring changes are condition-invariant
+        by construction (edge creation never branches on condition)."""
+        with _TempFullStore() as s:
+            mu1 = str(uuid.uuid4())
+            _run(s.create_mu(mu_id=mu1, source_type="agent_output", raw_content="alpha"))
+
+            seen = {}
+            for condition in ("learned", "static_weight", "random_weight"):
+                with mock.patch("core.orchestrator.RUN_CONDITION", condition):
+                    result = _run_interaction("hi there", f"series-cond-{condition}", [mu1])
+                edges = _run(s.get_all_edges())
+                co_activation = [
+                    e for e in edges
+                    if e["creation_trigger"] == "co_activation" and e["source_mu_id"] == result.output_mu_id
+                ]
+                assert len(co_activation) == 1
+                seen[condition] = (co_activation[0]["weight"], co_activation[0]["alpha"], co_activation[0]["beta"])
+
+            print(f"[test] edge values by condition: {seen}")
+            assert len(set(seen.values())) == 1

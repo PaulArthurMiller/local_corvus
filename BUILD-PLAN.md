@@ -3757,11 +3757,156 @@ session on their own)
 
 ---
 
+## Turn-Wiring Fixes — Milestones 22–24 (Organic MU/Edge Topology)
+
+**Source:** planning session 2026-07-09, decomposing `seed_v3_mu_spec.md`'s sibling doc on turn-wiring. Prerequisite for the full experimental run. **Not** the seed v3 fixture work — that stays a separate artifact.
+
+### Why this exists
+
+The run's secondary claim — that the system retrieves and routes through *constructed* knowledge (interaction MUs), not just seed MUs — requires a turn's output MU to route traversal to the MUs that grounded it. It currently can't.
+
+```
+CURRENT PER-TURN WIRING                        TARGET PER-TURN WIRING (M22+)
+════════════════════════                       ══════════════════════════════
+
+ ┌────────┐      ┌───────┐      ┌────────┐      ┌────────┐      ┌───────┐      ┌────────┐
+ │ prompt │─────▶│ input │─────▶│ output │      │ prompt │─────▶│ input │─────▶│ output │
+ └───┬────┘      └───────┘      └────────┘      └────────┘      └───────┘      └───┬────┘
+     │ prompt_construction           ▲            (no longer fans out to               │ co_activation
+     ▼                               │             retrieved MUs)                      │
+ ┌────────┐  ┌────────┐              │                                    ┌────────────┼────────────┐
+ │retrieved│ │retrieved│  ... N      │                                    ▼            ▼             ▼
+ │  MU 1   │ │  MU 2   │  edges      │                              ┌────────┐   ┌────────┐   ┌─────────┐
+ └────────┘  └────────┘        (dead end —                          │retrieved│  │retrieved│  │ summary │
+                                output has no                        │  MU 1   │  │  MU 2   │  │   MU    │
+                                outgoing edges)                      └────────┘   └────────┘  └────┬────┘
+                                                                                                     │ co_activation
+                                                                                          ┌──────────┴──────────┐
+                                                                                          ▼                     ▼
+                                                                                    ┌──────────┐         ┌──────────┐
+                                                                                    │source MU │         │source MU │
+                                                                                    │(fed the  │         │(fed the  │
+                                                                                    │ summary) │         │ summary) │
+                                                                                    └──────────┘         └──────────┘
+```
+
+**Why this matters (sanity narrative):** turn 5's response synthesizes a "roster file" from two seed rules. Turn 9 asks "write one compliant roster entry" — no cluster vocabulary, so BM25 enters at turn 5's *output* MU (the only place "roster" exists with substance). Under current wiring, traversal from that MU reaches nothing and the answer degrades. Under target wiring, `output₅→spoke_a` / `output₅→spoke_b` are one hop away: context assembles constructed knowledge *plus* the seed rules it depends on, and M20's path credit strengthens exactly those routing edges — constructed MUs entering the same learning loop as seed edges, zero learning-code changes required.
+
+**Experimental-integrity constraint (applies to every milestone below):** all wiring changes are condition-invariant — identical edges, identical `initial_edge_weight`, identical Beta priors (`edge_update.prior_alpha/prior_beta`) across learned / static_weight / random_weight. Nothing in M22–M24 branches on `RUN_CONDITION`.
+
+### Why this build order
+
+M22 is the hard/risky part — it changes what edges exist and where. Get it right and provable (edge-count acceptance tests) before touching the extractor. M23 depends on M22 only stylistically (same `creation_trigger="co_activation"` pattern, same priors) — it's a separate file (`extractor.py`) and a separable review, so it's its own milestone rather than folded into M22. M24 is verification-only and comes last on purpose: it needs M22+M23's actual edge population shape to audit against, and its required "done" proof (a smoketest series report with sane §5.3/§5.4 numbers) only means something once the new wiring is live.
+
+---
+
+### Milestone 22 — Output-MU Routing Edges + Retrieval Candidacy Exclusion
+
+**Why together:** both tasks touch the same call path (`orchestrator.py` Step 5 → `retrieve()`), and T2 is the direct fix for the lexical-duplication problem that T1's edge relocation makes room for — input and prompt MUs are near-identical text (`_prompt_mu_content()`), so leaving prompt MUs in the BM25 pool would waste K1 slots on duplicates now that context linkage lives on the output MU instead.
+
+**Build:**
+
+1. **`backend/core/orchestrator.py` Step 5 — remove the retrieval fan-out.** Delete the `for mu_id in retrieval.activated_mu_ids: await graph_store.create_edge(source_mu_id=prompt_um.mu_id, ...)` loop (lines ~412–423). Keep the `prompt → input` edge unchanged. Update the surrounding comment block (currently says context linkage "lives in this MU's prompt->retrieved-MU edges" — it no longer does) and `_prompt_mu_content()`'s docstring, which makes the same now-false claim.
+
+2. **`backend/core/orchestrator.py` Step 9 area — add the output fan-out.** After the output MU is created and its `input → output` edge is written, add one `create_edge(source_mu_id=output_um.mu_id, target_mu_id=mu_id, ..., creation_trigger="co_activation", ...)` call per MU in `activated_mu_ids` (the variable already computed at line ~350, which already includes `summary_mu_id` when Mode 3 fires — so `output → summary` arrives for free, no extra code). Use `weight=INITIAL_EDGE_WEIGHT`, `alpha/beta=EDGE_UPDATE_CFG["prior_alpha"/"prior_beta"]`, `creation_run_id=run_id` — identical pattern to every other edge-creation call site in this function.
+
+   **Note — don't touch `activated_edge_ids`.** `RunRecord.activated_edge_ids`/`InteractionResult.activated_edge_ids` stay exactly `retrieval.activated_edge_ids` (the K1→K2 traversal edges). The new co_activation edges are not traversal-path edges and M20's credit assignment (`process_verdict_for_learning()`) reads `traversal_path`, not this field — adding them here would be a no-op at best and misleading at worst.
+
+3. **`config.yaml` — new hyperparameter.** The spec calls this a key "under `retrieval:`", but `config.yaml`'s actual registry is a flat `hyperparameters:` block with a `retrieval_` prefix convention (`retrieval_keyword_pool_size`, `retrieval_level1_top_k`, ...). Match that: add `hyperparameters.retrieval_exclude_source_types: ["prompt"]` (a YAML list), not a new nested section. Document it inline the way every other hyperparameter is documented (range/purpose comment above it).
+
+4. **`backend/memory/retrieval.py` — candidacy filter.** In `retrieve()`, immediately after `all_mus = await store.get_all_mus()`, filter: `excluded = set(hp.get("retrieval_exclude_source_types", ["prompt"])); all_mus = [m for m in all_mus if m["source_type"] not in excluded]`. Log a line reporting how many were excluded (`logger.info("retrieve: excluded %d MUs by source_type filter=%s", ...)`). Do **not** filter `all_edges` — `edge_weight_sum` is built from the unfiltered edge list, so excluded MUs' edges still contribute to their neighbors' centrality scores, exactly as the acceptance criterion requires. Leave the filter as a single `source_type not in excluded` predicate — this is also the future home of `pruning_flag`-based soft exclusion; don't implement that now, just don't structure the filter in a way that makes adding a second predicate awkward later.
+
+   **Side-effect worth knowing, not fixing:** because `mu_by_id` (used to resolve K2 traversal targets) is built from the same filtered `all_mus`, an excluded MU could never surface via K2 traversal either (silently dropped by the existing `if mid in mu_by_id` guard), not just via BM25. Today nothing ever creates an edge *targeting* a prompt MU, so this never fires — but flag it here so a future exclusion type doesn't discover it the hard way.
+
+**Tests:**
+- `test_orchestrator.py`: a turn with N retrieved MUs and no Mode-3 summary produces exactly N+2 edges (`prompt→input`, `input→output`, N×`output→retrieved`) with `creation_trigger="co_activation"` on the new ones; with a Mode-3 summary, N+3 edges (adds `output→summary`). A turn with a failed-output source type (`agent_output_failed_*`) produces the same edge shape — failed/empty MUs are retained analytic fixtures, not suppressed. All edge values (`weight`, `alpha`, `beta`) are identical regardless of `RUN_CONDITION`.
+- `test_retrieval.py`: with the default config, prompt MUs never appear in `candidate_set_before_ranking`, `entry_point_mu_ids`, or the retrieved set; a query matching a prompt MU's keywords resolves to zero candidates from it. Setting `retrieval_exclude_source_types: []` restores current (pre-M22) retrieval behavior exactly — same candidate set as before the filter existed.
+
+**Done when:** both acceptance criteria above hold under real pytest runs; full suite passes with no regressions; a manual `/chat` exchange over 2+ turns shows (via logs) an `output→retrieved` edge on turn 2 pointing back at turn 1's retrieved MUs, and zero `prompt→retrieved` edges anywhere in the run.
+
+**Risks:** ⚠ Every existing test that asserts exact edge counts/shapes for a turn (there are several, going back to M8/M12) will need updating — this is expected fallout, not a regression signal; audit `test_orchestrator.py` for stale assertions before declaring the suite clean.
+
+---
+
+### Milestone 23 — Extractor: Summary Edges + Source-Kind Labels
+
+**Why second:** closes the two remaining organic-wiring gaps, both localized to `extractor.py`: Mode-3 summary MUs are edge-orphans (found lexically, never by traversal — the same disease M22 just cured on the output MU), and mixed seed/interaction content in the condensed context is illegible to Gemma without a cue for what kind of memory it's looking at.
+
+**Build:**
+
+**(a) Summary → source edges.**
+
+- `orchestrator.py` must thread `run_id` into `extract()` — it currently isn't passed (`extract(mus=..., keywords=..., store=..., session_id=..., ollama_host=..., model_name=...)` has no `run_id` param today). Add `run_id=run_id` to the call and to `extract()`'s signature.
+- `extract()`'s Mode 3 branch must pass the full `mus` list into `_summarize()` (currently `_summarize()` only receives the condensed `text`, not which MUs produced it) — add a `mus` param to `_summarize()`.
+- In `_summarize()`, after `create_mu()` succeeds, create one `summary → mu` edge per MU in `mus`, `creation_trigger="co_activation"`, using the same priors pattern as everywhere else.
+- **Priors source:** `extractor.py` already loads its own module-level `_CONFIG` (mirrors `orchestrator.py`'s `_load_config()` pattern, duplicated on purpose per the existing convention). Read `_CONFIG.get("edge_update", {}).get("prior_alpha", 1.0)` / `("prior_beta", 1.0)` directly — no need to import `validate_edge_update_config`; `orchestrator.py` already hard-fails startup on invalid `edge_update` config before any request reaches `extract()`, so a second validation pass here would be redundant.
+- **Pre-existing gap, flagged not fixed:** `_summarize()`'s `create_mu()` call doesn't pass `series_id`/`experiment_id` (unlike every other `create_mu()` call site in the codebase) — the summary MU is stamped with `series_id=NULL`. This predates this milestone and isn't in the spec's scope; note it in PROGRESS.md as a follow-up rather than silently fixing it here, since `experiment_id` isn't currently plumbed into `extractor.py` at all and doing it properly is a bigger change than this milestone's acceptance criteria call for.
+
+**(b) Source-kind content labels.**
+
+Prefix each chunk in `_mode1_extract()`/`_mode2_extract()` with a bracketed label derived from the MU's origin, before joining into `condensed`.
+
+**Open decision — the spec's label scheme doesn't match the data model; resolve before coding.** The spec says to derive labels from `source_type` (e.g. `"[memory — reference]"` for seed MUs). But seed MUs are *not* distinguishable by `source_type` — every seed MU in both `seed_v2.json.gz` and the `seed_v2_draft.json` fixture is stamped `source_type: "agent_output"`, identical to a real turn's response. The only field that distinguishes seed-origin content is `series_id` (prefix `"seed:"`) — the exact mechanism `series_report.py` §5.3 already uses (`mu_series.startswith("seed:")`) to classify MUs as `seed_fixture` vs `intra_series`/`cross_series`. `get_all_mus()` returns full rows (including `series_id`), so this field is already present on every MU dict `extract()` receives.
+
+Proposed label derivation (series_id check first, source_type fallback second):
+
+| Condition | Label |
+|---|---|
+| `series_id` starts with `"seed:"` | `[memory — reference]` |
+| `source_type == "user_input"` | `[memory — prior user message]` |
+| `source_type == "agent_output"` (non-seed) | `[memory — prior response]` |
+| `source_type in ("agent_output_failed_token_limit", "agent_output_failed_empty_output")` | `[memory — prior response]` (a build-time judgment call — folding failed variants into the same label keeps the vocabulary small; split into `[memory — prior response (failed)]` if judge/Gemma behavior on failed-turn content warrants it during testing) |
+| `source_type == "system"` (a Mode-3 summary MU, now itself retrievable) | `[memory — synthesized summary]` |
+| anything else (`tool_call`, `tool_result`, unknown) | `[memory — other]` |
+
+Confirm this table (or a revision) with the user before implementing — it's a real deviation from the written spec, not just an implementation detail.
+
+**Tests:**
+- `test_extractor.py`: Mode-3 summary MU has outgoing edges to every MU in the pre-summarization `mus` list, `creation_trigger="co_activation"`, priors from config. Label prefixes appear correctly for a seed MU (keyed by `series_id`, not `source_type`), a real `agent_output` MU, a `user_input` MU, and a `system` (summary) MU, in both Mode 1 and Mode 2 output.
+- Regression: existing Mode 1/Mode 2/Mode 3 tests updated to expect labeled chunks (their assertions currently check raw sentence text).
+
+**Done when:** labels appear in condensed context for both Mode 1 and Mode 2 paths; Mode-3 summary MUs have outgoing edges to all their sources; full suite passes with no regressions.
+
+**Risks:** ⚠ Label text becomes part of `assembled_prompt_json` and judge inputs — once judged turns exist against a label vocabulary, changing it later invalidates comparability across runs. Pick the table above deliberately, not provisionally.
+
+---
+
+### Milestone 24 — Verifications + Reports/Admin Audit + Smoketest
+
+**Why last:** every item here is confirm-or-fix against M22+M23's actual edge population, not new design. Needs the new wiring live to mean anything.
+
+**Build (verification-first — only touch code where a check actually fails):**
+
+1. **SimpleRL unreachable in the run configuration.** Confirmed already by inspection: `POST /feedback/verdict` (the harness's endpoint) routes exclusively through `learning/edge_update.process_verdict_for_learning()`, which itself refuses to write anything unless `condition_label == "learned"` (belt-and-suspenders, not just trusting the caller). `learning/simple_rl.py` is only reachable from `POST /feedback` (the chat-UI thumbs endpoint, human feedback, outside the harness/experiment path). No fix needed — this is a clean pass; just record the confirmation in PROGRESS.md so it isn't re-litigated.
+2. **Probe turns create no MUs/edges, unaffected by M22.** `probes.py`'s `run_probe()` (via `POST /admin/run-probe`) only ever calls `retrieve()`, never `run_interaction()` — M22's changes are entirely inside `run_interaction()`'s Step 5/9, so this invariant is untouched by construction. Confirm with a quick grep/read pass, not new tests.
+3. **Probe retrieval passes `condition=RUN_CONDITION`.** Already true — `admin.py`'s `run_probe()` calls `retrieve(..., condition=RUN_CONDITION, rng=EDGE_RNG)` (confirmed at read time; this was evidently fixed since the spec was drafted). No fix needed; record the confirmation.
+4. **`edges.direction` / `directional_edge_weight_multiplier` documented as inert.** Confirmed: every `create_edge()` call site in the codebase passes `direction="forward"` (grepped `backend/`, all matches are literal `"forward"` or `"in"/"out"` on the UM boundary field, not the edge table), and `retrieval.py`'s K2 scoring applies `dir_multiplier` uniformly to every traversed edge regardless of any direction check — it is a constant factor on all K2 scores, not a forward-vs-bidirectional bias as the config comment implies. Add a note to the `edges` table's schema comment in `store.py` (near the `CREATE TABLE edges` block) and to the `directional_edge_weight_multiplier` comment in `config.yaml` so this isn't rediscovered as a bug later.
+
+5. **`series_report.py` §5.3/§5.4 audit.** Read, don't guess: §5.3 (`_section_53...`) classifies by `run["activated_mu_ids"]` and `mu_series` prefix — no `creation_trigger` filter anywhere, so it already picks up co_activation-sourced retrievals without changes. §5.4 (`_section_54_cross_series_edges` → `store.get_cross_series_edges()`) queries all edges touching a series with no `creation_trigger` filter either. Both are confirmed unaffected by inspection; if the M22/M23 smoketest (step 7 below) shows otherwise, fix then — don't pre-emptively add filters.
+6. **Admin/frontend edge listings.** Grepped `admin/src` for `creation_trigger` — no matches; nothing there enumerates trigger values today, so there's nothing to update.
+7. **Required smoketest.** Run a short smoketest series (5–10 turns, real backend) after M22+M23 are merged. Generate a series report. Confirm: §5.3/§5.4 numbers are sane (no unclassified-edge warnings, cross-series counts reflect the new `output→retrieved` edges regularly crossing series boundaries — expected, not an anomaly), and the edge population shows the new shape (output MUs at degree N+1 instead of degree 1, `co_activation`-triggered edges present, `prompt_construction` edge counts per turn dropped).
+
+**Tests:** no new unit tests expected beyond what M22/M23 already added, unless step 7's smoketest surfaces a real bug — in which case it gets a regression test like every other smoketest finding in this project's history.
+
+**Done when:** all 4 verification items (1–4) are confirmed and documented (fixed only if actually broken); the report audit (5–6) confirms no changes needed or applies the minimal fix if it does; the smoketest (7) produces a series report with sane §5.3/§5.4 numbers and no unclassified-edge warnings.
+
+---
+
+### Non-Goals (M22–M24)
+
+- **Reciprocal organic edges** (retrieved→output direction): deferred behind a future `organic_reciprocal` config knob, default off. Reverse edges would pull past responses into hub K2 competition and contaminate the spoke-discrimination measurement planned for the upcoming run.
+- **Multi-hop traversal** (`retrieval_max_hops`): a later milestone. `compute_path_increments()` (M20) already supports multi-hop credit math; retrieval itself does not.
+- **Decay / pruning-flag filtering / MU-level counters:** future milestones. M22's exclusion filter is structured to accept a second predicate later, nothing more.
+- **Tool MU wiring:** `tool_call`/`tool_result` MUs stay edge-orphaned this run (no tools fire in experiment turns); revisit alongside the application build.
+- **Seed v3 fixture changes** (reciprocal seed edges, counterfactual content, and — newly relevant after this planning session's discovery — giving seed MUs a `source_type` that actually distinguishes them from interaction MUs instead of relying solely on `series_id`): a separate artifact, `seed_v3_mu_spec.md`.
+
+---
+
 ## Status
 
 ```
-Current milestone: 21 — Harness Probe Battery Wiring — COMPLETE
-Last updated: 2026-07-05
+Current milestone: 23 — Extractor: Summary Edges + Source-Kind Labels — NOT STARTED
+Last updated: 2026-07-10
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -3811,5 +3956,7 @@ Last updated: 2026-07-05
 **Milestone 20 Phase 1:** Complete — Beta(alpha, beta) evidence counters on edges, `effective_weight()` as the sole condition-dispatched weight read path (learned: posterior mean/Thompson sample; static_weight/random_weight: unchanged scalar `weight` column), path-decayed credit assignment from judge verdicts (`process_verdict_for_learning()`), and the append-only `edge_update_events` log required by the trace-test sign-off gate. Closed a real gap discovered during planning: the backend had no signal for "which condition is this process running" — added an additive `RUN_CONDITION` env var (defaults to `static_weight` so non-harness usage is unaffected) alongside the existing `EXPERIMENT_ID` per-condition restart mechanism. Decay is schema-reserved (`config.yaml: decay:`) and hard-fails startup if `enabled: true`, per scope. 62 new tests (582 total), no regressions, including the required §8 trace test (replays a real up/down verdict sequence on a real traversal edge and reconstructs weight-as-of-turn/traversal-path/retrieved-set from persisted logs alone, no re-execution). Branch: `milestone-20-phase-1-edge-update`.
 
 **Milestone 21:** Complete — harness probe turns now run real `POST /admin/run-probe` measurements (read-only retrieval, `probe_results` rows) instead of Phase-0 `/chat` placeholders that mutated the graph. `assign_probe_schedule()` gives every probe turn a deterministic `probe_id` + globally contiguous 1-based `measurement_session_index` recorded in the manifest; probe turns are never judged and never chat; a plan with probe turns and no loaded battery hard-stops before any graph mutation. `probe_results.experiment_id` (additive migration, stamped server-side) plus experiment-scoped §6.1/§6.3 queries (condition_label fallback for legacy rows) prevent cross-attempt/dry-run probe contamination; the per-condition restart env now also sets `CONDITION_LABEL`. Also fixed the PR #39-flagged prompt-MU nesting: prompt MUs store only the user-message portion (`_prompt_mu_content()`), never the injected `--- Context from memory ---` block (full prompt still audited in `analytics.assembled_prompt_json`). Migration lesson recorded: indexes on migrated columns belong in `_migrate_db()`, never `_INIT_SQL` (which runs first and would fail on every pre-migration DB); `_open_db()` now closes the connection on init failure so a schema error can't leave a process-hanging aiosqlite thread behind. 611 tests passing, no regressions. Branch: `milestone-21-probe-battery-wiring`.
+
+**Milestone 22:** Complete — context-linkage edges relocated from `prompt->retrieved` to `output->retrieved` (+ `output->summary` when Mode 3 fires), `creation_trigger="co_activation"`; the prompt MU is now a routing dead end (only `prompt->input`). New `hyperparameters.retrieval_exclude_source_types` (default `["prompt"]`) filters prompt MUs out of retrieval candidacy — `all_edges` stays unfiltered so excluded MUs' edges still feed neighbor centrality scoring. Discovered and fixed a real, pre-existing bug while writing the milestone's own required failed-output test: `gate/um.py`'s `SourceType` Literal never included `agent_output_failed_token_limit`/`agent_output_failed_empty_output` (added in M11), so `create_um()` has crashed with a pydantic `ValidationError` on every real token-limit or empty-output failure since M11 — no prior test drove a failure through the full `run_interaction()` pipeline, so it was never caught. Fixed by adding both literals. 626 tests passing (617 baseline + 9 new), no regressions. **Manually verified live** against a local (non-Docker) backend + real Ollama `gemma4:e4b` over 6 turns: after padding the corpus past the point where `rank_bm25`'s classic IDF formula goes negative for majority-document terms (a pre-existing library quirk on tiny corpora, not an M22 concern), a later turn's output MU gained a `co_activation` edge directly to an earlier turn's *output* MU — the exact cross-turn routing scenario M22 targets — and every prompt MU across the run had exactly one outgoing edge (`prompt->input`), never a `prompt->retrieved` edge. Branch: `milestone-22-output-mu-routing`.
 
 **Milestone 19 Phase 3:** Complete — resolved the phase's flagged highest-risk unknown (confirmed live that `EXPERIMENT_ID` is a module-level constant resolved once at backend startup, no per-request override) by having the harness restart the backend container per condition (`docker_lifecycle.py` — `restart_backend()` + `wait_for_health()`); discovered and fixed a second, deeper gap only visible under real Docker verification: `/chat`'s `series_id` was a session *lookup* key that silently discarded an unrecognized caller-supplied ID and minted a random UUID instead — fixed with `get_or_create_session()` (`backend/core/session.py`), which is what makes the harness's deterministic `{plan_id}_{condition}_s{series_index}` series identity actually work. Also closed an undiscussed gap: `random_weight` edge re-randomization was never wired into `runner.py` — added. Built: series/experiment-close reporting (`client.py`: `generate_series_report()`/`generate_experiment_report()`; new `ReportGenerationError` governed by a dedicated `error_policy["report_generation"]` key, soft_continue by default), notification channel dispatch (`notify.py` — "log" implemented, "email"/"webhook" fall back with a warning), and budget_cap enforcement (`cost.py` — `CostTracker`, pre-run + mid-run checks). 510 tests passing (465 baseline + 45 new), no regressions. **Full pilot smoke run (the phase's required done criterion) PASSED with real data:** 3 conditions × 1 series × 7 turns, real `gemma4:e4b` agent + judge, existing Phase 1 prompt bank reused ($0 spend) — all 21 turns completed, correct per-condition `EXPERIMENT_ID` confirmed via `/admin/runs`, `random_weight` randomized 32 edges once at series start, 3 series reports + 1 experiment report generated, and all 4 §6.2 control-shadow sanity checks PASS on real data (`zero_weight_changes`, `zero_feedback_edge_correlation` ×2, `weights_rerandomized` with `std_dev=0.1848` > the `0.05` floor). `budget_cap` verified live in both directions (hard-stop on a genuine $0.58-over-cap estimate; normal completion when uncapped). See PROGRESS.md 2026-07-05 entry for full detail. Branch: `milestone-19-phase-3-pilot`.

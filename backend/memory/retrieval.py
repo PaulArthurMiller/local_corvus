@@ -126,6 +126,26 @@ async def retrieve(
     all_mus = await store.get_all_mus()
     all_edges = await store.get_all_edges()
 
+    # Candidacy exclusion: drop MUs of certain source_types from the retrieval
+    # pool entirely (BM25 candidacy AND K2 traversal targets, since mu_by_id
+    # below is built from this same filtered list). Does NOT filter all_edges
+    # — edge_weight_sum centrality scoring still sees excluded MUs' edges, so
+    # an excluded MU's neighbors aren't penalized for having been connected to
+    # it. Default excludes "prompt" MUs: post-M22, context linkage lives on
+    # output->retrieved edges, not prompt->retrieved edges, and prompt MUs are
+    # near-duplicates of their input MU (see _prompt_mu_content()) that would
+    # otherwise waste K1 slots on redundant text.
+    excluded_source_types = set(hp.get("retrieval_exclude_source_types", ["prompt"]))
+    if excluded_source_types:
+        pre_filter_count = len(all_mus)
+        all_mus = [m for m in all_mus if m["source_type"] not in excluded_source_types]
+        excluded_count = pre_filter_count - len(all_mus)
+        if excluded_count:
+            logger.info(
+                "retrieve: excluded %d MUs by source_type filter=%s",
+                excluded_count, sorted(excluded_source_types),
+            )
+
     if not all_mus:
         logger.debug("retrieve: store is empty — skipping retrieval")
         return RetrievalResult()

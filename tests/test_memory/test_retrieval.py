@@ -428,3 +428,75 @@ class TestConditionDispatch:
             result2 = run(retrieve("elephant mammal", s, cfg, condition="learned", rng=random.Random(123)))
 
             assert result1.edge_weights_used == result2.edge_weights_used
+
+
+# ---------------------------------------------------------------------------
+# M22 — retrieval_exclude_source_types candidacy filter
+# ---------------------------------------------------------------------------
+
+
+class TestSourceTypeExclusionFilter:
+    """Post-M22, prompt MUs are near-duplicates of their input MU (context
+    linkage moved to output->retrieved edges), so the default config excludes
+    source_type="prompt" from retrieval candidacy entirely."""
+
+    def test_prompt_mus_excluded_from_result_by_default(self):
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            prompt_id = _mu_id()
+            # Same multi-hit keywords as MU 0 — would otherwise reach K1 on
+            # lexical merit alone, proving the filter (not lack of a match) is
+            # what keeps it out.
+            run(s.create_mu(mu_id=prompt_id, source_type="prompt",
+                             raw_content="elephant mammal Africa prompt duplicate"))
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config()))
+            retrieved_ids = {m["mu_id"] for m in result.mus}
+            print(f"[test] retrieved ids: {retrieved_ids}")
+            assert prompt_id not in retrieved_ids
+            assert prompt_id not in result.entry_point_mu_ids
+            assert prompt_id not in {c["mu_id"] for c in result.candidate_set_before_ranking}
+            # MU 0 (the real elephant/mammal MU) still surfaces normally
+            assert ids[0] in retrieved_ids
+
+    def test_prompt_only_keywords_resolve_to_zero_candidates(self):
+        """A query matching ONLY a prompt MU's keywords resolves to zero
+        candidates from it — no fallback to a non-excluded MU. Decoy MUs are
+        included so the BM25 corpus has more than one document (a
+        single-document corpus produces degenerate zero scores for every
+        term, which would make this pass for the wrong reason)."""
+        with TempDBStore() as s:
+            _populate_10_mus(s)
+            prompt_id = _mu_id()
+            run(s.create_mu(mu_id=prompt_id, source_type="prompt",
+                             raw_content="zephyr quokka narwhal zephyr quokka"))
+            result = run(retrieve("zephyr quokka narwhal", s, _minimal_config()))
+            print(f"[test] result mus: {result.mus}")
+            assert result.mus == []
+
+    def test_empty_exclusion_list_restores_pre_m22_behavior(self):
+        """Setting retrieval_exclude_source_types: [] restores the exact
+        pre-M22 candidate set — prompt MUs compete for K1 like any other MU."""
+        with TempDBStore() as s:
+            _populate_10_mus(s)
+            prompt_id = _mu_id()
+            run(s.create_mu(mu_id=prompt_id, source_type="prompt",
+                             raw_content="zephyr quokka narwhal zephyr quokka"))
+            cfg = _minimal_config()
+            cfg["hyperparameters"]["retrieval_exclude_source_types"] = []
+            result = run(retrieve("zephyr quokka narwhal", s, cfg))
+            print(f"[test] result mus with empty exclusion: {[m['mu_id'] for m in result.mus]}")
+            assert prompt_id in {m["mu_id"] for m in result.mus}
+
+    def test_excluded_mu_edges_still_contribute_to_neighbor_centrality(self):
+        """Only all_mus is filtered, not all_edges: an excluded MU's edges
+        still count toward a retrievable neighbor's edge_weight_sum, so
+        excluded MUs don't silently zero out their neighbors' centrality."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            prompt_id = _mu_id()
+            run(s.create_mu(mu_id=prompt_id, source_type="prompt", raw_content="prompt filler"))
+            run(s.create_edge(source_mu_id=prompt_id, target_mu_id=ids[0], weight=0.95))
+            result = run(retrieve("elephant mammal Africa", s, _minimal_config()))
+            candidate0 = next(c for c in result.candidate_set_before_ranking if c["mu_id"] == ids[0])
+            print(f"[test] MU0 edge_weight_sum with excluded-MU edge: {candidate0['edge_weight_sum']}")
+            assert candidate0["edge_weight_sum"] >= 0.95

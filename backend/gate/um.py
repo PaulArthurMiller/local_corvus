@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 SourceType = Literal[
     "user_input",
     "agent_output",
+    "agent_output_failed_token_limit",
+    "agent_output_failed_empty_output",
     "tool_call",
     "tool_result",
     "prompt",

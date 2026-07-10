@@ -208,7 +208,9 @@ def _prompt_mu_content(condensed_context: str, user_content: str) -> str:
     on a later turn would inject old context — markers and all — inside the
     new turn's context block, compounding each time. The assembled prompt is
     still fully audited in analytics.assembled_prompt_json, and which MUs
-    contributed context is recorded structurally by the prompt MU's edges.
+    contributed context is recorded structurally by the output MU's outgoing
+    edges (see Step 9 in run_interaction) — the prompt MU is a routing dead
+    end by design, not the traversal node context linkage lives on.
 
     The "[User message]" label is kept when context was injected so the
     stored content matches the user-message portion of the prompt that was
@@ -373,14 +375,17 @@ async def run_interaction(
     turn_index = await graph_store.get_next_turn_index()
     session_turn_index = await graph_store.get_series_turn_count(series_id)
 
-    # --- Step 5: Create prompt MU + edges to contributing MUs ---
+    # --- Step 5: Create prompt MU + edge to input MU ---
     # The stored MU deliberately excludes the injected memory context: MU
     # content is retrievable, so storing the assembled prompt would re-embed
     # every retrieved MU (plus the "--- Context from memory ---" markers)
     # into the graph, and a later retrieval of this MU would nest old context
     # inside new context. The full assembled prompt is still audited — it
-    # lives in analytics.assembled_prompt_json; the context linkage lives in
-    # this MU's prompt->retrieved-MU edges.
+    # lives in analytics.assembled_prompt_json. The prompt MU is a routing
+    # dead end by design (an audit record, not a traversal node); context
+    # linkage lives on the output MU's outgoing edges instead (Step 9) so a
+    # later turn that enters retrieval at a past response can traverse from
+    # there back to the MUs that response was built on.
     prompt_um = create_um(
         content=_prompt_mu_content(condensed_context, input_result.content),
         source_type="prompt",
@@ -409,18 +414,6 @@ async def run_interaction(
         alpha=EDGE_UPDATE_CFG["prior_alpha"],
         beta=EDGE_UPDATE_CFG["prior_beta"],
     )
-    # Edges: prompt -> each retrieved contributing MU
-    for mu_id in retrieval.activated_mu_ids:
-        await graph_store.create_edge(
-            source_mu_id=prompt_um.mu_id,
-            target_mu_id=mu_id,
-            weight=INITIAL_EDGE_WEIGHT,
-            direction="forward",
-            creation_run_id=run_id,
-            creation_trigger="prompt_construction",
-            alpha=EDGE_UPDATE_CFG["prior_alpha"],
-            beta=EDGE_UPDATE_CFG["prior_beta"],
-        )
 
     # --- Step 6: Gate prompt before Ollama ---
     prompt_gate = sanitize_out(prompt_text, boundary="agent->llm")
@@ -503,6 +496,26 @@ async def run_interaction(
         alpha=EDGE_UPDATE_CFG["prior_alpha"],
         beta=EDGE_UPDATE_CFG["prior_beta"],
     )
+
+    # Edges: output MU -> each retrieved/contributing MU (incl. the Mode-3
+    # summary MU, already folded into activated_mu_ids above). This is the
+    # routing fix: a later turn that enters retrieval at this output MU (a
+    # BM25 match on synthesized content) can now traverse one hop back to the
+    # MUs this response was built on, instead of the output MU being a dead
+    # end. Not part of activated_edge_ids — these are co_activation edges,
+    # not K1->K2 traversal-path edges, and M20's credit assignment
+    # (process_verdict_for_learning) reads traversal_path, not this field.
+    for mu_id in activated_mu_ids:
+        await graph_store.create_edge(
+            source_mu_id=output_um.mu_id,
+            target_mu_id=mu_id,
+            weight=INITIAL_EDGE_WEIGHT,
+            direction="forward",
+            creation_run_id=run_id,
+            creation_trigger="co_activation",
+            alpha=EDGE_UPDATE_CFG["prior_alpha"],
+            beta=EDGE_UPDATE_CFG["prior_beta"],
+        )
 
     append_audit(output_um)
 

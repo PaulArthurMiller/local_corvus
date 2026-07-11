@@ -563,10 +563,20 @@ def check_9_probe_sanity(mus: list[dict], edges: list[dict]) -> bool:
                   f"spoke at K2 (hub_in_k1={hub_in_k1}, K2={k2_clusters}) — "
                   f"BM25 edge case, review generated content")
 
-    # --- Sub-check C: two-hit bar — entry-vocab-only query (no anchor word)
-    #     should surface no spoke in the K1 multi-hit set (WARN) ---
+    # --- Sub-check C: two-hit bar — a query of hub-saturated entry vocabulary
+    #     that omits every spoke's anchor word should surface no spoke in the
+    #     K1 multi-hit set (WARN). Placement rule 6: without its anchor word a
+    #     spoke has only the family-name hit, so it cannot clear the two-hit
+    #     bar. Every anchor IS an entry-vocab word, so the "no anchor word"
+    #     query is exactly ENTRY_VOCAB minus the cluster's anchor set. ---
     for cluster in ("cluster_a", "cluster_b", "cluster_c", "cluster_d"):
-        query = " ".join(ENTRY_VOCAB[cluster])
+        letter = _letter(cluster)
+        cluster_anchors = {
+            w for key, w in ANCHOR_WORDS.items() if key.startswith(letter + "_")
+        }
+        non_anchor_entry = [w for w in ENTRY_VOCAB[cluster]
+                            if w not in cluster_anchors]
+        query = " ".join(non_anchor_entry)
         result = _simulate_retrieval(query, mus, edges)
         spokes_in_multi = [
             ID_TO_KEY.get(m, m) for m in result["multi_hit"]

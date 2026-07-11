@@ -22,5 +22,6 @@ env/
 .vscode/
 backend/config.yaml
 seed_fixtures/*_draft.json
+seed_fixtures/*_generation_manifest.json
 scripts/__pycache__/
 harness_runs/

@@ -3898,16 +3898,483 @@ Confirm this table (or a revision) with the user before implementing — it's a 
 - **Multi-hop traversal** (`retrieval_max_hops`): a later milestone. `compute_path_increments()` (M20) already supports multi-hop credit math; retrieval itself does not.
 - **Decay / pruning-flag filtering / MU-level counters:** future milestones. M22's exclusion filter is structured to accept a second predicate later, nothing more.
 - **Tool MU wiring:** `tool_call`/`tool_result` MUs stay edge-orphaned this run (no tools fire in experiment turns); revisit alongside the application build.
-- **Seed v3 fixture changes** (reciprocal seed edges, counterfactual content, and — newly relevant after this planning session's discovery — giving seed MUs a `source_type` that actually distinguishes them from interaction MUs instead of relying solely on `series_id`): a separate artifact, `seed_v3_mu_spec.md`. **M23 hardens `series_id` prefix `"seed:"` into a stated requirement for that future v3 generator, not just a v2 convention** — `extractor.py`'s source-kind label derivation (`_source_kind_label()`) keys its `[memory — reference]` label directly off `series_id.startswith("seed:")`, so any v3 generator that stops stamping that prefix silently mislabels seed content as `[memory — prior response]` instead, with no error raised. If v3 ever gives seed MUs a distinguishing `source_type`, `_source_kind_label()`'s series_id-first check should be revisited alongside it — until then, the prefix is load-bearing.
+- **Seed v3 fixture changes** (reciprocal seed edges, counterfactual content, and — newly relevant after this planning session's discovery — giving seed MUs a `source_type` that actually distinguishes them from interaction MUs instead of relying solely on `series_id`): a separate artifact, `seed_v3_mu_spec.md`. **M23 hardens `series_id` prefix `"seed:"` into a stated requirement for that future v3 generator, not just a v2 convention** — `extractor.py`'s source-kind label derivation (`_source_kind_label()`) keys its `[memory — reference]` label directly off `series_id.startswith("seed:")`, so any v3 generator that stops stamping that prefix silently mislabels seed content as `[memory — prior response]` instead, with no error raised. If v3 ever gives seed MUs a distinguishing `source_type`, `_source_kind_label()`'s series_id-first check should be revisited alongside it — until then, the prefix is load-bearing. **Now planned as Milestone 25, below** (the `source_type`-distinguishing idea is not part of M25's scope — `seed_v3_mu_spec.md` §7.3a confirms the `series_id` prefix mechanism is sufficient and requires no generator special-casing).
+
+---
+
+## Seed Fixture v3 — Milestone 25 (Counterfactual Content Generation + Verification)
+
+**Source:** `seed_v3_mu_spec.md` (approved by Paul, 2026-07-11) — the full per-MU
+content table, vocabulary design, and resolved open questions live there, not
+here. This section is the *build* spec: what `generate_seed_v3.py` and
+`verify_seed_v3.py` must do, how they differ from their v2 predecessors, and
+the new failure-manifest requirement.
+
+### Why this exists
+
+seed_v2's content is true-in-general ("a well-defined schema specifies the
+expected data shape and type for each element..."). Gemma already knows this
+from pretraining — it can produce a plausible-sounding correct-shaped answer
+whether or not retrieval surfaced the right MU. That decouples judge verdicts
+from retrieval quality, which decouples edge updates from anything real:
+M20's learning mechanism would be reinforcing noise, not retrieval success.
+
+seed_v3 replaces every cluster's content with **invented, unguessable
+specifics** — a proper-noun rule family (Kestrel, Marrow, Vessel, Ledger)
+with numbered rules, each rule paired with an invented value token
+(`TILDEBAR`, `three-to-one ratchet`, `WAIVERKEY`, ...). Gemma has no
+parametric knowledge of any of these, so a response can only contain the
+right rule ID + value token pair if retrieval actually surfaced the gold MU's
+content. This makes judge verdicts — and therefore edge updates — causally
+downstream of retrieval quality, which is the entire point of the experiment.
+
+The vocabulary is additionally split into two tiers (entry vocabulary,
+saturated in the hub and free in prompts; answer tokens, confined to one
+spoke each and forbidden in prompts) so that BM25 alone can find the *hub*
+but never the *gold spoke* — only graph traversal can, which is what makes
+the measurement a test of the memory graph rather than a test of keyword
+search. Full rationale: `seed_v3_mu_spec.md` §1.
+
+A second, independent fix rides along: v2's edges are one-directional
+(spoke→hub→bridge), so a query that enters at the hub can never reach a
+spoke via K2 traversal — confirmed by reading `retrieval.py`'s Stage 3, which
+walks `source_mu_id` only. v3 makes every edge reciprocal:
+
+```
+v2 (32 edges, one-way):                    v3 (64 edges, reciprocal):
+
+  spoke ───────▶ hub ───────▶ bridge         spoke ◀──────▶ hub ◀──────▶ bridge
+                                              (0.5 each direction)
+
+  Query enters at hub → traversal            Query enters at hub → traversal
+  can reach the bridge, never a spoke.        CAN reach a spoke (the actual
+  Spokes are structurally unreachable         retrieval physics the two-tier
+  from a hub-anchored query.                  vocabulary design depends on).
+```
+
+Full rationale for reciprocal-not-undirected: `seed_v3_mu_spec.md` §2.
+
+### Pipeline (what this milestone builds)
+
+```
+seed_v3_mu_spec.md (frozen, approved — §4's per-MU table is the source of
+                     truth for every required/forbidden term list below)
+        │
+        ▼
+generate_seed_v3.py ──(Ollama gemma4:e4b, per-MU generate+validate+retry)──┐
+        │                                                                  │
+        │ MAX_RETRIES exhausted with an unresolved violation               │
+        ▼                                                                  ▼
+seed_v3_generation_manifest.json                              seed_v3_draft.json
+  {mu_id, mu_key, cluster_id,                                  (34 MUs, 64 edges,
+   attempts, missing_required,                                  fixture_version="v3")
+   forbidden_leaked, last_attempted_text}
+        │
+        │  Paul reads the manifest, hand-authors the
+        │  failed MU(s)' raw_content directly in the draft ────────┐
+        │  (no research reason seed prose must be Gemma-written —  │
+        │   see spec §5)                                           │
+        ▼                                                          ▼
+verify_seed_v3.py --draft   (9 checks — structural, placement,     │
+                              lexical, probe-sanity; see below)     │
+        │                                                           │
+   FAIL │ (fix content, rerun)  ◀──────────────────────────────────┘
+        │
+   PASS ▼
+Paul freezes: seed_v3_draft.json → seed_v3.json.gz (human step, same
+              gzip-and-strip-notes one-liner as v2)
+        │
+        ▼
+verify_seed_v3.py --frozen   (final confirmation against the committed
+                               artifact — belt-and-suspenders, catches any
+                               difference the freeze step itself introduced)
+        │
+        ▼
+committed to repo — seed_v3.json.gz + seed_v3_mu_spec.md.
+Everything in spec §6 (probe set v3, prompt bank v3, harness fixture-path
+switch, weight_mode decision) is future-milestone work that re-derives from
+this frozen artifact. Not built here.
+```
+
+**Workflow deviation from v2, and why:** v2 froze to `.gz` *then* ran
+`verify_seed_v2.py` against the frozen file (Phase 2 then Phase 3 in
+Milestone 18). v3 reverses that: `verify_seed_v3.py` gets a `--draft`/
+`--frozen` flag and runs against the *draft* first. This is what actually
+makes the manifest-driven repair loop practical — Paul iterates on
+`seed_v3_draft.json` (rerun verify, no gzip round-trip) until every check
+passes, and only then freezes. `--frozen` still exists as a final sanity
+check post-freeze, matching v2's original guarantee.
+
+### Per-MU generation + validation + manifest (the state machine `generate_mu()` implements)
+
+```
+                    ┌───────────────────────┐
+                    │  call Ollama (attempt) │
+                    └───────────┬────────────┘
+                                ▼
+                    ┌───────────────────────────┐
+                    │ check required terms       │  (spec §4 "Required terms"
+                    │ check forbidden terms       │   column, copied verbatim
+                    │ check hub token exclusion   │◀── NEW: hub content must
+                    │   (hub MUs only)             │    contain none of its own
+                    │ check sibling token exclusion│   cluster's value tokens
+                    │   (spoke MUs only)           │◀── NEW: spoke must contain
+                    └───────────┬───────────────┘    none of its siblings' tokens
+                     all pass?  │
+             ┌───────yes────────┴────────no───────┐
+             ▼                                     ▼
+      keep content,                     attempt < MAX_RETRIES?
+      move to next MU                  ┌─────yes────┴────no─────┐
+                                        ▼                        ▼
+                                  retry (sleep,          append failure record
+                                  attempt += 1)           to in-memory list:
+                                                           {mu_id, mu_key,
+                                                            cluster_id, attempts,
+                                                            missing_required,
+                                                            forbidden_leaked,
+                                                            last_attempted_text}
+                                                           keep best-effort content
+                                                           in the draft (flagged,
+                                                           does not block the run)
+```
+
+At the end of `main()`, the failure list — even if empty — is written to
+`seed_fixtures/seed_v3_generation_manifest.json`:
+
+```json
+{
+  "generated_at": "2026-07-14T18:03:00+00:00",
+  "source_script": "generate_seed_v3.py",
+  "mu_count_failed": 1,
+  "failures": [
+    {
+      "mu_id": "c0000004-cccc-4ccc-8ccc-000000000004",
+      "mu_key": "c_spoke3",
+      "cluster_id": "cluster_c",
+      "attempts": 3,
+      "missing_required": ["WAIVERKEY"],
+      "forbidden_leaked": [],
+      "last_attempted_text": "Vessel V-3 governs exemptions: an exemption must be issued before the act it covers, and any exemption issued afterward is void on its face..."
+    }
+  ]
+}
+```
+
+An empty `"failures": []` is a meaningful, present result (PASS signal), not
+an absent file — matches this project's existing convention of preserving
+empty-result structure rather than omitting the artifact (e.g. the M21
+"empty-section contract" in `series_report.py`). Console output at the end of
+`main()` prints a one-line-per-failure summary and, if any exist, the exact
+next step ("edit seed_v3_draft.json's raw_content for c_spoke3, then rerun
+`python scripts/verify_seed_v3.py --draft`"). The manifest is a working
+artifact, not a frozen one — gitignored alongside the draft (see File
+Structure below), since its relevance ends once the draft is repaired.
+
+### Two-tier vocabulary → generator constants
+
+`generate_seed_v3.py` (a copy of `generate_seed_v2.py`, per spec §5) replaces
+the single `CLUSTER_*_FP` lists with four dicts, keyed by cluster and by MU
+key respectively — all values copied verbatim from `seed_v3_mu_spec.md` §3–4,
+not re-derived:
+
+```python
+# MU_IDS: copied verbatim from generate_seed_v2.py's MU_IDS dict — same UUIDs.
+# Preserves continuity for the future probe_set_v3 gold-MU references (spec
+# §6: "golds are spoke MUs, IDs unchanged from v2 where convenient").
+
+FAMILY_NAMES = {
+    "cluster_a": "Kestrel", "cluster_b": "Marrow",
+    "cluster_c": "Vessel",  "cluster_d": "Ledger",
+}  # full family names ("Kestrel Output Conventions") also required in hub
+   # content per spec §4; FAMILY_NAMES here is the short form used for
+   # cross-cluster fingerprint scanning (matches how spec §1 describes them
+   # as "strong BM25 anchors").
+
+ENTRY_VOCAB = {
+    "cluster_a": ["format", "structure", "output", "field", "delimiter",
+                  "header", "quoting", "encoding", "padding"],
+    "cluster_b": ["schema", "data", "shape", "type", "validation",
+                  "column", "nesting", "version", "range"],
+    "cluster_c": ["rule", "constraint", "violation", "enforce", "comply",
+                  "severity", "exemption", "escalation", "deadline"],
+    "cluster_d": ["source", "provenance", "cite", "origin", "traceable",
+                  "attribution", "timestamp", "custody", "retraction"],
+}
+
+# ANSWER_TOKENS: mu_key -> list of this MU's own value token(s). Hub keys map
+# to [] (index only, spec §4 placement rule 1). Used for (a) required-terms
+# assembly, (b) hub/sibling exclusion checks, (c) the global-uniqueness
+# self-check below.
+ANSWER_TOKENS = {
+    "a_hub": [],
+    "a_spoke1": ["spine order"], "a_spoke2": ["TILDEBAR"],
+    "a_spoke3": ["KAPLINE"],     "a_spoke4": ["P-fault"],
+    "a_spoke5": ["grove quotes"], "a_spoke6": ["ENCK9"],
+    "a_spoke7": ["NULLMARK"],
+    # ... b_*, c_*, d_* per spec §4 (b_spoke1 has three: WHOLENUM, SPANTEXT,
+    # FLAGBIT — ANSWER_TOKENS values are always a list, never a bare string)
+}
+
+ANCHOR_WORDS = {
+    "a_spoke1": "field", "a_spoke2": "delimiter", "a_spoke3": "header",
+    "a_spoke4": "padding", "a_spoke5": "quoting", "a_spoke6": "encoding",
+    "a_spoke7": "field",
+    # ... b_*, c_*, d_* per spec §4 "Anchor" column
+}
+
+RULE_IDS = {
+    "a_spoke1": "K-1", "a_spoke2": "K-2", ...,  # per spec §4 "Rule" column
+}
+```
+
+**Required-terms lists are copied verbatim from spec §4's "Required terms"
+column per MU** — not derived programmatically from the dicts above — to
+avoid a derivation bug silently diverging from the approved spec. The dicts
+above exist for the *validation* logic (hub/sibling exclusion, uniqueness),
+not for reconstructing required-terms strings.
+
+**Forbidden-terms logic, per MU category (new relative to v2, which only
+forbade terms on bridges):**
+
+| MU category | Forbidden terms |
+|---|---|
+| Hub | Its own cluster's answer tokens (all spokes' value tokens — NOT rule IDs; the hub must name rule IDs, e.g. "K-2 governs delimiters", but never define a value). |
+| Spoke | Every *sibling* spoke's answer tokens within the same cluster (placement rule 2: "no other spoke's tokens"). |
+| Bridge | All entry vocabulary + all answer tokens + family names from **both** adjacent clusters (spec §4 "Forbidden" column — a superset of v2's 5-term-per-cluster fingerprint list). |
+
+**Global answer-token uniqueness — self-check at import time, before any
+Ollama call:** a `_validate_answer_token_uniqueness()` function iterates
+`ANSWER_TOKENS.values()` and asserts no token string appears under more than
+one `mu_key`. This catches a spec-transcription bug (e.g. two clusters
+accidentally sharing a token) immediately and loudly, rather than surfacing
+as a confusing K2-traversal ambiguity three milestones later.
+
+**Answer-token format check:** placement rule 4 says tokens must be
+word-like (letters/digits/hyphens only) with no punctuation-dependent forms.
+This applies cleanly to the single-word ALL-CAPS tokens (`TILDEBAR`,
+`KAPLINE`, `ENCK9`, `NULLMARK`, `WHOLENUM`, `SPANTEXT`, `FLAGBIT`,
+`BOUNDSPAN`, `WAIVERKEY`, `GREYMARK`, `SRCLINE`) — checked against
+`^[A-Za-z0-9-]+$`. The multi-word phrase tokens (`spine order`, `grove
+quotes`, `three-to-one ratchet`, ...) are natural-language value phrases, not
+single "words" in the rule-4 sense — they tokenize normally under BM25 and
+aren't punctuation-dependent, so the format check only applies to the
+single-token category. Documented here as a deliberate scope reading of rule
+4, not an oversight.
+
+### Reciprocal edges (64 total)
+
+```python
+def _build_edges() -> list[dict]:
+    """56 spoke<->hub edges (7 spokes x 4 clusters x 2 directions) +
+    8 hub<->bridge edges (4 clusters x 2 directions) = 64. Every edge:
+    weight=0.5, direction="forward" (schema literal — see M24's finding
+    that this column doesn't encode which way the edge points; the edge's
+    actual directionality is source_mu_id -> target_mu_id), creation_trigger
+    is not a fixture-file field (register_fixture() hardcodes "seed" for
+    every edge it inserts — unchanged from v2)."""
+```
+
+Each v2 edge becomes two v3 edges (forward + reverse), same weight. Edge ID
+scheme: suffix `r` on the existing v2 edge_id for the reverse direction
+(e.g. `ea000002` forward stays as-is, `ea000002r` is the new spoke→hub... —
+wait, hub→spoke — reverse). Exact IDs are a `/build`-time implementation
+detail; the acceptance criterion is reciprocity, not a specific naming
+scheme.
+
+### `verify_seed_v3.py` — 9 checks (v2 had 5)
+
+1. **MU count / cluster distribution** — unchanged from v2 (34 MUs, same
+   per-cluster counts).
+2. **Edge count / wiring** — 64 edges (not 32); for every forward edge
+   `(s→t, w)` a reverse edge `(t→s, w)` with the same weight must also
+   exist. Hub touches 16 edges (7 in + 7 out spoke pairs, 1 in + 1 out
+   bridge pair); each spoke touches 2 (1 in + 1 out).
+3. **Hub↔bridge connectivity, both directions** — v2 only checked
+   hub→bridge; v3 also requires bridge→hub.
+4. **Lexical-distinctness (bridges)** — upgraded from v2's 5-term
+   fingerprint to the full two-tier set: bridges must contain none of
+   either adjacent cluster's entry vocabulary, answer tokens, or family
+   names (spec §4 bridge "Forbidden" column).
+5. **NEW — Hub token exclusion:** each hub's content contains zero answer
+   tokens from its own cluster.
+6. **NEW — Spoke sibling-token exclusion:** each spoke's content contains
+   none of its sibling spokes' answer tokens (same cluster).
+7. **NEW — Global answer-token leakage scan (content-level, not just spec-
+   level):** for every MU, scan its `raw_content` for every *other* MU's
+   answer tokens project-wide (whole-phrase, case-insensitive). This is the
+   strongest check in the set — it validates the frozen text itself, so it
+   also catches a hand-authored repair (from the manifest workflow) that
+   accidentally pastes in the wrong token.
+8. **NEW — Answer-token format check** — the `^[A-Za-z0-9-]+$` check
+   described above, run against the single-word token category.
+9. **Baseline probe sanity (BM25 simulation, extends v2's check 5):**
+   - Bridge queries (cluster entry vocabulary) still must NOT surface the
+     bridge at K1 — same as v2.
+   - **NEW — hub queries must reach a same-cluster spoke at K2.** This is
+     the actual capability v3's reciprocal edges exist to enable (spec §2);
+     a query using only hub-saturated entry vocabulary should place the hub
+     at K1 and *some* spoke from the same cluster at K2. (K2's `top_k=1`
+     with all-equal 0.5 weights means *which* spoke wins is
+     fixture-order/tie-break dependent — spec §6 flags this as
+     "query-independent, winner-take-all" and explicitly future work; the
+     check only asserts cluster membership, never a specific spoke.)
+   - **NEW — two-hit bar sanity:** for a query containing all of a
+     cluster's entry vocabulary but no spoke's anchor word, no spoke should
+     appear in the K1 multi-hit set (spokes only get one BM25 hit — the
+     family name — without their anchor word present). Reproduces placement
+     rule 6's reasoning as a check on the frozen fixture, not just a
+     property asserted in prose.
+
+`verify_seed_v3.py` duplicates its own copy of `ENTRY_VOCAB`/`ANSWER_TOKENS`/
+`FAMILY_NAMES`/`ANCHOR_WORDS` rather than importing them from
+`generate_seed_v3.py` — same "verify what's frozen, not what was intended"
+convention v2 already uses (`verify_seed_v2.py`'s `CLUSTER_*_FP` constants
+are a standalone copy, not an import).
+
+### File structure
+
+```
+seed_fixtures/
+├── seed_v2.json.gz                    (unchanged — stays the smoke-test/
+│                                        prior-experiment fixture)
+├── seed_v3_draft.json                 (NEW — gitignored, matches existing
+│                                        *_draft.json glob)
+├── seed_v3_generation_manifest.json   (NEW — gitignored, add explicit
+│                                        pattern to .gitignore)
+└── seed_v3.json.gz                    (NEW — committed once frozen)
+
+scripts/
+├── generate_seed_v3.py                (NEW — copy of generate_seed_v2.py +
+│                                        two-tier vocab + manifest emission)
+└── verify_seed_v3.py                  (NEW — copy of verify_seed_v2.py +
+                                         4 new checks + --draft/--frozen)
+
+seed_v3_mu_spec.md                     (already committed this session —
+                                         source of truth for §4's content)
+
+tests/test_scripts/
+└── test_generate_seed_v3.py           (NEW — see Tests below)
+```
+
+`.gitignore` gains one line: `seed_fixtures/*_generation_manifest.json`
+(the existing `seed_fixtures/*_draft.json` pattern already covers the draft).
+
+### Tests
+
+v2's generator/verifier have no pytest coverage — they're Ollama-dependent
+scripts validated by a manual run + the standalone verify script. v3 keeps
+that convention for the Ollama-dependent path (no mocked-Ollama pytest
+suite), but the *pure-Python* validation logic is materially more complex
+now (two-tier vocab, hub/sibling exclusion, uniqueness assertion, manifest
+serialization) and has no Ollama dependency at all — worth covering per
+CLAUDE.md's global testing standard. New `tests/test_scripts/test_generate_seed_v3.py`:
+- `_check_required_terms` / `_check_forbidden_terms` — reused from v2
+  unchanged, but add a case with a multi-word phrase token (v2 only ever
+  tested single words).
+- Hub-exclusion check: hub content containing a value token fails; hub
+  content naming only rule IDs passes.
+- Sibling-exclusion check: spoke content containing a sibling's token fails.
+- `_validate_answer_token_uniqueness()`: raises on a deliberately duplicated
+  token fixture; passes on the real `ANSWER_TOKENS` table (this doubles as a
+  regression test on the actual spec data — if someone edits `ANSWER_TOKENS`
+  and introduces a collision, the test suite catches it without Ollama).
+- Manifest emission: a MU that exhausts `MAX_RETRIES` with a missing
+  required term produces exactly one failure record with the right
+  `mu_id`/`missing_required`/`last_attempted_text`; a fully-passing run
+  writes `"failures": []`, not an absent file.
+- Token format check: `TILDEBAR` passes, a deliberately punctuation-bearing
+  fake token (`ty::val`) fails.
+
+### Build steps
+
+1. Copy `generate_seed_v2.py` → `generate_seed_v3.py`. Replace `MU_SPECS`
+   with the two-tier constants above, all values transcribed verbatim from
+   `seed_v3_mu_spec.md` §3–4. Add hub/sibling exclusion checks to the
+   per-MU validation branch in `generate_mu()`. Add manifest accumulation
+   and the end-of-run manifest write. Update `fixture_version` to `"v3"` in
+   the output JSON (this alone is what gives every seed MU the correct
+   `series_id="seed:v3"` at registration time — confirmed in spec §7.3a,
+   no other change needed for that).
+2. Copy `verify_seed_v2.py` → `verify_seed_v3.py`. Add checks 5–8 above.
+   Extend check 9's probe-sanity simulation with the hub→spoke and
+   two-hit-bar cases. Add `--draft`/`--frozen` CLI flag (default `--draft`).
+3. Add `.gitignore` line for the manifest pattern.
+4. Write `tests/test_scripts/test_generate_seed_v3.py` per Tests above; run
+   `pytest tests/test_scripts/test_generate_seed_v3.py` — must pass before
+   the real Ollama run.
+5. **Required live run:** `python scripts/generate_seed_v3.py` against real
+   Ollama `gemma4:e4b`. Confirm the manifest mechanism actually fires:
+   if the real run has zero failures on the first try (plausible — v2's
+   fingerprint terms are easier than v3's answer tokens, but not
+   guaranteed), deliberately sabotage one MU spec's required-terms list
+   (e.g. add an impossible term) in a throwaway copy to force a manifest
+   record, confirm its shape matches the schema above, then revert the
+   sabotage. This is the milestone's proof that "failed MUs are explicitly
+   documented in a manifest" actually works end to end, not just in unit
+   tests against synthetic data.
+6. `python scripts/verify_seed_v3.py --draft` against the real draft. Fix
+   any failing MU content directly in `seed_v3_draft.json` (by rerunning
+   the generator for just that MU, or hand-authoring) until all 9 checks
+   pass.
+7. Hand this off to Paul for the manual content review (spec §4 gists vs.
+   generated prose) — same human step v2's Phase 2 had. Paul freezes to
+   `seed_v3.json.gz` using the same gzip-and-strip-notes one-liner as v2
+   (update the path/version in `generate_seed_v3.py`'s docstring).
+8. `python scripts/verify_seed_v3.py --frozen` — final confirmation.
+
+### Not in this milestone (deferred, per spec §6/§7 and BUILD-PLAN.md convention)
+
+- `probe_set_v3.yaml` — depends on the frozen fixture's actual content/hash.
+- Prompt bank v3 regeneration, and updating `prompt_gen.py`'s
+  `SEED_FIXTURE_VERSION`/`from generate_seed_v2 import ...` to point at v3.
+- `config.yaml` `weight_mode` decision (`sample` vs `mean`) for the v3 run.
+- Harness fixture-path switch for a real experiment run.
+- Any prompt-side leakage-scan changes in `prompt_gen.py` consuming the new
+  two-tier fingerprint export (spec §5 items 2–3 describe the export shape;
+  `generate_seed_v3.py` produces `ENTRY_VOCAB`/`ANSWER_TOKENS` in that shape,
+  but wiring `prompt_gen.py` to import and use them is separate work).
+
+**Done when:** `generate_seed_v3.py` and `verify_seed_v3.py` exist and pass
+their new pytest coverage; a real run against Ollama produces
+`seed_v3_draft.json` (34 MUs, 64 edges) and
+`seed_v3_generation_manifest.json`; the sabotage test (build step 5) proves
+the manifest correctly records `mu_id`/missing-terms/leaked-terms/last-
+attempted-text for an intentionally-failing MU; `verify_seed_v3.py --draft`
+passes all 9 checks against the real (Paul-reviewed, manifest-repaired if
+needed) draft; Paul freezes to `seed_v3.json.gz`; `verify_seed_v3.py
+--frozen` passes against the committed artifact.
+
+**Risks:**
+⚠ Higher retry/failure rate than v2 is expected (spec §5 says so directly)
+  — the manifest is the mitigation, not a sign something's wrong.
+⚠ Hand-authored repairs (via the manifest workflow) bypass Gemma's "sounds
+  natural" tendency — a human-written sentence stuffed with 4-5 required
+  terms can read awkwardly. Not a correctness problem (spec §5: there's no
+  research reason seed prose must be Gemma-written), but worth a light
+  pass for readability during Paul's manual review.
+? Whether the two-hit-bar probe-sanity check (9) needs tuning once real
+  content is in — the check encodes a property that should hold by
+  construction, but BM25 scoring on real generated prose (vs. the fixed
+  fingerprint word lists) could have edge cases worth a WARN-not-FAIL
+  treatment, same as v2's check 5 did for the "bridge not in K2" case.
+
+**Estimate:** 1 session (generator + verifier + tests are mechanical
+extensions of an existing, well-understood pattern; the live Ollama run and
+Paul's content review are the only wall-clock-bound steps).
 
 ---
 
 ## Status
 
 ```
-Milestones 22–24 (Turn-Wiring Fixes) complete. No milestone currently queued —
-next step is either the full experimental pilot run (the original motivation
-for M19–M24) or /planner for seed_v3_mu_spec.md (see Non-Goals above).
+Milestones 22–24 (Turn-Wiring Fixes) complete. Milestone 25 (Seed Fixture v3)
+code complete and in PR review — generator + verifier + tests built, the real
+Ollama run produced a clean 34-MU/64-edge draft (manifest failures: []), all 9
+verify --draft checks pass, and the sabotage proof confirmed the manifest
+mechanism fires end to end. AWAITING PAUL: content review of the generated
+draft prose, then the human freeze step (seed_v3_draft.json -> seed_v3.json.gz)
+and a final verify --frozen. Only after freeze does the full experimental pilot
+run gain seed_v3's counterfactual-content science value over seed_v2.
 Last updated: 2026-07-11
 ```
 
@@ -3962,6 +4429,10 @@ Last updated: 2026-07-11
 **Milestone 22:** Complete — context-linkage edges relocated from `prompt->retrieved` to `output->retrieved` (+ `output->summary` when Mode 3 fires), `creation_trigger="co_activation"`; the prompt MU is now a routing dead end (only `prompt->input`). New `hyperparameters.retrieval_exclude_source_types` (default `["prompt"]`) filters prompt MUs out of retrieval candidacy — `all_edges` stays unfiltered so excluded MUs' edges still feed neighbor centrality scoring. Discovered and fixed a real, pre-existing bug while writing the milestone's own required failed-output test: `gate/um.py`'s `SourceType` Literal never included `agent_output_failed_token_limit`/`agent_output_failed_empty_output` (added in M11), so `create_um()` has crashed with a pydantic `ValidationError` on every real token-limit or empty-output failure since M11 — no prior test drove a failure through the full `run_interaction()` pipeline, so it was never caught. Fixed by adding both literals. 626 tests passing (617 baseline + 9 new), no regressions. **Manually verified live** against a local (non-Docker) backend + real Ollama `gemma4:e4b` over 6 turns: after padding the corpus past the point where `rank_bm25`'s classic IDF formula goes negative for majority-document terms (a pre-existing library quirk on tiny corpora, not an M22 concern), a later turn's output MU gained a `co_activation` edge directly to an earlier turn's *output* MU — the exact cross-turn routing scenario M22 targets — and every prompt MU across the run had exactly one outgoing edge (`prompt->input`), never a `prompt->retrieved` edge. Branch: `milestone-22-output-mu-routing`.
 
 **Milestone 23:** Complete — Mode-3 summary MUs are no longer edge-orphans: `extract()` now threads `run_id` through to `_summarize()`, which creates one `summary->mu` `co_activation` edge (same `edge_update.prior_alpha/prior_beta` priors pattern as every other edge-creation site) per MU the summary was built from. `_mode1_extract()`/`_mode2_extract()` now prefix each condensed chunk with a bracketed source-kind label (`_source_kind_label()`) so mixed seed/interaction content stays legible to Gemma — `series_id` (`"seed:"` prefix) is checked before `source_type`, since seed MUs are stamped `source_type="agent_output"` identically to real responses. Three user-directed deviations from the spec table drafted during planning: (1) failed-output source types (`agent_output_failed_token_limit`/`agent_output_failed_empty_output`) get no label at all — they're excluded from retrieval candidacy instead, extending `hyperparameters.retrieval_exclude_source_types`'s default from `["prompt"]` to also cover both failed-output types (config.yaml and its code-level fallback in `retrieval.py`); (2) `tool_call`/`tool_result` get an explicit `[memory — tool record]` label, with `[memory — other]` reserved for genuinely unrecognized source types; (3) the `series_id` `"seed:"` prefix is now documented as a stated requirement for the future seed v3 generator (see the Non-Goals note above), not just a v2 fixture convention, since `_source_kind_label()`'s correctness depends on it. 649 tests passing (626 baseline + 23 new), no regressions. Branch: `milestone-23-extractor-summary-edges`.
+
+**Milestone 25:** Code complete, in PR review (awaiting Paul's content review + human freeze) — `scripts/generate_seed_v3.py` (two-tier counterfactual vocabulary, per-MU-category hub/sibling/bridge forbidden derivation, import-time answer-token uniqueness + format self-checks, 64 reciprocal edges, and a `seed_v3_generation_manifest.json` failure ledger), `scripts/verify_seed_v3.py` (9 checks vs. v2's 5, with a `--draft`/`--frozen` flag defaulting to `--draft` so the manifest-repair loop runs on the uncompressed draft), and `tests/test_scripts/test_generate_seed_v3.py` (31 tests over the pure-Python validation surface; importing the module runs the self-checks on the real spec data as a free regression guard). Required-terms lists copied verbatim from `seed_v3_mu_spec.md` §4; a few content gists were paraphrased in the generation prompts to avoid naming a sibling spoke's answer token (which sibling-exclusion forbids — e.g. `a_spoke7`'s "spine order", `c_spoke4`'s "amber/crimson breach"), with no token/rule-ID/required-term changed. **Live run (real Ollama `gemma4:e4b`):** produced `seed_v3_draft.json` (34 MUs, 64 edges) with a clean manifest (`failures: []`) on the first pass — no MU needed hand-repair. `verify_seed_v3.py --draft` passes all 9 checks; check 9's two-hit-bar sub-check WARNs (not FAIL) on `a_spoke3`/`a_spoke5`, whose generated prose adds "structure" on top of the "output" that the family name "Kestrel Output Conventions" already injects into every cluster_a MU — a content-review item, not a defect. **Sabotage proof (build-step 5):** forced one MU to fail against real Ollama by validating against an impossible term the prompt never mentions (lesson: telling Gemma to "include X" makes it copy any nonsense X verbatim, so the impossible token must be hidden from the prompt) — 3 real attempts exhausted, manifest record matched the BUILD-PLAN schema exactly. 680 tests passing (649 baseline + 31 new), no regressions. **Still Paul's to do:** review the draft prose, freeze to `seed_v3.json.gz`, run `verify_seed_v3.py --frozen`. Branch: `milestone-25-seed-fixture-v3`.
+
+**Milestone 25 (planned, pre-build):** planned 2026-07-11 via /planner. See "Seed Fixture v3 — Milestone 25" section above; build spec derived from the approved `seed_v3_mu_spec.md`.
 
 **Milestone 24:** Complete — verification-only milestone, confirm-or-fix against M22+M23's live edge population. All 4 verification items confirmed clean passes by inspection, no fixes needed: (1) SimpleRL is unreachable from the harness/experiment path — `POST /feedback/verdict` routes exclusively through `edge_update.process_verdict_for_learning()`, which refuses writes unless `condition_label == "learned"` regardless of caller intent, and `scripts/harness/client.py` has no code path calling the chat-UI's `/feedback` endpoint at all; (2)+(3) `admin.py`'s `run_probe()` docstring states the invariant directly ("MUST NOT call run_interaction()") and the code confirms it — only `retrieve()` is called, already passing `condition=RUN_CONDITION, rng=EDGE_RNG`; (4) `direction` is inert — grepped every `create_edge()` call site (runtime code + both seed fixture files) and all write `"forward"`, never `"bidirectional"`, and `retrieval.py`'s K2 scoring applies `directional_edge_weight_multiplier` uniformly with no check against the column — documented in `store.py`'s `edges` table schema comment and `config.yaml`'s hyperparameter comment so this isn't rediscovered as a bug. The §5.3/§5.4 report audit (item 5) and admin/frontend grep (item 6) also confirmed clean by inspection, no changes needed. **Required smoketest (item 7) — real backend, real `gemma4:e4b`, 8-turn series against the seed_v2 fixture:** confirmed live the exact cross-turn routing scenario M22/M23 targeted — turn 3 retrieved turn 1's *output* MU via BM25, and the generated series report's §5.4 showed 15 cross-series edges, all `output->retrieved` `co_activation` edges landing in `seed:v2` (expected per M22, not an anomaly). Direct DB inspection confirmed the predicted edge-population shape: every output MU now has out-degree 3–4 (total degree N+1, no longer a dead end), 31 `co_activation` edges (exactly matching the sum of `activated_mu_ids` across all 8 turns), and `prompt_construction` edges dropped to 2/turn (down from the pre-M22 N+2). §5.3 showed 0 `unknown_count` (no unclassified-edge warnings) with a 51.6% intra-series retrieval rate. One transient Ollama stall occurred mid-run (a single request took ~4.5 min before erroring); retried immediately and succeeded in 29s, and the backend recovered cleanly with no orphaned state beyond the expected unfinished prompt/input MU pair from the failed attempt — not reproducible, not related to M22/M23 code, not filed as a bug. 649 tests passing, no regressions (2 doc-only commits, no new tests required — per the milestone's own "Tests" note, none were expected unless the smoketest surfaced a real bug, and it didn't). Branch: `fix/smoketest-2026-07-11`.
 

@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS edges (
     target_mu_id TEXT NOT NULL REFERENCES memory_units(mu_id),
     created_at TEXT NOT NULL,
     weight REAL NOT NULL,
+    -- "forward" | "bidirectional" per the schema, but confirmed inert as of
+    -- the M24 verification pass: every create_edge() call site in the
+    -- codebase (runtime and seed fixtures alike) always passes "forward" —
+    -- nothing ever writes "bidirectional" — and retrieval.py's K2 traversal
+    -- applies directional_edge_weight_multiplier uniformly to every
+    -- traversed edge with no check against this column. It is a constant
+    -- factor on all K2 scores today, not a real forward-vs-bidirectional
+    -- distinction. Revisit if a future milestone starts writing
+    -- "bidirectional" edges.
     direction TEXT NOT NULL,
     last_traversed_at TEXT,
     traversal_count INTEGER DEFAULT 0,

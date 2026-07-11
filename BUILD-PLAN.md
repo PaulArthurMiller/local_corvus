@@ -4364,6 +4364,410 @@ Paul's content review are the only wall-clock-bound steps).
 
 ---
 
+## Sequential Batch Queue Runner — Milestones 26–27
+
+**Source:** Paul's planner document (2026-07-11) — design decisions there are
+settled; this section records the decomposition, the four open-question
+resolutions (with rationale), and one corrected mechanism detail found by
+reading `runner.py` (see "Identity subtlety, corrected" below).
+
+### Why this exists
+
+Each full experiment run takes ~2+ hours. The screening series ahead
+(replicates + one-factor sweeps) needs 10–15 runs, and the future Karpathy
+loop needs unattended sequential execution as its substrate. The queue is a
+**playlist player**: it takes an ordered list of run-plan files and feeds
+them one at a time through the existing `execute_run()`, overnight, with
+zero interaction after launch. It contains no intelligence — it never reads
+results, never edits plans, never decides anything.
+
+### The layer picture
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  QUEUE LAYER (new — M26/M27)                                       │
+│                                                                    │
+│  queues/screening_a.json          scripts/run_experiment_queue.py  │
+│  { queue_id, plans[], ... } ────▶ (CLI: --queue, --dry-run,        │
+│                                    --resume-dir)                   │
+│                                        │                           │
+│                                        ▼                           │
+│                            scripts/harness/queue.py                │
+│                            preflight → loop → checkpoint → summary │
+│                                        │                           │
+│      one plan at a time, in-process    │  RunOutcome (structured)  │
+└────────────────────────────────────────┼───────────────────────────┘
+                                         ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  HARNESS LAYER (existing — unchanged behavior)                     │
+│                                                                    │
+│  execute_run(plan, client, ...)                                    │
+│    per-condition container restart · wipe+seed · turn loop ·       │
+│    per-turn checkpoint · judge · series/experiment reports         │
+└────────────────────────────────────────┬───────────────────────────┘
+                                         ▼
+              Docker backend ── graph DB ── Ollama (gemma4:e4b)
+```
+
+The boundary matters for the Karpathy loop: everything above the line reads
+plan files and writes status files; everything below owns experimental
+semantics. The queue's only contract with the harness is `execute_run()`'s
+existing signature and `RunOutcome` — no new parameters on the harness side
+except what already exists (`resume_input_fn`).
+
+### Open questions — resolved
+
+1. **Queue file format: JSON.** Every execution-side artifact in this repo
+   is JSON (plans, prompt banks, manifests, checkpoints); YAML is reserved
+   for human-edited configuration (`config.yaml`, probe sets). The queue
+   file is an execution artifact — and the Karpathy loop will machine-write
+   it, where `json.dump` of a dict is the trivially-correct path. The
+   `enabled: false` flag substitutes for YAML's comment-out idiom.
+
+2. **Resume mechanism: auto-detect latest matching directory, guarded by a
+   content hash; `--resume-dir` as explicit override.** On launch, the CLI
+   scans `harness_runs/queues/` for directories matching `{queue_id}_*`
+   whose checkpoint is incomplete. If the newest one's manifest records the
+   same queue-content hash as the file being launched → resume it (logged
+   loudly). If the hash differs → hard stop with a message naming both
+   options (relaunch under a new directory, or pass `--resume-dir`
+   explicitly) — never guess. Rationale: the operator relaunching the same
+   command at 7 AM after an overnight crash is the primary use case; making
+   them hunt a timestamped directory name is friction exactly when they're
+   least awake, and the hash guard removes the ambiguity that would
+   otherwise argue for explicit-only.
+
+3. **Disk space: projected-archive-count log line + a stdlib free-space
+   WARN, no hard stop.** `shutil.disk_usage` is one cross-platform call, so
+   the actual check is nearly free; but predicting archive sizes accurately
+   is guesswork, so it warns below a conservative module-level threshold
+   constant rather than blocking a launch. The projected archive count
+   (enabled plans × conditions) always appears in the launch log.
+
+4. **In-process `execute_run()`, confirmed.** Read of `runner.py` found no
+   isolation reason to subprocess: `execute_run()` returns a structured
+   `RunOutcome`, never calls `sys.exit()`, and contains its own
+   `HardStopError` unwinding (an aborted plan **returns**
+   `status="aborted"`, it does not raise). Harness modules hold no run-scoped
+   module-level mutable state. Backend-state isolation is already handled by
+   the harness's own per-condition container restart. Subprocess would force
+   the queue to parse stdout for what `RunOutcome` already provides
+   structurally.
+
+**Also decided — queue settings live in the queue file only, not
+`config.yaml`.** `on_plan_failure`, `max_total_budget_usd`, etc. are
+per-queue operational choices, not experimental knobs under study; putting
+them in the Hyperparameter Registry would imply they're variables the
+science sweeps over. `config.yaml` stays untouched by this work.
+
+### Queue file schema (`queues/*.json`)
+
+```json
+{
+  "queue_id": "screening_a",
+  "on_plan_failure": "continue",
+  "max_total_budget_usd": 25.0,
+  "notification": { "enabled": true, "channel": "log" },
+  "plans": [
+    { "plan_path": "plans/replicate_seed1.json" },
+    { "plan_path": "plans/replicate_seed2.json", "enabled": true },
+    { "plan_path": "plans/sweep_k1_4.json",      "enabled": false }
+  ]
+}
+```
+
+- `plan_path` resolves **relative to the queue file's own directory** when
+  not absolute (machine-writer friendly: the Karpathy loop writes both the
+  plan and the queue entry without knowing the invoker's CWD).
+- `enabled` defaults `true`; disabled entries are recorded in the manifest
+  as `skipped_disabled` but never validated or executed.
+- `on_plan_failure`: `"continue"` (default) | `"halt"`.
+- `notification` reuses the existing `NotificationConfig` schema verbatim.
+- Validation errors go through the `format_validation_error()` pattern —
+  field-identifying, never a stack trace.
+
+### Directory layout & state files
+
+```
+harness_runs/
+├── queues/
+│   └── screening_a_20260712T0300Z/        ← {queue_id}_{launch_ts}
+│       ├── queue_manifest.json            ← resolved queue: plan list, per-plan
+│       │                                     config_hash + expected run_id,
+│       │                                     queue-content hash, preflight results
+│       ├── queue_checkpoint.json          ← per-plan status + timings (atomic
+│       │                                     temp-file + os.replace, same pattern
+│       │                                     as checkpoint.py)
+│       ├── queue_summary.md               ← written at queue end (M27)
+│       └── notifications.log              ← notify.py reuse: base_dir=queues/,
+│                                             run_id=the queue dir name
+└── {plan_id}_{config_hash[:12]}/          ← harness run dirs, exactly as today
+```
+
+Per-plan checkpoint entry: `status` (`pending | running | complete | failed
+| skipped`), `plan_path`, `config_hash`, harness `run_id`, start/end
+timestamps, wall-clock duration, per-condition durations, and the harness's
+`error_summary` on failure. **Per-condition durations are derived from the
+harness checkpoint's own per-turn timestamps after the plan finishes**
+(min/max `TurnCheckpoint.timestamp` per condition) — the queue never
+observes condition boundaries live, so this needs zero `runner.py` changes
+and respects the layer boundary. Durations are not decoration: they feed
+future "how many runs fit in 10 hours" scheduling.
+
+### Non-interactive execution — the four touchpoints
+
+| Harness touchpoint | Queue-mode resolution |
+|---|---|
+| `elicit_plan()` | Never invoked — queue entries are files; a missing file is a preflight hard stop. |
+| Resume prompt (`resume_input_fn`) | Queue passes `resume_input_fn=lambda _: "y"` — always resume, never restart-from-scratch (an unattended process must never silently discard partial experimental data). Existing injection point; resume logic is not forked. |
+| Sonnet bank cost gate | Must never fire mid-queue. Preflight resolves every plan's **effective bank**: explicit `prompt_bank_path` → file must exist and pass `load_bank()`; else `subjects == "auto"` → `estimate_bank_cost_for_plan()` returning `None` means a cached identical-hash bank exists (resolve its path via the same hash and stamp it onto the in-memory plan); returning non-`None` means fresh Sonnet generation would be needed → **hard stop** telling the user to run `--generate-bank` for those plans interactively first. A plan with neither bank nor `auto` also hard-stops: placeholder-message turns in an unattended overnight run are wasted GPU-hours, never intended. The queue makes zero Anthropic API calls. |
+| `--interactive` judge override | The queue CLI simply does not expose the flag — structurally impossible, nothing to reject. |
+
+### Preflight protocol (M26 — all pass before any graph mutation)
+
+```
+--queue file
+     │
+ 1.  ▼ queue file parses + validates (field-identifying errors)
+ 2.  ▼ EVERY enabled plan loads + validates via RunPlan
+     │   (a malformed plan #7 fails at launch, not six hours in)
+ 3.  ▼ duplicate config_hash detection across enabled plans → hard stop
+     │   ("replicates need distinct random_seed values" — see below)
+ 4.  ▼ per-plan effective-bank resolution (table above) → hard stop if
+     │   any plan would need fresh Sonnet generation
+ 5.  ▼ backend health (client.health()) + judge model availability
+     │   (model_available() per distinct judge model across plans)
+ 6.  ▼ aggregate budget: Σ estimate_prerun_cost(0, n_judge_calls) per plan
+     │   ≤ max_total_budget_usd (banks pre-exist → bank cost is 0)
+ 7.  ▼ disk-space note: projected archive count (plans × conditions) logged;
+     │   shutil.disk_usage free-space WARN below threshold
+     ▼
+ launch (M27) — or, with --dry-run: print resolved execution order and exit 0
+```
+
+Honest budget note (per the source doc): with pre-generated banks and a
+local judge, marginal per-run spend is ~$0 today. The aggregate cap is a
+guardrail for future configurations (e.g., an API judge), not because
+current runs cost money.
+
+**Identity subtlety, corrected.** The source doc predicted a byte-identical
+duplicate plan would "resume-as-complete instead of re-running." Reading
+`runner.py` (the attempt-resolution loop): a **completed** checkpoint
+actually bumps to `_attempt2` and re-runs under a suffixed identity. The
+consequence differs but is still silently wrong for the replicate tranche —
+an identical plan re-run is a same-`random_seed` pseudo-replicate with an
+identical prompt schedule, indistinguishable in intent from a real
+replicate but scientifically not one. The preflight duplicate-hash hard
+stop therefore stands unchanged, with the error message the doc specified:
+duplicate entries share `config_hash` → "replicates need distinct
+random_seed values."
+
+### Execution loop, failure semantics & resume (M27)
+
+```
+for each enabled plan (in order):
+  queue checkpoint: plan → running          (atomic write BEFORE execute_run)
+        │
+        ▼
+  outcome = execute_run(plan, client, RUNS_DIR, probes, judge_client,
+                        docker_project_root, resume_input_fn=always_yes)
+        │
+        ├─ outcome.status == "complete" ──▶ plan → complete (+ durations,
+        │                                   report paths from outcome.checkpoint)
+        ├─ outcome.status == "aborted"  ──▶ plan → failed (+ error_summary)
+        │       │
+        │       ├─ on_plan_failure == "halt" ──▶ remaining plans → skipped, stop
+        │       └─ "continue" ──▶ re-run health checks (backend + judge);
+        │                         health FAILS → halt regardless of policy
+        │                         (a dead backend converts 1 failure into N)
+        └─ unexpected exception (queue bug) ──▶ plan → failed, checkpoint
+                written, notification sent, exit nonzero — NEVER swallow an
+                unknown-state error and continue
+```
+
+Between plans the queue does **no graph handling** — the harness already
+wipes+seeds per condition; a queue-level wipe would double-archive and
+violate the layer boundary.
+
+**Resume state machine** (re-invocation with the same queue file, or
+`--resume-dir`):
+
+- `complete` → skip (never calls `execute_run`, so no attempt-bump).
+- `pending` → run normally.
+- `running` (crashed mid-flight) → **reconcile against the harness
+  checkpoint first**: if the harness checkpoint for that run identity shows
+  `final_status == "complete"`, the crash landed in the window between
+  harness completion and the queue's own checkpoint write — mark `complete`
+  and skip (re-entering `execute_run` would attempt-bump and silently
+  re-run ~2 hours). If it shows `"aborted"`, mark `failed` and apply
+  `on_plan_failure`. Otherwise re-enter `execute_run()`, where
+  `resume_input_fn=always_yes` hands turn-level recovery to the harness's
+  existing checkpoint resume. To locate "that run identity" without forking
+  the attempt-resolution logic, extract `runner.py`'s attempt-probe loop
+  into a small shared helper (e.g. `resolve_run_attempt(plan, config_hash,
+  run_base_dir)`) used by both `execute_run()` and the queue — a minimal,
+  behavior-preserving refactor honoring the "do not fork the resume logic"
+  constraint.
+- `failed` / `skipped` → left as-is; a fresh queue launch (new directory)
+  is the way to retry a failed tranche.
+
+**Notifications** (through `notify.py` as-is — no new channels):
+`queue_started` (plan count, projected archive count), `queue_plan_complete`
+(per plan: status, duration, report paths), `queue_complete` (final tally),
+`queue_aborted` (unexpected exception or health-check halt). Exit code: 0
+only when every enabled plan is `complete`; nonzero otherwise.
+
+**`queue_summary.md`** (written at queue end, whatever the outcome): a
+table of plan_id, status, duration, harness run_id, and paths to the
+series/experiment reports the harness generated — pulled from each plan's
+`RunOutcome.checkpoint` records, no metrics beyond what those reports
+already contain (no result interpretation — that's the layer boundary the
+Karpathy loop depends on).
+
+### Non-goals (rationale recorded per the source doc)
+
+- **No result interpretation** — analysis lives downstream (sensitivity doc
+  now, Karpathy loop later); building it here would duplicate
+  `series_report.py`/experiment reports and blur the layer boundary.
+- **No parallelism** — one GPU, one backend container, one graph DB;
+  sequential is a hardware fact, not a limitation to engineer around.
+- **No plan generation/mutation** — a wrong plan fails preflight and a
+  human fixes it.
+- **No dynamic queue changes mid-run** — the queue file is read once at
+  launch; if the Karpathy loop needs append-while-running, it gets designed
+  then against the loop's actual needs.
+- **No new notification channels** — `notify.py` as-is (email/webhook still
+  fall back to log with a warning).
+- **Forward-compatibility is design-only:** the Karpathy loop will emit
+  run-plan files in the exact hand-written format and append queue entries;
+  the JSON schema and relative-path resolution above are what make that
+  trivially machine-writable. No directory watching, no agent integration.
+
+---
+
+### Milestone 26: Queue Schema + Preflight + Dry-Run
+
+**Branch:** `claude-queue-preflight`
+
+**Build:**
+1. `scripts/harness/queue.py` — queue file schema (pydantic, mirroring
+   `schema.py` conventions incl. `format_validation_error` reuse), queue
+   manifest + checkpoint models with atomic `save_*` writers
+   (temp-file + `os.replace`, same pattern as `checkpoint.py`), and the
+   full preflight protocol (steps 1–7 above) as pure, injectable functions
+   (fake `BackendClient` / fake judge client / fake `disk_usage_fn` — the
+   existing test pattern).
+2. `scripts/run_experiment_queue.py` — CLI: `--queue <file>`, `--dry-run`,
+   `--backend-url`, `--judge-host`, `--resume-dir` (parsed now, used in
+   M27). `--dry-run` runs full preflight, prints the resolved execution
+   order (per plan: plan_id, config_hash, expected run_id, bank path,
+   condition list), and exits 0 — zero HTTP mutation calls, zero graph
+   mutation (health checks are reads and DO run in dry-run; that's the
+   point of preflight). Without `--dry-run`, M26's CLI stops after
+   preflight with an explicit "execution loop lands in M27" message —
+   the milestone ships a working preflight validator, not a stub.
+3. Example queue file `queues/example_queue.json` referencing the committed
+   verification plans/banks (`plans/phase3_pilot.json` et al.), committed
+   as living documentation of the schema.
+
+**Tests** (`tests/test_harness/test_queue.py`): queue-file validation
+(missing/duplicate fields, bad `on_plan_failure` value, empty plans list);
+missing plan file; invalid plan (schema error identifies which plan);
+duplicate config-hash hard stop (error message names the entries and says
+"replicates need distinct random_seed values"); bank resolution — explicit
+path missing, explicit path valid, cached-hash resolution stamps the plan,
+fresh-generation-needed hard stop, neither-bank-nor-auto hard stop;
+aggregate budget breach; health-check failure; relative plan_path
+resolution; manifest/checkpoint atomic-write round-trip.
+
+**Verification protocol (recorded output required):** items 1–2 from the
+source doc — (a) 3-plan `--dry-run` with full preflight output, resolved
+order, zero mutation; (b) three preflight hard-stops (missing plan file,
+fresh-bank-needed, duplicate config hash), each exiting nonzero with a
+plan-identifying message before any backend mutation call.
+
+**Done when:** dry-run and all preflight hard-stops behave per the
+verification protocol with recorded output; full test suite passes, no
+regressions; example queue file committed.
+
+**Risks:**
+⚠ Bank-hash resolution reuses `prompt_gen` internals
+  (`_generation_params` is private) — may need a small public helper in
+  `prompt_gen.py` rather than importing a private; keep it a one-liner.
+? Whether `wait_for_health()`'s 90s default is right for a cold launch
+  check vs. a single immediate `client.health()` — decide at build time;
+  preflight wants "is it up now", not "wait for it to come up".
+
+**Estimate:** 1 session.
+
+---
+
+### Milestone 27: Queue Execution Loop + Resume + Summary
+
+**Branch:** `claude-queue-execution`
+
+**Depends on:** Milestone 26.
+
+**Build:**
+1. Extract `runner.py`'s attempt-resolution loop into a shared helper
+   (`resolve_run_attempt()` or similar) — behavior-preserving refactor,
+   existing runner tests must pass unchanged.
+2. Orchestration loop in `queue.py` (or a sibling `queue_runner.py` if the
+   module crosses the ~300-line smell threshold — /build's judgment call):
+   the execution loop, failure semantics, health recheck after a failed
+   plan, and the running→complete/failed transitions with atomic
+   checkpoint writes at every transition (crash between any two writes
+   loses at most the in-flight plan's status, which resume reconciliation
+   recovers).
+3. Resume: auto-detect (queue-content-hash-guarded) + `--resume-dir`
+   override + the `running`-state reconciliation against the harness
+   checkpoint.
+4. Per-plan and per-condition duration capture (harness checkpoint
+   timestamp derivation), `queue_summary.md` writer, notification events,
+   exit codes.
+5. Wire the CLI's non-dry-run path to the loop (replacing M26's stop
+   message).
+
+**Tests** (extending `test_queue.py`, fake `execute_run` injected):
+`on_plan_failure` both modes (continue → next plan runs; halt → remaining
+marked skipped); health-recheck halt after a failed plan overrides
+`continue`; crash-resume — completed plans skipped, in-flight plan
+re-entered, `running`-but-harness-complete reconciled to complete without
+re-running; queue-level unexpected exception marks in-flight plan failed,
+writes checkpoint, exits nonzero; duration fields populated from fake
+harness checkpoints; summary content (statuses, run_ids, report paths);
+checkpoint atomicity (interrupted write leaves the previous valid file).
+
+**Verification protocol (recorded output required):** items 3–6 —
+(a) live micro-queue: 2 tiny plans (1 series × 2–3 turns, 1–2 conditions,
+existing committed bank) against real Docker + real `gemma4:e4b`, both
+`complete` with durations, `queue_summary.md` correct; (b) crash-resume:
+kill mid-plan-1, re-invoke, plan 1 resumes at the correct turn via the
+harness checkpoint, plan 2 runs, no duplicate seeding beyond the harness's
+own wipe+seed; (c) failure-continue: plan 1 forced to fail (unreachable
+judge host per its error policy) with `continue` → plan 1 `failed`, health
+recheck passes, plan 2 `complete`; (d) full test suite, no regressions.
+
+**Done when:** all four verification items recorded; `queue_summary.md`
+and notifications match the spec above; full suite green.
+
+**Risks:**
+⚠ The live micro-queue needs Docker running (recent sessions ran uvicorn
+  directly because the daemon was down) — the harness's per-condition
+  restart is Docker-compose-based, so M27's live verification genuinely
+  requires the Docker path. Plan the session accordingly.
+⚠ Crash-resume verification (killing a live process mid-plan on Windows)
+  can be finicky — `taskkill` the python process, not the terminal, so
+  the backend container stays up and resume exercises only queue+harness
+  recovery.
+? Whether `queue_plan_complete` notifications should also fire for
+  `failed` plans or a distinct `queue_plan_failed` event — decide at build
+  time; keep the payload shape shared either way.
+
+**Estimate:** 1–2 sessions (the live verification runs are wall-clock-bound).
+
+---
+
 ## Status
 
 ```
@@ -4375,6 +4779,20 @@ mechanism fires end to end. AWAITING PAUL: content review of the generated
 draft prose, then the human freeze step (seed_v3_draft.json -> seed_v3.json.gz)
 and a final verify --frozen. Only after freeze does the full experimental pilot
 run gain seed_v3's counterfactual-content science value over seed_v2.
+Milestone 26 (Queue Schema + Preflight + Dry-Run) CODE COMPLETE, in PR
+review — scripts/harness/queue.py (schema, manifest/checkpoint models,
+7-step preflight protocol) + scripts/run_experiment_queue.py CLI built,
+queues/example_queue.json committed, 30 new tests (710 total, all passing).
+All 3 preflight hard-stops (missing plan file, fresh-bank-needed, duplicate
+config hash) verified live via the real CLI. The "3-plan --dry-run with a
+passing health check" verification item could not be run live in this
+session — no Docker daemon and no host-uvicorn backend venv available —
+but the identical code path is covered by
+test_preflight_success_manifest_and_checkpoint_shape plus the other 29
+queue tests using fake backend/judge clients; AWAITING PAUL to run a real
+--dry-run against a live backend before merge. Milestone 27 (execution
+loop + resume + summary) not started; independent of the M25 freeze (the
+queue runs whatever plans it is given).
 Last updated: 2026-07-11
 ```
 

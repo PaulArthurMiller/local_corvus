@@ -1,0 +1,18 @@
+{
+  "queue_id": "example_queue",
+  "on_plan_failure": "continue",
+  "max_total_budget_usd": 25.0,
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "plans": [
+    {
+      "plan_path": "../plans/phase3_pilot.json"
+    },
+    {
+      "plan_path": "../plans/pilot_125_2026-07-05.json",
+      "enabled": true
+    }
+  ]
+}

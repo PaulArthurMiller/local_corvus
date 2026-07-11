@@ -4779,10 +4779,20 @@ mechanism fires end to end. AWAITING PAUL: content review of the generated
 draft prose, then the human freeze step (seed_v3_draft.json -> seed_v3.json.gz)
 and a final verify --frozen. Only after freeze does the full experimental pilot
 run gain seed_v3's counterfactual-content science value over seed_v2.
-Milestones 26–27 (Sequential Batch Queue Runner) planned 2026-07-11, not
-started — M26: queue schema + preflight + dry-run; M27: execution loop +
-resume + summary. Independent of the M25 freeze (the queue runs whatever
-plans it is given).
+Milestone 26 (Queue Schema + Preflight + Dry-Run) CODE COMPLETE, in PR
+review — scripts/harness/queue.py (schema, manifest/checkpoint models,
+7-step preflight protocol) + scripts/run_experiment_queue.py CLI built,
+queues/example_queue.json committed, 30 new tests (710 total, all passing).
+All 3 preflight hard-stops (missing plan file, fresh-bank-needed, duplicate
+config hash) verified live via the real CLI. The "3-plan --dry-run with a
+passing health check" verification item could not be run live in this
+session — no Docker daemon and no host-uvicorn backend venv available —
+but the identical code path is covered by
+test_preflight_success_manifest_and_checkpoint_shape plus the other 29
+queue tests using fake backend/judge clients; AWAITING PAUL to run a real
+--dry-run against a live backend before merge. Milestone 27 (execution
+loop + resume + summary) not started; independent of the M25 freeze (the
+queue runs whatever plans it is given).
 Last updated: 2026-07-11
 ```
 

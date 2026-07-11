@@ -426,7 +426,10 @@ def confirm_cost(estimate: dict, input_fn: Callable[[str], str], print_fn: Calla
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def _generation_params(plan: RunPlan) -> dict:
+def generation_params_for_plan(plan: RunPlan) -> dict:
+    """Public so callers outside this module (M26 queue preflight bank-hash
+    resolution) can recompute the same content_hash without reaching into a
+    private function."""
     return {
         "total_prompts": plan.total_prompts,
         "probe_ratio": plan.probe_ratio,
@@ -434,6 +437,10 @@ def _generation_params(plan: RunPlan) -> dict:
         "subjects": plan.conceptual_fields.subjects,
         "model": plan.prompt_gen.model,
     }
+
+
+def _generation_params(plan: RunPlan) -> dict:
+    return generation_params_for_plan(plan)
 
 
 def estimate_bank_cost_for_plan(

@@ -92,9 +92,14 @@ hyperparameters:
   # Range: 1–5. Keep small; each retrieved MU consumes context budget.
   retrieval_level2_top_k: 1
 
-  # Weight multiplier applied to edges traversed in the "forward" direction
-  # vs. "bidirectional" edges. Forward edges (causal direction) are favoured.
-  # Range: 1.0–3.0. 1.0 = no directional bias; 2.0 = forward edges 2× heavier.
+  # Weight multiplier applied to every edge traversed in K2 (retrieval.py).
+  # CONFIRMED INERT as of the M24 verification pass, despite the name:
+  # every edge in the system is created with direction="forward" (no code
+  # path or seed fixture ever writes "bidirectional"), and K2 scoring
+  # applies this multiplier uniformly to every traversed edge with no check
+  # against the edges.direction column — it is a flat multiplier on all K2
+  # scores, not a forward-vs-bidirectional bias. Range: 1.0–3.0. 1.0 = no
+  # effect; 2.0 = all K2 edges scored 2× heavier than their raw weight.
   directional_edge_weight_multiplier: 1.5
 
   # Number of top BM25 tokens to use as retrieval keywords per query.

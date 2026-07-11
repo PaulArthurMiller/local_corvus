@@ -345,6 +345,7 @@ async def run_interaction(
         keywords=retrieval.keywords,
         store=graph_store,
         session_id=series_id,
+        run_id=run_id,
         ollama_host=OLLAMA_HOST,
         model_name=MODEL_NAME,
     )

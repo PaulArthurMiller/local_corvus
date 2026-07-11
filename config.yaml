@@ -106,9 +106,15 @@ hyperparameters:
   # candidacy and K2 traversal targets. Post-M22, context linkage lives on
   # output->retrieved edges (creation_trigger="co_activation"), not
   # prompt->retrieved edges, so prompt MUs (near-duplicates of their input MU)
-  # would otherwise waste K1 slots on redundant text. Set to [] to restore
-  # pre-M22 retrieval behavior exactly.
-  retrieval_exclude_source_types: ["prompt"]
+  # would otherwise waste K1 slots on redundant text. Post-M23, the two
+  # failed-output source types are excluded here rather than given a labeled
+  # content branch in the extractor — a turn that hit the token limit or
+  # returned empty output has no meaningful content to inject as memory
+  # context. Set to [] to restore pre-M22 retrieval behavior exactly.
+  retrieval_exclude_source_types:
+    - "prompt"
+    - "agent_output_failed_token_limit"
+    - "agent_output_failed_empty_output"
 
   # ---------------------------------------------------------------------------
   # Context

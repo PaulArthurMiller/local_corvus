@@ -39,6 +39,16 @@ logger = logging.getLogger(__name__)
 # backend/core/orchestrator.py's _EDGE_RNG.
 _DEFAULT_RNG = random.Random()
 
+# Default source_type exclusion list — see the candidacy-filter comment in
+# retrieve() below for the full rationale. Used when config.yaml doesn't
+# define hyperparameters.retrieval_exclude_source_types at all (e.g. minimal
+# test configs); the actual runtime default lives in config.yaml.
+_DEFAULT_EXCLUDED_SOURCE_TYPES = [
+    "prompt",
+    "agent_output_failed_token_limit",
+    "agent_output_failed_empty_output",
+]
+
 _WORD_RE = re.compile(r"\b\w+\b")
 
 _STOPWORDS = frozenset({
@@ -134,8 +144,13 @@ async def retrieve(
     # it. Default excludes "prompt" MUs: post-M22, context linkage lives on
     # output->retrieved edges, not prompt->retrieved edges, and prompt MUs are
     # near-duplicates of their input MU (see _prompt_mu_content()) that would
-    # otherwise waste K1 slots on redundant text.
-    excluded_source_types = set(hp.get("retrieval_exclude_source_types", ["prompt"]))
+    # otherwise waste K1 slots on redundant text. Post-M23, also excludes the
+    # two failed-output source types by default — a failed turn has no
+    # meaningful content to inject as memory context, so it's excluded here
+    # rather than given a labeled branch in the extractor.
+    excluded_source_types = set(
+        hp.get("retrieval_exclude_source_types", _DEFAULT_EXCLUDED_SOURCE_TYPES)
+    )
     if excluded_source_types:
         pre_filter_count = len(all_mus)
         all_mus = [m for m in all_mus if m["source_type"] not in excluded_source_types]

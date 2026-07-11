@@ -31,6 +31,8 @@ from harness.queue import (
     QueuePreflightError,
     STATUS_PENDING,
     STATUS_SKIPPED,
+    compute_queue_content_hash,
+    find_latest_launch_dir,
     launch_dir_name,
     load_queue_checkpoint,
     load_queue_file,
@@ -462,3 +464,44 @@ def test_launch_dir_name_default_timestamp_is_nonempty():
     name = launch_dir_name("screening_a")
     assert name.startswith("screening_a_")
     assert len(name) > len("screening_a_")
+
+
+# ---------------------------------------------------------------------------
+# find_latest_launch_dir — M27 resume auto-detect
+# ---------------------------------------------------------------------------
+
+def test_find_latest_launch_dir_returns_none_when_dir_missing(tmp_path):
+    assert find_latest_launch_dir(tmp_path / "nope", "q1") is None
+
+
+def test_find_latest_launch_dir_returns_none_when_no_matching_prefix(tmp_path):
+    runs_dir = tmp_path / "runs"
+    (runs_dir / "other_queue_20260101T000000Z").mkdir(parents=True)
+    assert find_latest_launch_dir(runs_dir, "q1") is None
+
+
+def test_find_latest_launch_dir_picks_the_most_recent_timestamp(tmp_path):
+    runs_dir = tmp_path / "runs"
+    (runs_dir / "q1_20260101T000000Z").mkdir(parents=True)
+    (runs_dir / "q1_20260201T000000Z").mkdir(parents=True)
+    (runs_dir / "q1_20260115T000000Z").mkdir(parents=True)
+    (runs_dir / "other_20260301T000000Z").mkdir(parents=True)  # different queue_id, ignored
+
+    result = find_latest_launch_dir(runs_dir, "q1")
+    assert result == runs_dir / "q1_20260201T000000Z"
+
+
+def test_compute_queue_content_hash_changes_when_plans_change(tmp_path):
+    queue_path_a = _write_queue(tmp_path / "a.json", [{"plan_path": "x.json"}])
+    queue_path_b = _write_queue(tmp_path / "b.json", [{"plan_path": "y.json"}])
+    hash_a = compute_queue_content_hash(load_queue_file(queue_path_a))
+    hash_b = compute_queue_content_hash(load_queue_file(queue_path_b))
+    assert hash_a != hash_b
+
+
+def test_compute_queue_content_hash_stable_for_identical_content(tmp_path):
+    queue_path_a = _write_queue(tmp_path / "a.json", [{"plan_path": "x.json"}])
+    queue_path_b = _write_queue(tmp_path / "b.json", [{"plan_path": "x.json"}])
+    hash_a = compute_queue_content_hash(load_queue_file(queue_path_a))
+    hash_b = compute_queue_content_hash(load_queue_file(queue_path_b))
+    assert hash_a == hash_b

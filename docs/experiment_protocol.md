@@ -1,8 +1,65 @@
 # Local Corvus — Three-Condition Experiment Protocol
 
-This document is the step-by-step runbook for executing a complete three-condition
-experiment (learned / static-weight / random-weight) from scratch. Follow the phases
-in order. Each phase includes the exact API calls to make and the expected outputs.
+This document is the standard for constructing and executing a three-condition
+experiment (`learned` / `static_weight` / `random_weight`) on Local Corvus.
+
+**As of M19–M27, experiments are not run by hand.** A **Run Plan** (JSON) fully
+describes one experiment; `scripts/run_experiment_harness.py` executes it
+end-to-end — per-condition backend restart, graph wipe+seed, the full turn
+loop (bulk chat turns + probe batteries), judging, and series/experiment
+report generation — with zero manual API calls. A **Queue** (JSON) feeds
+several Run Plans through the harness back-to-back, unattended, via
+`scripts/run_experiment_queue.py`. This is the required path for a full long
+series run (a 10–15-run screening series or larger): hand-driving `/chat` and
+`/feedback` calls for hundreds of turns is not supported by this protocol and
+should not be done for a real experiment.
+
+The bulk of this document is a field-by-field reference for the Run Plan and
+Queue schemas, so that every plan written for an automated run includes the
+correct variables with the correct types. Keep this section in sync with
+`scripts/harness/schema.py` (Run Plan) and `scripts/harness/queue.py` (Queue)
+whenever those modules change — they are the source of truth; this document
+is a readable mirror of them.
+
+---
+
+## Architecture — three layers
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  QUEUE LAYER  (queues/*.json + run_experiment_queue.py)             │
+│  An ordered list of Run Plan files. No experimental intelligence — │
+│  never reads results, never edits plans. Required for any run of   │
+│  more than one plan.                                                │
+└───────────────────────────┬───────────────────────────────────────┘
+                             ▼  one plan at a time
+┌────────────────────────────────────────────────────────────────────┐
+│  HARNESS LAYER  (plans/*.json + run_experiment_harness.py)          │
+│  execute_run(plan): per-condition container restart (fresh          │
+│  EXPERIMENT_ID/CONDITION_LABEL/RUN_CONDITION) → wipe+seed graph →   │
+│  turn loop (bulk /chat+feedback, probe /admin/run-probe) → judge →  │
+│  series report at series close → experiment report at experiment    │
+│  close → notification.                                              │
+└───────────────────────────┬───────────────────────────────────────┘
+                             ▼
+        Docker backend (config.yaml hyperparameters) ── graph DB ── Ollama
+```
+
+`config.yaml` and the Run Plan are **not the same thing** and are not
+interchangeable:
+
+| | Lives in | Scope | Changing it |
+|---|---|---|---|
+| Hyperparameters (retrieval K1/K2, learning rate, edge priors, context budget, …) | `config.yaml` | Applies to every run until changed again | Requires a backend restart |
+| Experimental design (how many turns, which conditions, which judge, probe ratio, budget, …) | Run Plan JSON | One experiment | New plan file, no backend restart needed |
+| Batch scheduling (which plans, in what order, failure handling) | Queue JSON | One unattended session | New queue file |
+
+If a screening series is sweeping a hyperparameter (e.g. K1), that sweep is
+expressed as **one `config.yaml` value per plan run in isolation** — the Run
+Plan schema has no field for retrieval/learning hyperparameters. `tuning_knobs`
+on the Run Plan is a passthrough dict reserved for future use and is not
+currently read by the backend; do not rely on it to vary hyperparameters
+per-plan today.
 
 ---
 
@@ -10,7 +67,10 @@ in order. Each phase includes the exact API calls to make and the expected outpu
 
 - Docker Desktop running with Linux containers enabled
 - Ollama running natively on Windows (not in Docker) with `gemma4:e4b` pulled
-- `.env` file in the project root (see `.env.example`)
+- `.env` file in the project root (see `docker-compose.yml` for the variables
+  it reads: `OLLAMA_HOST`, `CONDITION_LABEL`, `EXPERIMENT_ID`,
+  `RUN_CONDITION` — the harness sets the latter three itself per condition;
+  leave them unset in `.env` for harness-driven runs)
 
 ```
 OLLAMA_HOST=http://host.docker.internal:11434
@@ -22,418 +82,368 @@ Start the stack:
 docker-compose up --build
 ```
 
-Verify all three services are healthy:
-
-- Backend: `GET http://localhost:8000/health` → `{"status":"ok","db":"ok"}`
-- Ollama: `GET http://localhost:8000/ollama-health` → `{"status":"ok","ollama":{...}}`
-- Admin UI: open `http://localhost:3001` in a browser
-- Chat UI: open `http://localhost:3000` in a browser
-
-Run the full unit test suite (outside Docker, on host):
-
-```
-pytest tests/ --ignore=tests/integration
-```
-
-All 315 tests must pass before proceeding.
-
----
-
-## Phase 1 — Wipe Graph and Register Seed Fixture
-
-Every experiment begins from the same starting graph. If you are running a new
-experiment (not a continuation), wipe the database and re-seed it.
-
-### 1a. Wipe the graph
-
-Delete `memory/graph.db` and let the backend recreate it on the next request.
-This removes all MUs, edges, and run records from prior experiments.
-
-```powershell
-# Stop the stack first
-docker-compose down
-
-# Delete the database
-Remove-Item memory\graph.db -ErrorAction SilentlyContinue
-
-# Restart
-docker-compose up -d
-```
-
-Verify the backend is healthy again before proceeding:
+Verify the backend is healthy:
 
 ```
 GET http://localhost:8000/health
 → {"status":"ok","db":"ok"}
 ```
 
-### 1b. Register the seed fixture
+Run the full unit test suite (outside Docker, on host) and confirm it passes
+in full before launching a real experiment:
 
-Load the pre-generated seed MUs into the graph with correct cluster_id tags:
-
-```
-POST http://localhost:8000/admin/seed-graph
-Body: {"version": "v1"}
-
-Expected response:
-{
-  "status": "ok",
-  "mu_count": 6,
-  "version": "v1",
-  "manifest_hash": "<sha256>"
-}
+```powershell
+pytest tests/ --ignore=tests/integration
 ```
 
-### 1c. Verify seed graph completeness
-
-```
-GET http://localhost:8000/admin/graph/stats
-
-Expected response:
-{
-  "mu_count": 6,
-  "mu_with_cluster_id": 6,
-  "mu_without_cluster_id": 0,
-  "cluster_distribution": {"cluster_a": 3, "cluster_b": 2, "bridge_ab": 1}
-}
-```
-
-If `mu_without_cluster_id > 0`, the cross-cluster transfer analysis (§6.1) will
-degrade. Investigate before proceeding.
-
-### 1d. Sync probes
-
-Probe definitions load automatically on backend startup from `probes/probe_set_v1.yaml`.
-Verify they are in the DB via the Admin UI → Probe Results tab.
+The seed fixture and prompt bank referenced by a plan must already exist on
+disk (see "Seed fixture and probe battery version" below) — the harness
+never generates a seed fixture, and a queue-mode run refuses to generate a
+prompt bank interactively (see "Prompt bank resolution" below).
 
 ---
 
-## Phase 2 — Baseline Probe Snapshot (Session Index 0)
+## Run Plan schema (`plans/*.json`)
 
-Take a probe battery snapshot before any training turns. This is the baseline
-measurement against which all subsequent probe results are compared.
+A Run Plan is validated by `RunPlan` in `scripts/harness/schema.py`. Every
+field below is what the schema currently accepts — an unrecognized or
+mistyped field, or one violating a constraint, fails validation with a
+field-identifying error (never a raw stack trace) before any graph mutation.
 
-### 2a. Take pre-seed snapshot
+### Top-level fields
 
-```
-POST http://localhost:8000/admin/probes/snapshot
-Body: {"battery_index": 0, "phase": "pre_seed", "condition_label": "seed"}
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `plan_id` | string, non-empty | — (required) | Used to derive the run's identity, run directory name, and per-condition `experiment_id` (`{plan_id}_{condition}`). Keep it unique and filesystem-safe. |
+| `plan_name` | string, non-empty | — (required) | Human-readable label only. |
+| `conceptual_fields` | object | — (required) | See below. |
+| `total_prompts` | int > 0 | derived | Exactly **two** of `total_prompts` / `series_count` / `turns_per_series` must be given; the third is derived. If all three are given, they must be mutually consistent (`total_prompts == series_count * turns_per_series`) or validation fails. |
+| `series_count` | int > 0 | derived | Number of series (chat sessions) per condition. |
+| `turns_per_series` | int > 0 | derived | Turns (bulk + probe combined) per series. |
+| `probe_ratio` | float, 0.0–1.0 | `0.2` | Fraction of each series' turns that are probe turns (`round(turns_per_series * probe_ratio)`), never judged, never eligible for feedback. |
+| `probe_placement` | string | `"end"` | One of `"random"`, `"end"`, `"fixed_checkpoints"`. `"end"` puts all probe turns as the tail of each series (recommended default — every series closes with a full battery pass). `"random"` shuffles probe positions per series (seeded, reproducible). `"fixed_checkpoints"` requires `probe_checkpoint_positions`. |
+| `probe_checkpoint_positions` | list[int] or null | `null` | Required, non-empty, and in range `[0, turns_per_series)` when `probe_placement == "fixed_checkpoints"`. |
+| `probe_set_version` | string, non-empty | `"v2"` | Selects `probes/probe_set_{version}.yaml`. **Currently only `v2` (10 probes) is wired through the harness — see the version note below before setting this to `v3`.** |
+| `difficulty` | object | `{hop_distance_levels: [0, 1]}` | See below. |
+| `judge` | object | `{model: "gemma4:e4b", temperature: 0.0}` | See below. |
+| `conditions` | list[string] | `["learned", "static_weight", "random_weight"]` | Each must be one of those three values; non-empty. |
+| `condition_order` | list[string] or null | `= conditions` | If given, must be a permutation of `conditions` — this is the execution order (each condition gets its own container restart + graph wipe/seed). |
+| `tuning_knobs` | dict[string, float] | `{}` | Reserved passthrough, not currently consumed by the backend. Do not use to vary hyperparameters per-plan (see the architecture table above). |
+| `error_policy` | dict[string, string] | `{}` | Overrides on top of the default policy below. Each value must be `"hard_stop"` or `"soft_continue"`. |
+| `notification` | object | `{enabled: true, channel: "log"}` | See below. |
+| `budget_cap` | float ≥ 0 or null | `null` (uncapped) | Pre-run hard stop: if the estimated cost (prompt-bank generation + judge calls) exceeds this, the harness refuses to start. With a pre-generated bank and the local Ollama judge, actual marginal cost is ~$0 today — this is a guardrail for future hosted-judge/API configurations, not a real spend limiter yet. |
+| `prompt_bank_path` | string or null | `null` | Path to an existing prompt bank JSON (see `prompt_banks/`). If absent and `conceptual_fields.subjects == "auto"`, the harness (interactive mode only) generates and saves one before executing. **Queue-mode runs must supply this or point at a bank the preflight can resolve by hash — see "Prompt bank resolution" below.** |
+| `prompt_gen` | object | `{model: "claude-sonnet-5", max_retries: 2}` | See below. Irrelevant if `prompt_bank_path` is already set. |
+| `dry_run` | bool | `false` | Scopes execution to `dry_run_n` turns per condition; also suffixes the run identity with `_dryrun` so dry-run analytics never contaminate a later real run's reports. |
+| `dry_run_n` | int > 0 | `2` | Turns per condition when `dry_run` is true. |
+| `random_seed` | int | `0` | Drives deterministic probe placement (`"random"`) and prompt-id assignment. **Replicate plans must use distinct `random_seed` values** — two plans with an identical fully-resolved config (including `random_seed`) hash to the same `config_hash`, and both the single-run harness and the queue preflight treat that as an error, not a valid replicate. |
 
-Expected response:
-{"status": "ok", "path": "/app/data/snapshots/battery_0_pre_seed_seed_<ts>.json.gz"}
-```
+### `conceptual_fields`
 
-### 2b. Run all probes at session index 0
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `count` | int > 0 | — (required) | Number of conceptual fields (clusters) to draw prompts from. |
+| `subjects` | list[string] or the literal string `"auto"` | `"auto"` | An explicit non-empty subject list, or `"auto"` to let prompt generation choose. |
 
-Run each of the 5 probes in `probe_set_v1.yaml`:
+### `difficulty`
 
-```
-POST http://localhost:8000/admin/run-probe
-Body: {"probe_id": "p01", "measurement_session_index": 0, "condition_label": "seed"}
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `hop_distance_levels` | list[int], non-empty, all ≥ 0 | `[0, 1]` | Hop-distance difficulty levels used by prompt generation. The only difficulty mechanism currently in scope. |
 
-POST http://localhost:8000/admin/run-probe
-Body: {"probe_id": "p02", "measurement_session_index": 0, "condition_label": "seed"}
+### `judge`
 
-POST http://localhost:8000/admin/run-probe
-Body: {"probe_id": "p03", "measurement_session_index": 0, "condition_label": "seed"}
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `model` | string | `"gemma4:e4b"` | Judge model identity (config-swappable, need not match the agent model). |
+| `temperature` | float, 0.0–0.1 | `0.0` | Deliberately tight — judge calls need near-0 temperature for cross-condition verdict comparability. |
+| `pinned_snapshot` | string or null | `null` | Optional pinned model snapshot/digest for reproducibility. |
 
-POST http://localhost:8000/admin/run-probe
-Body: {"probe_id": "p04", "measurement_session_index": 0, "condition_label": "seed"}
+### `notification`
 
-POST http://localhost:8000/admin/run-probe
-Body: {"probe_id": "p05", "measurement_session_index": 0, "condition_label": "seed"}
-```
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `true` | |
+| `channel` | string | `"log"` | One of `"log"`, `"email"`, `"webhook"`. Only `"log"` is implemented today (writes to console + `notifications.log`); `"email"`/`"webhook"` validate but fall back to `"log"` with a warning. |
 
-Each response contains `gold_mu_rank`, `retrieval_precision`, and `retrieval_recall`.
-Record the results. On a clean seed graph, p02–p05 are expected to PASS (rank 1);
-p01 probes file-related MUs and may FAIL until the workspace file is created in training.
+### `prompt_gen`
 
----
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `model` | string | `"claude-sonnet-5"` | Sonnet model used for prompt-bank generation. Set to a fixed string like `"session-authored-offline"` for a hand-authored bank so its content hash can never collide with a real Sonnet-generated bank. |
+| `max_retries` | int ≥ 0 | `2` | Retries on generation validation failure. |
 
-## Phase 3 — Learned Condition
+### Default error policy
 
-Set `experiment_id` and `condition_label` for the learned run. The recommended approach
-is to set environment variables before starting the stack (they are resolved at startup):
+`error_policy` overrides these defaults (from `DEFAULT_ERROR_POLICY`); do not
+duplicate a key unless you're intentionally changing its action:
 
-```
-# In .env or as shell variables before docker-compose up:
-EXPERIMENT_ID=exp-learned-2026-07-01
-CONDITION_LABEL=learning
-```
+| Key | Default action | Meaning |
+|---|---|---|
+| `connectivity` | `hard_stop` | Backend unreachable / DB failure. |
+| `turn_ambiguous` | `soft_continue` | A single turn's result is malformed or missing. |
+| `judge_unparseable` | `soft_continue` | Judge response fails to parse even after one re-ask. |
+| `report_generation` | `soft_continue` | Series/experiment report call failed — regenerable later; must never abort an otherwise-successful run. |
 
-Or edit `config.yaml`:
-
-```yaml
-experiment:
-  experiment_id: "exp-learned-2026-07-01"
-  condition_label: "learning"
-```
-
-Restart the backend if config.yaml was changed: `docker-compose restart backend`
-
-Verify the experiment_id is stamped on new runs:
-
-```
-GET http://localhost:8000/admin/runs?limit=1
-→ run record should show "experiment_id": "exp-learned-2026-07-01"
-```
-
-### 3a. Run training series
-
-The learned condition uses active feedback. For each series:
-
-1. Send 10 training turns via the Chat UI or `/chat` endpoint.
-   Each turn: send a message, read the response, then provide feedback via
-   the thumbs-up/thumbs-down buttons (or `POST /feedback`).
-2. Run the mid-series probe battery (session_index = series_number × 2 + 1):
-   ```
-   POST http://localhost:8000/admin/run-probe
-   Body: {"probe_id": "p01", ..., "measurement_session_index": 1, "condition_label": "learning"}
-   ```
-   Repeat for all 5 probes.
-3. Run 10 more training turns with feedback.
-4. Run the end-of-series probe battery (session_index = series_number × 2 + 2):
-   ```
-   POST http://localhost:8000/admin/run-probe
-   Body: {"probe_id": "p01", ..., "measurement_session_index": 2, "condition_label": "learning"}
-   ```
-5. Generate the series report:
-   ```
-   POST http://localhost:8000/admin/reports/generate-series
-   Body: {"experiment_id": "exp-learned-2026-07-01", "series_id": "<series_uuid>"}
-   ```
-
-Repeat for 5 series total. The `series_id` for each series is the UUID assigned by
-the backend to the current chat session (visible in the chat API response).
-
-### 3b. Provide feedback
-
-After each agent response, POST feedback:
-
-```
-POST http://localhost:8000/feedback
-Body: {
-  "run_id": "<run_id from chat response>",
-  "signal": 1,                    # 1 = thumbs up, -1 = thumbs down
-  "verdict_basis": "checklist_pass",   # optional: name the reason
-  "is_probe_turn": false
-}
-```
-
-Weight updates are returned in the response. Verify `weight_updates` is non-empty
-for thumbs-up on turns where memory MUs were retrieved.
-
----
-
-## Phase 4 — Static-Weight Control
-
-The static-weight control runs the same prompts with no weight updates.
-No feedback is sent. Edge weights remain at `initial_edge_weight: 0.5`.
-
-```
-EXPERIMENT_ID=exp-static-2026-07-01
-CONDITION_LABEL=static-weight
-```
-
-Restart backend to pick up the new experiment_id. Wipe the graph and re-seed
-(repeat Phase 1) so this condition starts from the same initial state.
-
-Run the same 5 series and 5 probe batteries as the learned condition, but:
-- Do NOT send feedback after any turn
-- Do NOT call `POST /feedback`
-
-After all series, verify the static-weight sanity check:
-
-```sql
--- Run inside the container or via /admin/runs inspection:
-SELECT COUNT(*) FROM analytics
-WHERE experiment_id = 'exp-static-2026-07-01'
-  AND json_array_length(weight_updates) > 0;
--- Expected: 0
-```
-
----
-
-## Phase 5 — Random-Weight Control
-
-The random-weight control re-randomises all edge weights at the start of each series.
-No feedback is sent. Edge weights are re-randomised to uniform [0, 1] before each series.
-
-```
-EXPERIMENT_ID=exp-random-2026-07-01
-CONDITION_LABEL=random-weight
-```
-
-Restart backend. Wipe graph and re-seed (repeat Phase 1).
-
-Before starting each series, randomise edge weights:
-
-```
-POST http://localhost:8000/admin/edges/randomize
-Body: {}
-
-Expected response:
-{"status": "ok", "edges_randomized": <N>}
-```
-
-Run the same 5 series and 5 probe batteries as the learned condition.
-Do NOT send feedback.
-
-After all series, verify the random-weight sanity check by checking that edge
-weight variance is above the floor (done automatically by the report generator).
-
----
-
-## Phase 6 — Report Generation
-
-### 6a. Generate series reports
-
-For each series across all three conditions:
-
-```
-POST http://localhost:8000/admin/reports/generate-series
-Body: {"experiment_id": "<experiment_id>", "series_id": "<series_uuid>"}
-
-→ {"report_id": "<uuid>", "json_path": "...", "md_path": "..."}
-```
-
-Retrieve and verify:
-
-```
-GET http://localhost:8000/admin/reports/<report_id>
-→ JSON with keys: failure_summary, retrieval_trace, retrieval_rate,
-  cross_series_edges, edge_weight_deltas, probe_integrity, mode3_count, ctx_pressure
-
-GET http://localhost:8000/admin/reports/<report_id>/markdown
-→ Full Markdown text
-```
-
-### 6b. Generate learned-condition experiment report (with control shadow)
-
-```
-POST http://localhost:8000/admin/reports/generate-experiment
-Body: {
-  "experiment_id": "exp-learned-2026-07-01",
-  "control_experiment_ids": {
-    "static_weight": "exp-static-2026-07-01",
-    "random_weight": "exp-random-2026-07-01"
-  }
-}
-```
-
-Expected response JSON structure:
+### Worked example (single plan, matches `plans/pilot_125_2026-07-05.json`)
 
 ```json
 {
-  "report_id": "<uuid>",
-  "series_summary": { ... },
-  "integrity_checks": {
-    "seed_fixture_provenance": "pass",
-    "graph_wipe_verification": "pass",
-    "probe_replay_index_normalization": "pass"
-  },
-  "learning_measures": {
-    "state_transitions": { ... },
-    "probe_pass_rates": { ... },
-    "edge_delta_ledger": { ... },
-    "bridge_mu_analysis": { ... },
-    "saturation_analysis": { ... }
-  },
-  "control_shadow": {
-    "static_weight": {
-      "sanity_checks": {
-        "zero_weight_changes": true,
-        "zero_feedback_edge_correlation": 0
-      },
-      "comparative_deltas": { ... }
-    },
-    "random_weight": {
-      "sanity_checks": {
-        "weights_rerandomized": true,
-        "zero_feedback_edge_correlation": 0
-      },
-      "comparative_deltas": { ... }
-    }
-  }
+  "plan_id": "pilot-125-2026-07-05",
+  "plan_name": "Full pilot — 125 prompts x 3 conditions",
+  "conceptual_fields": { "count": 4, "subjects": "auto" },
+  "series_count": 5,
+  "turns_per_series": 25,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v2",
+  "difficulty": { "hop_distance_levels": [0, 1] },
+  "judge": { "model": "gemma4:e4b", "temperature": 0.0 },
+  "conditions": ["learned", "static_weight", "random_weight"],
+  "condition_order": ["learned", "static_weight", "random_weight"],
+  "error_policy": {},
+  "notification": { "enabled": true, "channel": "log" },
+  "budget_cap": 25.0,
+  "prompt_gen": { "model": "session-authored-offline", "max_retries": 2 },
+  "dry_run": false,
+  "random_seed": 20260705,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e75058b6....json"
 }
 ```
 
-All four sanity checks must pass before the comparative deltas are meaningful.
-
-### 6c. Verify in Admin UI
-
-Open `http://localhost:3001` → Reports tab:
-
-- All generated reports appear in the list
-- "View" renders the Markdown with correct headers and tables
-- "↓JSON" downloads the raw JSON
-- Comparison table auto-renders when `control_shadow` is non-null
+Note `total_prompts` is *absent* here — it's legally derivable from
+`series_count * turns_per_series` (5 × 25 = 125), so only two of the three
+count fields need to be supplied.
 
 ---
 
-## Phase 7 — Post-Experiment Validation
+## Queue schema (`queues/*.json`)
 
-Run the integration test suite against the live stack:
+A Queue is validated by `QueueFile` in `scripts/harness/queue.py`. Required
+for any run of more than one plan, and recommended even for a single plan so
+its preflight checks, resume behavior, and `queue_summary.md` are available.
 
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `queue_id` | string, non-empty | — (required) | Identifies this queue's launch directories (`harness_runs/queues/{queue_id}_{timestamp}/`) and drives resume auto-detection. |
+| `on_plan_failure` | string | `"continue"` | `"continue"` or `"halt"`. On a failed plan, `"continue"` re-checks backend + judge health before proceeding — a genuinely dead backend halts regardless of this setting, since a dead backend would otherwise convert one failure into every remaining plan failing too. |
+| `max_total_budget_usd` | float ≥ 0 or null | `null` | Aggregate pre-run cost estimate across every enabled plan must not exceed this — hard stop at preflight, before any plan runs. |
+| `notification` | object | `{enabled: true, channel: "log"}` | Same `NotificationConfig` schema as the Run Plan's. |
+| `plans` | list of `{plan_path, enabled}`, min length 1 | — (required) | See below. |
+
+Each entry in `plans`:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `plan_path` | string, non-empty | — (required) | Resolves **relative to the queue file's own directory** when not absolute. |
+| `enabled` | bool | `true` | `false` entries are recorded in the manifest as `skipped_disabled` and never loaded, validated, or executed — this is the JSON substitute for commenting a plan out. |
+
+### Worked example (matches `queues/example_queue.json`)
+
+```json
+{
+  "queue_id": "screening_a",
+  "on_plan_failure": "continue",
+  "max_total_budget_usd": 25.0,
+  "notification": { "enabled": true, "channel": "log" },
+  "plans": [
+    { "plan_path": "../plans/replicate_seed1.json" },
+    { "plan_path": "../plans/replicate_seed2.json", "enabled": true },
+    { "plan_path": "../plans/sweep_k1_4.json", "enabled": false }
+  ]
+}
 ```
-pytest tests/integration/ -m integration -v
+
+### Queue preflight (must fully pass before any plan's first turn)
+
+1. Queue file parses and validates.
+2. Every **enabled** plan loads and validates as a `RunPlan`.
+3. Duplicate `config_hash` across enabled plans → hard stop ("replicates need
+   distinct `random_seed` values").
+4. Per-plan prompt-bank resolution (see below) → hard stop if any plan would
+   need fresh Sonnet generation.
+5. Backend health check + judge model availability for every distinct judge
+   model referenced.
+6. Aggregate budget check against `max_total_budget_usd`.
+7. Disk-space note: projected archive count (enabled plans × their condition
+   counts) is logged; a free-space WARN fires below a conservative threshold
+   (not a hard stop — archive-size prediction is inherently approximate).
+
+Run `--dry-run` to execute the full preflight and print the resolved
+execution order with **zero** HTTP mutation calls and zero files written:
+
+```powershell
+python scripts/run_experiment_queue.py --queue queues/screening_a.json --dry-run
 ```
 
-All 5 integration tests must pass:
+### Prompt bank resolution (applies to both single-plan and queue runs)
 
-1. `test_chat_turn_creates_memory_units`
-2. `test_feedback_event_triggers_weight_update`
-3. `test_series_report_generates_all_sections`
-4. `test_experiment_report_learning_measures_populated`
-5. `test_control_shadow_sanity_checks_pass`
+- If `prompt_bank_path` is set, it must exist and pass validation — used as-is.
+- If unset and `conceptual_fields.subjects == "auto"`, the harness looks for
+  an already-generated bank matching this plan's content hash. If found, its
+  path is stamped onto the plan automatically. If not found, fresh Sonnet
+  generation would be required.
+- **Queue-mode runs never call the Sonnet API.** A plan needing fresh
+  generation is a preflight hard stop with the message "run `--generate-bank`
+  for this plan interactively first." Generate it ahead of time:
+
+  ```powershell
+  python scripts/run_experiment_harness.py --plan plans/my_plan.json --generate-bank
+  ```
+
+- A plan with neither an existing `prompt_bank_path` nor `subjects == "auto"`
+  is also a hard stop — there is no third option; running placeholder-text
+  turns unattended overnight wastes GPU-hours for no data.
+
+### Resume
+
+Re-invoking the same queue command auto-detects the most recent
+`harness_runs/queues/{queue_id}_*` launch directory and resumes it, **guarded
+by an exact `queue_content_hash` match** against the current queue file — a
+mismatch (the queue file changed since that launch) hard-stops rather than
+guessing which plans already ran. Use `--resume-dir <dir>` to target an
+explicit launch directory instead of auto-detection.
+
+Resume is safe at any granularity: a plan whose own harness run was mid-turn
+resumes at the next unrecorded turn (per-turn checkpointing); a plan whose
+harness run had already fully completed reconciles to `complete` without
+re-invoking `execute_run()` at all — closing the crash window between the
+harness finishing and the queue's own status write.
 
 ---
 
-## Quick Reference — All Admin API Endpoints
+## Running an experiment
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/health` | Backend + DB health |
-| GET | `/ollama-health` | Ollama connectivity |
-| POST | `/chat` | Send a chat turn |
-| POST | `/feedback` | Send thumbs-up/down |
-| GET | `/admin/runs` | List run records |
-| GET | `/admin/graph` | Full MU + edge list |
-| GET | `/admin/graph/stats` | MU count + cluster distribution |
-| GET | `/admin/config` | Current config snapshot |
-| POST | `/admin/seed-graph` | Load seed fixture into graph |
-| POST | `/admin/edges/randomize` | Randomise all edge weights |
-| POST | `/admin/run-probe` | Run a single probe (read-only) |
-| GET | `/admin/probe-results` | List probe results |
-| POST | `/admin/probes/snapshot` | Take a named battery snapshot |
-| POST | `/admin/reports/generate-series` | Generate §5 series report |
-| POST | `/admin/reports/generate-experiment` | Generate §6 experiment report |
-| GET | `/admin/reports` | List all generated reports |
-| GET | `/admin/reports/{id}` | Fetch report JSON |
-| GET | `/admin/reports/{id}/markdown` | Fetch report Markdown |
+### Single plan (interactive elicitation or a plan file)
+
+```powershell
+# Interactive — prompts for every field, offers to save the resulting plan JSON
+python scripts/run_experiment_harness.py
+
+# From a saved plan file
+python scripts/run_experiment_harness.py --plan plans/my_plan.json
+
+# Dry run first (forces plan.dry_run regardless of the file's own setting)
+python scripts/run_experiment_harness.py --plan plans/my_plan.json --dry-run
+```
+
+This single call performs, per condition in `condition_order`: a backend
+container restart with that condition's `EXPERIMENT_ID`/`CONDITION_LABEL`/
+`RUN_CONDITION` env vars, a graph wipe + seed-fixture load, the resolved turn
+sequence (bulk `/chat` turns judged and fed back automatically; probe turns
+via `/admin/run-probe`, read-only, never judged), a series report at the
+close of each series, and an experiment report (with control-shadow
+comparison against the other conditions) at the close of the whole plan.
+Nothing here is a manual step — do not hand-drive `/chat`/`/feedback` calls
+for a real experiment.
+
+### A full long series run (queue)
+
+```powershell
+# 1. Validate every plan + resolve prompt banks, zero mutation
+python scripts/run_experiment_queue.py --queue queues/screening_a.json --dry-run
+
+# 2. Launch for real (unattended — safe to close the terminal and reattach later)
+python scripts/run_experiment_queue.py --queue queues/screening_a.json
+
+# 3. If interrupted (crash, reboot, manual stop) — same command resumes automatically
+python scripts/run_experiment_queue.py --queue queues/screening_a.json
+```
+
+Progress and final results:
+
+- `harness_runs/queues/{queue_id}_{launch_ts}/queue_manifest.json` — resolved
+  plan list, per-plan `config_hash`/expected `run_id`, preflight results.
+- `harness_runs/queues/{queue_id}_{launch_ts}/queue_checkpoint.json` — live
+  per-plan status (`pending` / `running` / `complete` / `failed` / `skipped`).
+- `harness_runs/queues/{queue_id}_{launch_ts}/queue_summary.md` — written at
+  queue end: per-plan durations (wall-clock + per-condition), report paths,
+  pass/fail summary.
+- `harness_runs/queues/{queue_id}_{launch_ts}/notifications.log` — one JSONL
+  line per `queue_plan_complete` / `queue_plan_failed` / `queue_complete` /
+  `queue_aborted` event.
+
+Each individual plan's own harness output lands at
+`harness_runs/{plan_id}_{config_hash[:12]}/` exactly as it would for a
+single-plan run — the queue changes nothing about the harness layer.
+
+---
+
+## Seed fixture and probe battery version
+
+The harness's default seed fixture is **`seed_fixtures/seed_v2.json.gz`**
+(34 MUs) and the schema default `probe_set_version` is **`"v2"`**
+(`probes/probe_set_v2.yaml`, 10 probes). `seed_fixtures/seed_v3.json.gz`
+(counterfactual content, 34 MUs, 64 reciprocal edges) exists, but **the
+harness's `SEED_FIXTURE_PATH` constant, prompt generation, and probe set are
+not yet wired to consume it** — do not set `probe_set_version: "v3"` or point
+`prompt_bank_path` at a v3-derived bank until that wiring lands (tracked as
+the deferred "v3 cascade" in `PROGRESS.md`). Plans for the current long
+series run should stay on the `v2` fixture/probe defaults.
+
+---
+
+## Report generation
+
+Series and experiment reports are generated automatically by `execute_run()`
+— a series report at the close of every series, an experiment report (with
+`control_shadow` comparisons against non-`learned` conditions) at the close
+of the whole plan. No manual `POST /admin/reports/*` call is part of the
+standard flow; those endpoints remain available for regenerating or
+inspecting a report after the fact:
+
+```
+GET  http://localhost:8000/admin/reports              # list all generated reports
+GET  http://localhost:8000/admin/reports/{id}          # fetch report JSON
+GET  http://localhost:8000/admin/reports/{id}/markdown # fetch report Markdown
+POST http://localhost:8000/admin/reports/generate-series      # re-generate manually
+POST http://localhost:8000/admin/reports/generate-experiment  # re-generate manually
+```
+
+Open the Admin UI (`http://localhost:3001` → Reports tab) to browse them
+visually; the comparison table auto-renders whenever `control_shadow` is
+non-null.
 
 ---
 
 ## Troubleshooting
 
-**Backend healthcheck fails (db: error):**
-`memory/graph.db` may be locked or the volume mount is missing. Check
-`docker-compose logs backend` for the SQLite traceback. Restarting the container
-usually resolves transient lock contention.
+**Preflight fails with "duplicate config_hash across plans":**
+Two enabled plans in the queue resolve to an identical fully-serialized
+config. This is not a valid replicate — give each a distinct `random_seed`.
 
-**Probe all FAIL after a non-wiped graph run:**
-Interaction MUs from prior runs outrank seed MUs. Start from a clean graph (Phase 1).
+**Preflight fails with "needs fresh Sonnet prompt-bank generation":**
+Run `python scripts/run_experiment_harness.py --plan <that plan> --generate-bank`
+first (interactively, outside the queue), then re-run the queue's `--dry-run`.
 
-**`learning_measures` is null in experiment report:**
-No probe results exist for the experiment_id. Run probe batteries (Phase 2–5) before
-generating the experiment report.
+**Preflight fails with "aggregate estimated cost ... exceeds max_total_budget_usd":**
+Raise `max_total_budget_usd` in the queue file, or reduce plan scope
+(`total_prompts`/`series_count`/`turns_per_series`) — the same message from
+`check_prerun_budget` also appears for a single plan's own `budget_cap`.
 
-**`control_shadow` sanity check `zero_weight_changes` FAIL for static-weight:**
-Feedback was accidentally sent during the static-weight run. Inspect
-`SELECT * FROM feedback_events JOIN analytics ON feedback_events.run_id = analytics.run_id
-WHERE analytics.experiment_id = 'exp-static-...'` to identify the offending runs.
+**Resume hard-stops with a `queue_content_hash` mismatch:**
+The queue file was edited since the launch it's trying to resume. Either
+start a fresh launch (new `queue_id` or accept a new launch directory) or
+pass `--resume-dir` pointing at the exact prior launch directory if you
+intend to resume that one despite the edit.
 
-**`weights_rerandomized` FAIL for random-weight control:**
-`POST /admin/edges/randomize` was not called before each series, or the graph had
-very few edges at that point (low variance from a small edge count). Verify the
-`edges_randomized` count in each randomize response is > 10.
+**Backend healthcheck fails (`db: error`):**
+The graph DB volume mount may be locked or missing. Check
+`docker-compose logs backend` for the SQLite traceback; restarting the
+container usually resolves transient lock contention.
+
+**A condition's probe results all show `null` pass rates:**
+Confirm the plan's `probe_set_version` matches a battery file that actually
+exists under `probes/`, and that the run didn't hard-stop before any probe
+turn executed (check `error_summary` in the harness or queue checkpoint).
+
+**`control_shadow` sanity check `zero_weight_changes` fails for `static_weight`:**
+Something outside the harness sent feedback during that condition's run
+(the harness itself never does for non-`learned` conditions). Inspect
+`analytics`/`feedback_events` for the offending `experiment_id`.
+
+**`weights_rerandomized` fails for `random_weight`:**
+Should not occur under harness-driven execution (`execute_run()` calls
+`POST /admin/edges/randomize` before each series in this condition
+automatically) — if it does, treat it as a bug and file it rather than
+re-randomizing by hand.

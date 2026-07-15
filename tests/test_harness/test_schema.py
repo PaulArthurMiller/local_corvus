@@ -204,3 +204,17 @@ def test_probe_set_version_defaults_to_v2():
 def test_probe_set_version_accepts_explicit_value():
     plan = RunPlan(**_base_kwargs(probe_set_version="v3"))
     assert plan.probe_set_version == "v3"
+
+
+# ---------------------------------------------------------------------------
+# M28 — seed_fixture_version
+# ---------------------------------------------------------------------------
+
+def test_seed_fixture_version_defaults_to_v2():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.seed_fixture_version == "v2"
+
+
+def test_seed_fixture_version_accepts_explicit_value():
+    plan = RunPlan(**_base_kwargs(seed_fixture_version="v3"))
+    assert plan.seed_fixture_version == "v3"

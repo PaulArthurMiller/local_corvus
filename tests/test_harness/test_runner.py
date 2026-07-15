@@ -41,6 +41,7 @@ class FakeBackendClient:
         self.chat_series_ids = []
         self.wipe_calls = []
         self.seed_calls = 0
+        self.seed_versions = []
         self.verdict_calls = []
         self.series_report_calls = []
         self.experiment_report_calls = []
@@ -60,6 +61,7 @@ class FakeBackendClient:
 
     def seed_graph(self, version="v2"):
         self.seed_calls += 1
+        self.seed_versions.append(version)
         if self.seed_error:
             raise self.seed_error
         return {"mu_count": 34, "edge_count": 32}
@@ -456,6 +458,18 @@ def test_wipe_is_called_before_seed_for_each_condition(tmp_path):
     # Dry-run scopes to exactly one condition ("learned", first in condition_order).
     assert client.wipe_calls == ["p1_dryrun_learned"]
     assert client.seed_calls == 1
+
+
+def test_seed_graph_uses_plan_seed_fixture_version(tmp_path):
+    """M28 — seed_graph(version=...) must reflect plan.seed_fixture_version,
+    not a hardcoded 'v2', so a plan can request seed_v3."""
+    plan = _plan(dry_run=True, dry_run_n=1, seed_fixture_version="v3")
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.seed_versions == ["v3"]
 
 
 def test_hard_stop_when_wipe_fails(tmp_path):

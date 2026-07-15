@@ -4768,6 +4768,198 @@ and notifications match the spec above; full suite green.
 
 ---
 
+## Seed Fixture v3 — Harness Wiring — Milestone 28
+
+**Source:** `seed_v3_mu_spec.md` §6 "Downstream impacts (hash cascade)" — the
+deferred work flagged since Milestone 25. `seed_v3.json.gz` is frozen (Paul's
+review + freeze already done; the file exists on disk, just not yet
+committed) but every harness-side consumer still hardcodes `v2`. This
+milestone is pure plumbing — make `v3` selectable end-to-end so the first
+full-length experiment can run against it. It deliberately does **not**
+decide anything about how that experiment is designed (which spoke gets
+trained, `weight_mode`, turn counts, probe ratio, budget) — those are
+`RunPlan`/`config.yaml` choices for whoever writes the actual experiment
+plan, out of scope here.
+
+### Why this exists
+
+`POST /admin/seed-graph` already accepts `{"version": "v3"}` with zero
+backend changes (confirmed during M25 planning). Everything hardcoded to
+`v2` is harness-side: `runner.py`'s `client.seed_graph(version="v2")` call,
+`run_experiment_harness.py`/`run_experiment_queue.py`'s module-level
+`SEED_FIXTURE_PATH` constant, and `prompt_gen.py`'s
+`from generate_seed_v2 import ...` + single-tier `CLUSTER_*_FP` fingerprint
+scan (v3 needs a two-tier scan — entry vocabulary leaking from *other*
+clusters, answer tokens leaking from *any* cluster including its own, per
+spec §5). Without this, a plan can request `seed_v3` at the backend layer
+but the harness's own bank-generation and leak-checking machinery is still
+silently validating against v2's vocabulary.
+
+### Scope
+
+1. **`schema.py`:** new `RunPlan.seed_fixture_version: str = "v2"` field —
+   same pattern as the existing `probe_set_version` (free string, resolved
+   at runtime, no enum validator; a bad value fails loudly when the fixture
+   file or generator module can't be found, not at schema-validation time).
+
+2. **`runner.py`:** `client.seed_graph(version=plan.seed_fixture_version)`
+   replaces the hardcoded `"v2"`.
+
+3. **`run_experiment_harness.py` / `run_experiment_queue.py`:** the
+   module-level `SEED_FIXTURE_PATH` constant goes away — fixture path is
+   resolved per plan (`seed_fixtures/seed_{plan.seed_fixture_version}.json.gz`).
+   `queue.py`'s `run_preflight()` currently takes one shared `fixture_path`
+   for every plan in the queue; since different plans in one queue could
+   reference different fixture versions, this becomes a per-plan resolution
+   inside `_resolve_bank_for_plan()` (takes a fixtures *directory*, not a
+   single file path).
+
+4. **`prompt_gen.py`:** version-dispatched fixture module loading
+   (`generate_seed_v2` vs `generate_seed_v3`) instead of one hardcoded
+   import. `fingerprint_scan()` becomes version-aware:
+   - v2 (unchanged behavior): leak = another cluster's `CLUSTER_*_FP` term.
+   - v3: leak = another cluster's entry vocabulary or family name (`ENTRY_VOCAB`/
+     `FAMILY_NAMES`), **or** any cluster's answer token including the
+     prompt's own target cluster (`ANSWER_TOKENS`) — an answer token in a
+     bulk prompt would let BM25 reach the gold spoke directly and destroy
+     the headroom the two-tier design exists to create.
+   - `MU_IDS`/hub-spoke text lookup dispatches by version too (v3's `MU_IDS`
+     reuses v2's UUIDs verbatim, so this is a low-risk swap, not a
+     renumbering).
+   - `seed_fixture_version` threaded from `plan.seed_fixture_version` into
+     each `PromptBankEntry` instead of the hardcoded module constant.
+   - **Designated trained spoke stays spoke1 per cluster** — matches
+     `read_cluster_content()`'s existing hardcoded `f"{letter}_spoke1"`
+     lookup exactly as-is; per spec §6 this must be exactly one spoke per
+     cluster (K2's `top_k=1` is winner-take-all), and the other six become
+     the negative-control spokes probe_set_v3.yaml measures.
+   - Add a v3-specific worked example to `_build_generation_prompt()`
+     nudging Sonnet toward the spec's criteria template
+     (`["names rule <ID>", "states <value token>"]`) — a two-item
+     binary-checkable checklist, judge-gradeable exactly like v2's.
+
+5. **`probes/probe_set_v3.yaml`:** one probe per spoke per cluster (28 total
+   — 7 spokes × 4 clusters), single new `phenomenon_type: "spoke_retrieval"`
+   (`ProbeDefinition.phenomenon_type` is an unvalidated string — no schema
+   change needed for a new value). Gold is the spoke MU. Prompt text
+   front-loads only that cluster's entry vocabulary (`ENTRY_VOCAB`), never
+   the probed spoke's own anchor word (placement rule 6) and never any
+   answer token. Probing all 7 spokes per cluster — not just the one that
+   ends up trained — is deliberate: per spec §6 the six untrained spokes
+   are negative controls (their probe trajectories should stay flat; that's
+   discriminative-learning evidence, not noise). Which spoke is "trained"
+   is decided later, by the actual RunPlan's prompt bank — the probe set
+   itself doesn't encode that.
+
+6. **`config.yaml`:** add `reporting.pass_rank_thresholds.spoke_retrieval: 4`
+   — same structural reasoning as the existing `cross_cluster_transfer: 4`
+   (K2 traversal position; a purely-BM25 hub hit can never reach a spoke at
+   rank 1). Zero report-generator code changes needed — confirmed by
+   reading `experiment_report.py`: thresholds are looked up purely by
+   `phenomenon_type` key, `reporting_cfg.get("pass_rank_thresholds", {})`.
+
+7. **Commit `seed_fixtures/seed_v3.json.gz`** (currently untracked, already
+   frozen) as part of this branch — every other piece of this milestone is
+   dead code without it.
+
+### Required verification (live, real data — not just unit tests)
+
+Every v3 probe must pass a baseline check on a freshly wiped-and-reseeded
+`v3` graph **before** the probe set is considered frozen: run each probe via
+the real retrieval path and confirm the gold spoke is not trivially
+surfaced pre-training (spec §6's explicit pre-freeze requirement). Record
+the actual observed `gold_mu_rank` distribution at baseline — the exact
+numeric behavior (None vs. structural rank 4 for whichever spoke wins the
+K2 tie-break among 7 equal-weight edges) isn't fully predictable from the
+spec alone and should be established empirically, the same way M25 recorded
+real generator output rather than assuming it. Also: generate a small v3
+prompt bank via `--generate-bank` against a real Sonnet call to confirm the
+two-tier fingerprint scan actually rejects an answer-token leak (mirrors
+M25's "sabotage proof" pattern — deliberately construct one leaking
+candidate prompt and confirm it's caught, not just that clean prompts pass).
+
+### Explicitly out of scope
+
+`weight_mode` (`sample` vs `mean`), which spoke is trained, probe/turn
+counts, `budget_cap` — all real-experiment-design decisions that belong in
+the actual `RunPlan` JSON + `config.yaml` values chosen when the first v3
+experiment is planned, not in this wiring milestone.
+
+**Estimate:** 1 session.
+
+### Completion
+
+Complete — all 7 scope items built exactly as planned: `RunPlan.seed_fixture_version`
+(`schema.py`), `runner.py`'s `seed_graph(version=plan.seed_fixture_version)`,
+per-plan fixture-path resolution replacing the hardcoded `SEED_FIXTURE_PATH`
+constant in both `run_experiment_harness.py` and `run_experiment_queue.py`/
+`queue.py` (`_resolve_bank_for_plan` now takes a `fixtures_dir` and resolves
+`seed_{version}.json.gz` per plan, with a field-identifying `QueuePreflightError`
+— not a raw `FileNotFoundError` — when a plan's `seed_fixture_version` has no
+fixture on disk), `prompt_gen.py`'s version-dispatched two-tier fingerprint
+scan (`fingerprint_scan(..., version="v3")`: other-cluster entry vocabulary/
+family-name leak, plus any-cluster answer-token leak including the prompt's
+own target cluster — the fresh tier v2 never had), `probes/probe_set_v3.yaml`
+(28 `spoke_retrieval` probes, one per spoke per cluster), and
+`config.yaml`'s `reporting.pass_rank_thresholds.spoke_retrieval: 4`.
+`seed_fixtures/seed_v3.json.gz` (frozen in a prior session, previously
+untracked) is now committed. 30 new tests, 727 total, no regressions.
+
+**Live verification (real Docker backend + the real frozen `seed_v3.json.gz`,
+Docker was up this session) — two real authoring bugs caught and fixed by
+actually running the probe battery, not just reading the spec:**
+
+1. **First draft: every `cluster_d` probe returned zero candidates.**
+   `retrieve()` only takes the first `hyperparameters.retrieval_keyword_count`
+   (5) non-stopword tokens of the query as BM25 keywords (`backend/memory/
+   retrieval.py`) — the first-draft templates put the 3 picked entry-vocab
+   words at the *end* of the sentence, past position 5, so they were never
+   even considered as keywords. Fixed by front-loading them as the first
+   3 tokens of every prompt. This is the same "front-load exact vocabulary"
+   lesson the 2026-07-05 pilot bank already recorded — now it's cost a
+   second discovery on the probe side too.
+2. **Second draft: `vs_a2`'s gold surfaced directly at baseline (`gold_mu_rank=2`),
+   not via traversal.** The first fix excluded only each spoke's documented
+   "anchor" word from its own probe's word pool — but content gists are
+   free-form prose (spec §4 says "to taste"), and several spokes' real
+   generated content uses *more* entry-vocab words than just their assigned
+   anchor (e.g. `a_spoke2`'s frozen content contains "field" despite its
+   anchor being "delimiter"). Fixed by excluding, per spoke, every
+   entry-vocab word that actually appears (whole-word) in that spoke's real
+   frozen content from `seed_v3.json.gz` — not just its anchor label.
+
+**Final baseline check (fresh wipe + `seed_v3` reseed, zero training turns,
+all 28 probes run for real against the live backend):** 26/28 show
+`gold_mu_rank=None` (gold not surfaced at all). The remaining 2
+(`vs_b1`→rank 4, `vs_d1`→rank 2) are not authoring defects — inspecting the
+full retrieval trace confirmed both reach their gold purely via K2 hub→spoke
+traversal (never a direct lexical hit), using only generic, per-spoke-content-
+excluded vocabulary. This is the "seven/eight-way tie" property itself: every
+hub starts with 7 spoke edges *and* 1 hub↔bridge edge, all identical
+`Beta(1,1)`/weight 0.5 — something always wins that tie deterministically
+under `weight_mode: mean`. For `cluster_a` and `cluster_c` the winner happens
+to be the bridge (`bridge_ab`/`bridge_cd`), so all 14 of their spoke probes
+read clean at baseline; for `cluster_b` and `cluster_d` the winner happens to
+be `b_spoke1`/`d_spoke1` specifically. `_classify_probe_outcome()` uses
+`rank <= threshold` (confirmed by reading `experiment_report.py`), so this
+doesn't corrupt the pass/fail mechanism — but it **is** a real, useful
+finding for whoever designs the first real experiment: **`b_spoke1` and
+`d_spoke1` already read as "passing" at session 0 under the frozen fixture's
+default tie-break — picking a different spoke as the intentionally-trained
+target in each of those two clusters will show a cleaner fail→pass
+transition than picking the one that already wins by default.** (This is
+purely a property of today's frozen fixture + `weight_mode: mean`'s
+deterministic tie-break; `weight_mode: sample` would make it non-deterministic
+per query instead — one more reason that decision belongs to the actual
+experiment plan, not this milestone.)
+
+**Not done (explicitly out of scope, unchanged):** the actual v3 prompt bank
+— generating it requires a real, cost-incurring Sonnet call, which Paul
+initiates himself (`--generate-bank`) rather than the harness/agent
+triggering paid API spend unprompted.
+
+---
+
 ## Status
 
 ```

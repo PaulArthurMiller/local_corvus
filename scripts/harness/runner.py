@@ -647,7 +647,7 @@ def execute_run(
             else:
                 try:
                     wipe_result = client.wipe_graph(experiment_id=experiment_id)
-                    seed_result = client.seed_graph(version="v2")
+                    seed_result = client.seed_graph(version=plan.seed_fixture_version)
                     stats = client.graph_stats()
                 except BackendConnectivityError as exc:
                     error_summary = f"connectivity during wipe/seed for condition {condition}: {exc}"

@@ -5120,16 +5120,49 @@ Milestone 29 (Per-Cluster Trained-Spoke Selection — see section above): a
 `RunPlan.trained_spokes` knob so each cluster's trained target is a
 documented, headroom-checked plan choice instead of a hardcoded spoke1.
 
-Milestone 29 (Per-Cluster Trained-Spoke Selection) is now CODE COMPLETE, in
-PR review (branch `milestone-29-trained-spoke-selection`) — `RunPlan.
-trained_spokes` added (schema.py, shape-validated), threaded through
-`read_cluster_content()`/`build_bank()`/`estimate_bank_cost_for_plan()`/
+Milestone 29 (Per-Cluster Trained-Spoke Selection) is MERGED to main (PR
+#49) — `RunPlan.trained_spokes` added (schema.py, shape-validated), threaded
+through `read_cluster_content()`/`build_bank()`/`estimate_bank_cost_for_plan()`/
 `generation_params_for_plan()` (prompt_gen.py), with a named `ValueError` on
 an unresolvable spoke key and `trained_spokes` now part of the hashed
 prompt-bank generation params. 30 new tests (760 total, all passing).
-Sequence before the real v3 bank generation: merge M29's PR -> confirm the
-M28 tie-break is stable across a second wipe+reseed+probe pass -> pick
-spokes with clean headroom in all 4 clusters -> generate the bank.
+
+**Protocol note (added 2026-07-15, applies going forward):** any baseline
+probe claim must record which `condition` (`static_weight`/`random_weight`/
+`learned`) and `weight_mode` (`mean`/`sample`) it was measured under.
+`RUN_CONDITION` silently defaults to `static_weight` when the env var is
+unset (`orchestrator.py`) — the exact same class of silent-default hazard
+the probe-integrity principle (`retrieve()` must run with
+`condition=RUN_CONDITION`, never a default) already guards against
+elsewhere. Two smoketest passes (M28's original + PR #50's re-confirmation)
+both silently measured `static_weight`/`mean` without setting the env var,
+and neither was labeled as such at the time. Record condition + weight_mode
+explicitly in the run log for every future baseline check.
+
+**2026-07-15 follow-up (PR #50, see `docs/m28_tiebreak_learned_mode_findings_2026-07-15.md`
+for full detail):** re-ran the 28-probe battery under `condition="learned"`.
+`weight_mode: mean` reproduces the `static_weight` result bit-for-bit (both
+paths compute `alpha/(alpha+beta)=0.5` from identical Beta(1,1) priors,
+independent of condition) — not a bug, confirms CC's prediction. `weight_mode:
+sample` (25 repeats, no reseed needed — probes are read-only) is a
+**qualitatively different regime**: every one of the 28 probes shows a noisy
+0–36% pass rate under Thompson sampling, not a clean deterministic split.
+Only `vs_a3`/`vs_a6` read 0/25, but a binomial check shows that's
+statistically indistinguishable from noise at N=25 if every spoke shares a
+true win probability near 1/8 (P(≥2 probes falsely read 0/25 by chance) ≈
+26%). **The M28/M29 premise — "some spokes deterministically already pass,
+avoid those" — is a `weight_mode: mean`-specific finding and does not carry
+over to `sample` in the form originally expected; there is no evident stable
+"clean-fail" subset to select `trained_spokes` from under `sample`.** The
+K2-traversal-only property (no lexical leakage) was re-confirmed under
+`learned`/`sample` via direct trace inspection (`hop_depth=1` on all 3
+spot-checked passes) — that part of M28's finding does generalize.
+**AWAITING PAUL:** decide how to proceed — a much larger-N sample-mode run
+to check for a real (not noise-floor) low-probability spoke, or accept the
+session-0 pass-rate noise as inherent to `weight_mode: sample` and handle it
+via RunPlan measurement methodology (e.g. averaging multiple session-0
+probe batteries) rather than `trained_spokes` pre-selection. `--generate-bank`
+should not run until this is resolved.
 Last updated: 2026-07-15
 ```
 

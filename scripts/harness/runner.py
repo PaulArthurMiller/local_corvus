@@ -283,6 +283,73 @@ def _generate_experiment_report(
     )
 
 
+def resolve_run_attempt(
+    plan: RunPlan,
+    config_hash: str,
+    run_base_dir: Path,
+    resume_input_fn: Callable[[str], str] = input,
+    print_fn: Callable[[str], None] = print,
+    bump_on_complete: bool = True,
+) -> tuple:
+    """
+    Locate the run_id/attempt this invocation should execute under, given
+    whatever checkpoint(s) already exist for this plan's identity.
+
+    Returns (run_id, attempt, resume, existing):
+      - run_id / attempt: the identity to use.
+      - resume: True if an incomplete checkpoint at this identity should be
+        resumed (skip already-done turns) rather than started fresh.
+      - existing: the CheckpointState found at (run_id, attempt), or None.
+
+    bump_on_complete controls what happens when the checkpoint at an
+    attempt is already "complete":
+      - True (default — execute_run()'s own behavior, interactive or not):
+        always advance to a fresh attempt. Re-invoking execute_run() for a
+        plan that already finished must never silently reuse that
+        identity — wipe_graph() never deletes analytics/feedback_events,
+        so a fresh checkpoint at the same identity would mix a new
+        trial's data with the old run's.
+      - False (M27 queue crash-reconciliation only): stop at the first
+        attempt's checkpoint even when it's already complete, so a caller
+        can recognize "the harness already finished — only the caller's
+        own bookkeeping write was lost to a crash" instead of triggering a
+        wasted fresh re-run.
+    """
+    attempt = 1
+    resume = False
+    existing: Optional[CheckpointState] = None
+    while True:
+        run_id = compute_run_id(plan, config_hash, attempt)
+        existing = load_checkpoint(run_id, run_base_dir)
+        if existing is None:
+            break
+        if existing.final_status != "complete":
+            print_fn(
+                f"Found incomplete checkpoint for run_id={run_id} with "
+                f"{len(existing.turns)} turn(s) already recorded "
+                f"(final_status={existing.final_status!r})."
+            )
+            answer = resume_input_fn("Resume this run? (y/n) [y]: ").strip().lower()
+            resume = answer in ("", "y", "yes")
+            if resume:
+                break
+            print_fn(
+                f"Starting fresh under a new run identity — run_id={run_id}'s data "
+                f"is preserved, not overwritten."
+            )
+            attempt += 1
+            continue
+        if not bump_on_complete:
+            resume = False
+            break
+        print_fn(
+            f"run_id={run_id} already completed — starting a new attempt under a "
+            f"distinct identity so its data is never mixed with the completed run."
+        )
+        attempt += 1
+    return run_id, attempt, resume, existing
+
+
 def scope_for_dry_run(plan: RunPlan, conditions: list, full_sequence: list) -> tuple:
     """
     Dry-run mode limits execution to dry_run_n turns, 1 series, and the
@@ -367,35 +434,9 @@ def execute_run(
     # its own run_id/experiment_id (compute_run_id / run_identity_for) —
     # attempt 1 is byte-for-byte the original convention, so this is fully
     # backward compatible for a plan that only ever runs once.
-    attempt = 1
-    resume = False
-    existing: Optional[CheckpointState] = None
-    while True:
-        run_id = compute_run_id(plan, config_hash, attempt)
-        existing = load_checkpoint(run_id, run_base_dir)
-        if existing is None:
-            break
-        if existing.final_status != "complete":
-            print_fn(
-                f"Found incomplete checkpoint for run_id={run_id} with "
-                f"{len(existing.turns)} turn(s) already recorded "
-                f"(final_status={existing.final_status!r})."
-            )
-            answer = resume_input_fn("Resume this run? (y/n) [y]: ").strip().lower()
-            resume = answer in ("", "y", "yes")
-            if resume:
-                break
-            print_fn(
-                f"Starting fresh under a new run identity — run_id={run_id}'s data "
-                f"is preserved, not overwritten."
-            )
-            attempt += 1
-            continue
-        print_fn(
-            f"run_id={run_id} already completed — starting a new attempt under a "
-            f"distinct identity so its data is never mixed with the completed run."
-        )
-        attempt += 1
+    run_id, attempt, resume, existing = resolve_run_attempt(
+        plan, config_hash, run_base_dir, resume_input_fn, print_fn,
+    )
 
     run_identity = run_identity_for(plan, attempt)
     print_fn(f"Plan loaded: plan_id={plan.plan_id!r} config_hash={config_hash} run_id={run_id!r}")

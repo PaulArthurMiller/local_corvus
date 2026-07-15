@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
+import harness.prompt_gen as prompt_gen_module
 from harness.prompt_bank import PromptBank, PromptBankEntry, save_bank
 from harness.prompt_gen import (
     GenerationAborted,
@@ -307,6 +308,39 @@ def test_read_cluster_content_loads_v3_fixture():
     assert "Kestrel" in content["cluster_a"]["hub_text"]
 
 
+def test_read_cluster_content_uses_requested_non_spoke1_trained_spoke():
+    default_content = read_cluster_content(FIXTURE_PATH)
+    override_content = read_cluster_content(
+        FIXTURE_PATH,
+        trained_spokes={
+            "cluster_a": "a_spoke2",
+            "cluster_b": "b_spoke1",
+            "cluster_c": "c_spoke1",
+            "cluster_d": "d_spoke1",
+        },
+    )
+    assert override_content["cluster_a"]["spoke_text"] != default_content["cluster_a"]["spoke_text"]
+    # untouched clusters keep spoke1's content
+    assert override_content["cluster_b"]["spoke_text"] == default_content["cluster_b"]["spoke_text"]
+
+
+def test_read_cluster_content_raises_on_unresolvable_spoke_key():
+    with pytest.raises(ValueError) as exc_info:
+        read_cluster_content(
+            FIXTURE_PATH,
+            trained_spokes={
+                "cluster_a": "a_spoke1",
+                "cluster_b": "b_spoke9",  # does not exist
+                "cluster_c": "c_spoke1",
+                "cluster_d": "d_spoke1",
+            },
+        )
+    message = str(exc_info.value)
+    assert "v2" in message
+    assert "cluster_b" in message
+    assert "b_spoke9" in message
+
+
 def test_compute_fixture_manifest_hash_is_deterministic():
     assert compute_fixture_manifest_hash(FIXTURE_PATH) == compute_fixture_manifest_hash(FIXTURE_PATH)
 
@@ -404,4 +438,67 @@ def test_estimate_bank_cost_for_plan_returns_cost_estimate_when_no_bank_exists(t
     assert estimate is not None
     assert estimate["estimated_cost_usd"] > 0
     assert estimate["total_prompts"] == 8  # 10 total * (1 - probe_ratio=0.2)
+
+
+# ---------------------------------------------------------------------------
+# M29 — per-cluster trained-spoke selection threaded through generation
+# ---------------------------------------------------------------------------
+
+_NON_DEFAULT_TRAINED_SPOKES = {
+    "cluster_a": "a_spoke2",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke1",
+}
+
+
+def test_generation_params_for_plan_includes_trained_spokes():
+    plan = _plan(total_prompts=10)
+    params = _generation_params(plan)
+    assert params["trained_spokes"] == plan.trained_spokes
+
+
+def test_plans_differing_only_in_trained_spokes_produce_different_content_hash():
+    plan_default = _plan(total_prompts=10)
+    plan_override = _plan(total_prompts=10, trained_spokes=_NON_DEFAULT_TRAINED_SPOKES)
+
+    fixture_hash = compute_fixture_manifest_hash(FIXTURE_PATH)
+    hash_default = compute_bank_hash(fixture_hash, _generation_params(plan_default))
+    hash_override = compute_bank_hash(fixture_hash, _generation_params(plan_override))
+
+    assert hash_default != hash_override
+
+
+def test_estimate_bank_cost_for_plan_threads_trained_spokes(tmp_path, monkeypatch):
+    plan = _plan(total_prompts=10, trained_spokes=_NON_DEFAULT_TRAINED_SPOKES)
+    calls = []
+    real_read_cluster_content = prompt_gen_module.read_cluster_content
+
+    def spy(fixture_path, version="v2", trained_spokes=None):
+        calls.append(trained_spokes)
+        return real_read_cluster_content(fixture_path, version, trained_spokes)
+
+    monkeypatch.setattr(prompt_gen_module, "read_cluster_content", spy)
+
+    estimate_bank_cost_for_plan(plan, FIXTURE_PATH, tmp_path)
+
+    assert calls == [_NON_DEFAULT_TRAINED_SPOKES]
+
+
+def test_build_bank_threads_trained_spokes(tmp_path, monkeypatch):
+    plan = _plan(total_prompts=10, trained_spokes=_NON_DEFAULT_TRAINED_SPOKES)
+    calls = []
+    real_read_cluster_content = prompt_gen_module.read_cluster_content
+
+    def spy(fixture_path, version="v2", trained_spokes=None):
+        calls.append(trained_spokes)
+        return real_read_cluster_content(fixture_path, version, trained_spokes)
+
+    monkeypatch.setattr(prompt_gen_module, "read_cluster_content", spy)
+    client = FakeAnthropicClient([])  # any call would raise AssertionError
+
+    with pytest.raises(GenerationAborted):
+        build_bank(plan, FIXTURE_PATH, tmp_path, client, input_fn=lambda *_a: "n", print_fn=lambda *_a, **_k: None)
+
+    assert calls == [_NON_DEFAULT_TRAINED_SPOKES]
     assert list(tmp_path.iterdir()) == []  # no files written, no API calls possible

@@ -218,3 +218,89 @@ def test_seed_fixture_version_defaults_to_v2():
 def test_seed_fixture_version_accepts_explicit_value():
     plan = RunPlan(**_base_kwargs(seed_fixture_version="v3"))
     assert plan.seed_fixture_version == "v3"
+
+
+# ---------------------------------------------------------------------------
+# M29 — trained_spokes
+# ---------------------------------------------------------------------------
+
+def test_trained_spokes_defaults_to_spoke1_per_cluster():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.trained_spokes == {
+        "cluster_a": "a_spoke1",
+        "cluster_b": "b_spoke1",
+        "cluster_c": "c_spoke1",
+        "cluster_d": "d_spoke1",
+    }
+
+
+def test_trained_spokes_accepts_explicit_override():
+    override = {
+        "cluster_a": "a_spoke3",
+        "cluster_b": "b_spoke5",
+        "cluster_c": "c_spoke1",
+        "cluster_d": "d_spoke7",
+    }
+    plan = RunPlan(**_base_kwargs(trained_spokes=override))
+    assert plan.trained_spokes == override
+
+
+def test_trained_spokes_missing_cluster_key_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(trained_spokes={
+            "cluster_a": "a_spoke1",
+            "cluster_b": "b_spoke1",
+            "cluster_c": "c_spoke1",
+            # cluster_d missing
+        }))
+    message = format_validation_error(exc_info.value)
+    assert "trained_spokes" in message
+
+
+def test_trained_spokes_extra_cluster_key_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(trained_spokes={
+            "cluster_a": "a_spoke1",
+            "cluster_b": "b_spoke1",
+            "cluster_c": "c_spoke1",
+            "cluster_d": "d_spoke1",
+            "cluster_e": "e_spoke1",
+        }))
+    message = format_validation_error(exc_info.value)
+    assert "trained_spokes" in message
+
+
+def test_trained_spokes_malformed_spoke_key_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(trained_spokes={
+            "cluster_a": "a_spoke1",
+            "cluster_b": "b_spoke9",  # out of range — spokes are 1-7
+            "cluster_c": "c_spoke1",
+            "cluster_d": "d_spoke1",
+        }))
+    message = format_validation_error(exc_info.value)
+    assert "trained_spokes" in message
+
+
+def test_trained_spokes_wrong_cluster_id_key_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(trained_spokes={
+            "cluster_a": "a_spoke1",
+            "cluster_b": "b_spoke1",
+            "cluster_c": "c_spoke1",
+            "cluster_e": "d_spoke1",  # not a real cluster id
+        }))
+    message = format_validation_error(exc_info.value)
+    assert "trained_spokes" in message
+
+
+def test_trained_spokes_malformed_value_shape_raises_field_identifying_error():
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(trained_spokes={
+            "cluster_a": "spoke1",  # missing the letter prefix
+            "cluster_b": "b_spoke1",
+            "cluster_c": "c_spoke1",
+            "cluster_d": "d_spoke1",
+        }))
+    message = format_validation_error(exc_info.value)
+    assert "trained_spokes" in message

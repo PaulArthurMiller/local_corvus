@@ -11,12 +11,21 @@ stack trace. format_validation_error() turns a pydantic ValidationError
 into a human-readable, field-by-field message for CLI output.
 """
 
+import re
 from typing import Optional, Union
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 VALID_CONDITIONS = ("learned", "static_weight", "random_weight")
 VALID_PROBE_PLACEMENTS = ("random", "end", "fixed_checkpoints")
+
+# M29 — mirrors prompt_gen.py's CLUSTERS. Duplicated rather than imported:
+# prompt_gen.py already imports RunPlan from this module, so importing back
+# would be circular. Only the 4 cluster ids are needed here for shape
+# validation of trained_spokes; the full spoke-content resolution stays in
+# prompt_gen.py.
+TRAINED_SPOKE_CLUSTERS = ("cluster_a", "cluster_b", "cluster_c", "cluster_d")
+_TRAINED_SPOKE_KEY_RE = re.compile(r"^[abcd]_spoke[1-7]$")
 
 # Error-handling policy keys understood by the harness in Phase 0.
 # "connectivity" covers backend-unreachable / DB-failure conditions.
@@ -147,6 +156,24 @@ class RunPlan(BaseModel):
     # loudly (missing fixture file / missing generator module) rather than
     # at schema-validation time.
     seed_fixture_version: str = Field(default="v2", min_length=1)
+    # M29 — which spoke in each cluster is the single trained target that
+    # build_bank()/read_cluster_content() draw "spoke_text" from. Defaults to
+    # spoke1 in every cluster, preserving the pre-M29 hardcoded behavior for
+    # any plan that doesn't set this field. Shape-validated only (keys are
+    # the 4 known cluster ids, values match "{letter}_spokeN") — schema.py
+    # cannot check a value resolves to real content in a given fixture
+    # version without importing prompt_gen.py, which would be circular
+    # (prompt_gen.py already imports RunPlan from here). A bad value fails
+    # loudly at runtime in read_cluster_content(), not at schema-validation
+    # time — same convention as seed_fixture_version above.
+    trained_spokes: dict[str, str] = Field(
+        default_factory=lambda: {
+            "cluster_a": "a_spoke1",
+            "cluster_b": "b_spoke1",
+            "cluster_c": "c_spoke1",
+            "cluster_d": "d_spoke1",
+        }
+    )
 
     difficulty: DifficultyConfig = Field(default_factory=DifficultyConfig)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
@@ -183,6 +210,24 @@ class RunPlan(BaseModel):
         if v not in VALID_PROBE_PLACEMENTS:
             raise ValueError(
                 f"probe_placement must be one of {VALID_PROBE_PLACEMENTS}, got {v!r}"
+            )
+        return v
+
+    @field_validator("trained_spokes")
+    @classmethod
+    def _validate_trained_spokes(cls, v: dict[str, str]) -> dict[str, str]:
+        missing = [c for c in TRAINED_SPOKE_CLUSTERS if c not in v]
+        extra = [c for c in v if c not in TRAINED_SPOKE_CLUSTERS]
+        if missing or extra:
+            raise ValueError(
+                f"trained_spokes keys must be exactly {list(TRAINED_SPOKE_CLUSTERS)}; "
+                f"missing {missing}, unexpected {extra}"
+            )
+        bad = {c: s for c, s in v.items() if not _TRAINED_SPOKE_KEY_RE.match(s)}
+        if bad:
+            raise ValueError(
+                f"trained_spokes has malformed spoke key(s) {bad}; "
+                f"each value must match '{{letter}}_spoke{{1-7}}', e.g. 'b_spoke3'"
             )
         return v
 

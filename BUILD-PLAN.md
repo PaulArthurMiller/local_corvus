@@ -4960,6 +4960,127 @@ triggering paid API spend unprompted.
 
 ---
 
+## Per-Cluster Trained-Spoke Selection — Milestone 29
+
+**Source:** M28's live baseline check (see M28's "Completion" section above)
+found that `b_spoke1`/`d_spoke1` already read as a baseline PASS
+(`gold_mu_rank` 4 and 2 respectively) under the frozen `seed_v3.json.gz` +
+`weight_mode: mean`'s deterministic 7-way tie-break — a property of the
+seed fixture itself, not a defect. `build_bank()`/`read_cluster_content()`
+hardcode `f"{letter}_spoke1"` as the trained target in every cluster (a v2
+convention carried into v3 unchanged), so half of a 4-cluster run
+(`cluster_b`, `cluster_d`) would start the "learned" condition from a graph
+with zero retrieval headroom on its trained spoke — no fail→pass transition
+is measurable there, which guts the run's headline observable. Hand-tuning
+those two clusters' edge weights to force a baseline fail was considered and
+rejected: the seven-identically-weighted-edges baseline *is* the control
+condition, and hand-nudging it to produce the desired result is exactly the
+kind of initialization confound the "learning did this, not the graph you
+built" claim can't survive. The correct fix is to make the trained spoke a
+per-cluster `RunPlan` choice, selected by baseline headroom (`gold_mu_rank`
+is `None` or clearly past the `spoke_retrieval` pass threshold) before any
+paid generation happens — headroom is a design requirement here, not a
+result being cherry-picked, as long as the same spokes are then used
+identically across all three conditions (already guaranteed for free: one
+`RunPlan` produces one prompt bank shared by `learned`/`static_weight`/
+`random_weight`).
+
+### Why this exists
+
+`read_cluster_content()`/`build_bank()` currently *decide* which spoke gets
+trained (always spoke1) instead of *reading* that decision from the plan.
+That's the same class of hardcoded-value problem `seed_fixture_version`
+(M28) and `probe_set_version` (M21) already solved for fixture/probe-battery
+selection — this milestone applies the identical pattern one level down, to
+spoke selection within a fixture. Scope is contained to `schema.py` and
+`prompt_gen.py`: `read_cluster_content()` is called only from
+`estimate_bank_cost_for_plan()` and `build_bank()`, both in `prompt_gen.py`
+— `runner.py`, `queue.py`, and both CLI entry points need no changes.
+
+### Scope
+
+1. **`schema.py`:** new `RunPlan.trained_spokes: dict[str, str]` field,
+   default `{"cluster_a": "a_spoke1", "cluster_b": "b_spoke1", "cluster_c":
+   "c_spoke1", "cluster_d": "d_spoke1"}` — preserves today's exact hardcoded
+   behavior for every plan that doesn't set this field (no silent behavior
+   change for existing v2 plans or anyone who hasn't read this milestone).
+   A `field_validator` checks *shape* only (keys are exactly the 4 known
+   cluster ids, values match `^[abcd]_spoke[1-7]$`) — it cannot check a
+   value actually exists in a given fixture version's `MU_IDS`, because
+   `schema.py` must not import `generate_seed_v2`/`generate_seed_v3` or
+   `prompt_gen.py` (prompt_gen.py already imports `RunPlan` from
+   `schema.py` — importing back would be circular). Semantic validation
+   (does this key resolve to real content) happens at runtime in
+   `read_cluster_content()`, same convention `seed_fixture_version`'s own
+   doc comment already states: "a bad value fails loudly... not at
+   schema-validation time."
+
+2. **`prompt_gen.py` — `read_cluster_content()`:** add a `trained_spokes:
+   dict[str, str]` parameter. Replace the hardcoded `mu_ids.get(f"{letter}
+   _spoke1")` with `mu_ids.get(trained_spokes[cluster_id])`. **Raise a
+   named `ValueError` (fixture version + cluster_id + requested spoke key)
+   if the resolved `spoke_id` is `None` or if no MU in `mus_in_cluster`
+   matches it** — today this fails silently via `next(..., "")`, returning
+   an empty `spoke_text` that would quietly generate spoke-less prompts.
+   This is a real gap the new per-cluster knob makes worth closing now: a
+   typo'd spoke key (`"b_spoke9"`, or a v2-only key against a v3 fixture)
+   must stop the run, not silently degrade prompt quality.
+
+3. **`prompt_gen.py` — `build_bank()` / `estimate_bank_cost_for_plan()`:**
+   thread `plan.trained_spokes` into both `read_cluster_content()` calls.
+   No other logic in either function changes — `targets[]` construction,
+   Sonnet generation, and validation are all spoke-agnostic already.
+
+4. **`prompt_gen.py` — `generation_params_for_plan()`:** add
+   `"trained_spokes": plan.trained_spokes` to the returned dict. **Required,
+   not cosmetic** — this dict feeds `compute_bank_hash()`, and the fixture
+   file's bytes (already hashed separately via `fixture_manifest_hash`)
+   don't change when the trained-spoke choice changes. Without this, two
+   plans differing only in `trained_spokes` would produce the same
+   `content_hash` and silently reuse each other's bank — `build_bank()`'s
+   own hash-reuse short-circuit (`if existing_path.exists(): return
+   load_bank(...)`) would serve a `b_spoke3`-trained bank to a plan that
+   asked for `b_spoke5`, with no error.
+
+5. **`docs/experiment_protocol.md`:** add `trained_spokes` to the RunPlan
+   field reference table once Paul's in-flight rewrite of that file is
+   committed (out of scope for this milestone's build — do not edit a file
+   with uncommitted changes from another session).
+
+### Required verification
+
+Unit tests only for this milestone — no live Docker/Sonnet run needed,
+since this is a pure config-threading change with no new retrieval or
+generation behavior:
+- `test_schema.py`: default value, explicit override, shape-validator
+  rejects a missing/extra cluster key and a malformed spoke key
+  (`"b_spoke9"`, `"cluster_e"`, `"spoke1"`).
+- `test_prompt_gen.py`: `read_cluster_content()` returns the requested
+  spoke's content when `trained_spokes` picks a non-spoke1 key; raises the
+  named `ValueError` on an unresolvable key; `build_bank()`/
+  `estimate_bank_cost_for_plan()` thread the plan's `trained_spokes`
+  through unchanged; `generation_params_for_plan()` includes
+  `trained_spokes` in its output; two plans differing only in
+  `trained_spokes` produce different `content_hash` values.
+
+### Explicitly out of scope
+
+Picking the actual spoke values for the first real v3 `RunPlan` — that
+requires re-running the 28-probe baseline check once or twice to confirm
+the M28 tie-break is stable across a fresh wipe+reseed (not just the one
+snapshot M28 recorded), and ideally under each condition's actual retrieval
+mode (`mean` vs whatever `weight_mode` the plan ends up choosing for
+`learned`), not just `weight_mode: mean`. That's real-experiment-design
+work for whoever writes the plan, done *after* this knob exists and *before*
+`--generate-bank` is run against it. Also out of scope: `weight_mode`
+itself, turn/probe counts, `budget_cap` — unchanged from M28's own
+out-of-scope list.
+
+**Estimate:** well under 1 session — a contained, mechanical config-threading
+change plus tests, no new runtime behavior to verify live.
+
+---
+
 ## Status
 
 ```
@@ -4991,7 +5112,25 @@ correctly continued to plan 2 rather than halting (plan 2 itself also hit the
 tail end of Ollama's restart and failed independently — resolved cleanly on a
 second invocation, which also exercised resume-of-a-fully-aborted-checkpoint);
 (d) full suite green throughout. AWAITING PAUL: PR review.
-Last updated: 2026-07-11
+
+Milestone 28 (Seed Fixture v3 — Harness Wiring) is MERGED to main (PR #48).
+Its live baseline check found `b_spoke1`/`d_spoke1` already read as a
+baseline PASS under the frozen fixture's default tie-break, motivating
+Milestone 29 (Per-Cluster Trained-Spoke Selection — see section above): a
+`RunPlan.trained_spokes` knob so each cluster's trained target is a
+documented, headroom-checked plan choice instead of a hardcoded spoke1.
+
+Milestone 29 (Per-Cluster Trained-Spoke Selection) is now CODE COMPLETE, in
+PR review (branch `milestone-29-trained-spoke-selection`) — `RunPlan.
+trained_spokes` added (schema.py, shape-validated), threaded through
+`read_cluster_content()`/`build_bank()`/`estimate_bank_cost_for_plan()`/
+`generation_params_for_plan()` (prompt_gen.py), with a named `ValueError` on
+an unresolvable spoke key and `trained_spokes` now part of the hashed
+prompt-bank generation params. 30 new tests (760 total, all passing).
+Sequence before the real v3 bank generation: merge M29's PR -> confirm the
+M28 tie-break is stable across a second wipe+reseed+probe pass -> pick
+spokes with clean headroom in all 4 clusters -> generate the bank.
+Last updated: 2026-07-15
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.

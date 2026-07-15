@@ -65,6 +65,16 @@ _MU_IDS_BY_VERSION = {
     "v3": generate_seed_v3.MU_IDS,
 }
 
+# M29 — mirrors RunPlan.trained_spokes' own default (schema.py), so any
+# direct caller of read_cluster_content() that doesn't pass trained_spokes
+# keeps today's exact hardcoded spoke1-per-cluster behavior.
+_DEFAULT_TRAINED_SPOKES = {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke1",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke1",
+}
+
 CHARS_PER_TOKEN_ESTIMATE = 4
 
 CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
@@ -122,7 +132,11 @@ def fixture_path_for_version(version: str, fixtures_dir: Path) -> Path:
     return Path(fixtures_dir) / f"seed_{version}.json.gz"
 
 
-def read_cluster_content(fixture_path: Path, version: str = "v2") -> dict:
+def read_cluster_content(
+    fixture_path: Path,
+    version: str = "v2",
+    trained_spokes: dict = None,
+) -> dict:
     """
     Read a seed_{version}.json.gz fixture and group MU content by cluster
     (bridges excluded — bulk-turn content is drawn from the 4 real clusters
@@ -133,12 +147,21 @@ def read_cluster_content(fixture_path: Path, version: str = "v2") -> dict:
 
     Returns {cluster_id: {"full_content": str, "hub_text": str, "spoke_text": str}}.
 
-    "spoke_text" is always spoke1 of the cluster — the designated single
-    trained target per cluster (M28 / spec §6: K2's top_k=1 is
-    winner-take-all, so training more than one spoke per cluster makes
-    their edges fight over the same slot).
+    "spoke_text" is the cluster's designated single trained target — the one
+    spoke `trained_spokes[cluster_id]` names (M28 / spec §6: K2's top_k=1 is
+    winner-take-all, so training more than one spoke per cluster makes their
+    edges fight over the same slot). Defaults to spoke1 in every cluster,
+    matching RunPlan.trained_spokes' own default, if the caller doesn't pass
+    one (M29).
+
+    Raises ValueError, naming the fixture version, cluster_id, and requested
+    spoke key, if a trained_spokes entry doesn't resolve to a real MU in this
+    fixture — a typo'd or wrong-version spoke key must stop the run, not
+    silently produce an empty spoke_text.
     """
     mu_ids = _MU_IDS_BY_VERSION[version]
+    if trained_spokes is None:
+        trained_spokes = _DEFAULT_TRAINED_SPOKES
 
     with gzip.open(fixture_path, "rt", encoding="utf-8") as f:
         data = json.load(f)
@@ -155,13 +178,19 @@ def read_cluster_content(fixture_path: Path, version: str = "v2") -> dict:
         mus_in_cluster = by_cluster.get(cluster_id, [])
         letter = _cluster_letter(cluster_id)
         hub_id = mu_ids.get(f"{letter}_hub")
-        spoke_id = mu_ids.get(f"{letter}_spoke1")
+        spoke_key = trained_spokes[cluster_id]
+        spoke_id = mu_ids.get(spoke_key)
         hub_text = next((m["raw_content"] for m in mus_in_cluster if m["mu_id"] == hub_id), "")
-        spoke_text = next((m["raw_content"] for m in mus_in_cluster if m["mu_id"] == spoke_id), "")
+        spoke_match = next((m["raw_content"] for m in mus_in_cluster if m["mu_id"] == spoke_id), None)
+        if spoke_id is None or spoke_match is None:
+            raise ValueError(
+                f"trained_spokes[{cluster_id!r}] = {spoke_key!r} does not resolve to a "
+                f"real MU in seed fixture version {version!r} ({fixture_path})"
+            )
         result[cluster_id] = {
             "full_content": "\n".join(m["raw_content"] for m in mus_in_cluster),
             "hub_text": hub_text,
-            "spoke_text": spoke_text,
+            "spoke_text": spoke_match,
         }
     return result
 
@@ -520,6 +549,12 @@ def generation_params_for_plan(plan: RunPlan) -> dict:
         "hop_distance_levels": plan.difficulty.hop_distance_levels,
         "subjects": plan.conceptual_fields.subjects,
         "model": plan.prompt_gen.model,
+        # M29 — required, not cosmetic: two plans differing only in which
+        # spoke is trained must not collide on content_hash and silently
+        # reuse each other's bank (fixture_manifest_hash alone can't catch
+        # this — the fixture bytes don't change when the trained-spoke
+        # choice does).
+        "trained_spokes": plan.trained_spokes,
     }
 
 
@@ -545,7 +580,9 @@ def estimate_bank_cost_for_plan(
     if bank_path_for_hash(content_hash, output_dir).exists():
         return None
 
-    cluster_content = read_cluster_content(fixture_path, plan.seed_fixture_version)
+    cluster_content = read_cluster_content(
+        fixture_path, plan.seed_fixture_version, plan.trained_spokes
+    )
     n_bulk = round((plan.total_prompts or 0) * (1 - plan.probe_ratio))
     counts = distribute_counts(n_bulk)
     price_in, price_out = load_pricing()
@@ -575,7 +612,9 @@ def build_bank(
         print_fn(f"Prompt bank already exists for hash={content_hash} — reusing (no API calls).")
         return load_bank(existing_path)
 
-    cluster_content = read_cluster_content(fixture_path, plan.seed_fixture_version)
+    cluster_content = read_cluster_content(
+        fixture_path, plan.seed_fixture_version, plan.trained_spokes
+    )
     n_bulk = round((plan.total_prompts or 0) * (1 - plan.probe_ratio))
     counts = distribute_counts(n_bulk)
 

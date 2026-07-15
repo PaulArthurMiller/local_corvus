@@ -10,12 +10,12 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
-from harness.checkpoint import STATUS_OK, STATUS_SOFT_CONTINUE, load_checkpoint
+from harness.checkpoint import CheckpointState, STATUS_OK, STATUS_SOFT_CONTINUE, load_checkpoint, save_checkpoint
 from harness.client import BackendConnectivityError, BackendTurnError, ReportGenerationError
 from harness.docker_lifecycle import DockerLifecycleError
-from harness.manifest import load_manifest
+from harness.manifest import compute_config_hash, compute_run_id, load_manifest
 from harness.prompt_bank import PromptBank, PromptBankEntry, save_bank
-from harness.runner import execute_run
+from harness.runner import execute_run, resolve_run_attempt
 from harness.schema import RunPlan
 
 
@@ -1121,3 +1121,80 @@ def test_budget_cap_within_estimate_allows_judge_calls_to_proceed(tmp_path):
 
     assert outcome.status == "complete"
     assert len(client.verdict_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# resolve_run_attempt() — M27 extraction, bump_on_complete param
+# ---------------------------------------------------------------------------
+
+def test_resolve_run_attempt_bump_on_complete_true_advances_past_finished_checkpoint(tmp_path):
+    """Default (execute_run()'s own) behavior: a checkpoint already at
+    final_status='complete' is never reused — always advance to a fresh
+    attempt so a new trial's data is never mixed with the old run's."""
+    plan = _plan(dry_run=True, dry_run_n=1, conditions=["learned"])
+    config_hash = compute_config_hash(plan)
+    run_id_1 = compute_run_id(plan, config_hash, attempt=1)
+    save_checkpoint(CheckpointState(run_id=run_id_1, final_status="complete"), tmp_path)
+
+    run_id, attempt, resume, existing = resolve_run_attempt(
+        plan, config_hash, tmp_path, resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+    )
+
+    assert attempt == 2
+    assert existing is None
+    assert resume is False
+    assert run_id != run_id_1
+
+
+def test_resolve_run_attempt_bump_on_complete_false_stops_at_finished_checkpoint(tmp_path):
+    """M27 queue crash-reconciliation mode: stop at attempt 1 even though
+    it's already complete, so the caller can recognize the harness already
+    finished instead of triggering a wasted fresh re-run."""
+    plan = _plan(dry_run=True, dry_run_n=1, conditions=["learned"])
+    config_hash = compute_config_hash(plan)
+    run_id_1 = compute_run_id(plan, config_hash, attempt=1)
+    save_checkpoint(CheckpointState(run_id=run_id_1, final_status="complete"), tmp_path)
+
+    run_id, attempt, resume, existing = resolve_run_attempt(
+        plan, config_hash, tmp_path, resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+        bump_on_complete=False,
+    )
+
+    assert attempt == 1
+    assert run_id == run_id_1
+    assert existing is not None
+    assert existing.final_status == "complete"
+    assert resume is False
+
+
+def test_resolve_run_attempt_incomplete_checkpoint_resumes_regardless_of_bump_on_complete(tmp_path):
+    """An incomplete checkpoint (final_status != 'complete') behaves
+    identically whether bump_on_complete is True or False — that flag only
+    changes what happens once a checkpoint IS complete."""
+    plan = _plan(dry_run=True, dry_run_n=1, conditions=["learned"])
+    config_hash = compute_config_hash(plan)
+    run_id_1 = compute_run_id(plan, config_hash, attempt=1)
+    save_checkpoint(CheckpointState(run_id=run_id_1, final_status=None), tmp_path)
+
+    run_id, attempt, resume, existing = resolve_run_attempt(
+        plan, config_hash, tmp_path, resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+        bump_on_complete=False,
+    )
+
+    assert attempt == 1
+    assert run_id == run_id_1
+    assert resume is True
+    assert existing is not None
+
+
+def test_resolve_run_attempt_no_existing_checkpoint_starts_fresh(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, conditions=["learned"])
+    config_hash = compute_config_hash(plan)
+
+    run_id, attempt, resume, existing = resolve_run_attempt(
+        plan, config_hash, tmp_path, resume_input_fn=lambda _p: "y", print_fn=_noop_print,
+    )
+
+    assert attempt == 1
+    assert resume is False
+    assert existing is None

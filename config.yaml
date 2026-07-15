@@ -251,6 +251,11 @@ reporting:
     ranking_improvement: 1
     cross_cluster_transfer: 4    # K1(3) + K2(1); bridge structurally occupies K2 slot
     process_rule_adherence: 1
+    # M28 / seed_v3: golds are spoke MUs reached only via hub->spoke K2
+    # traversal (BM25 alone reaches the hub, never the spoke — that's the
+    # two-tier vocabulary design's whole point), so a spoke gold structurally
+    # occupies the K2 slot at rank 4, same reasoning as cross_cluster_transfer.
+    spoke_retrieval: 4
 
   # §6.1: edge weight above this value is flagged as a saturation risk —
   # further positive feedback will have diminishing effect (approaching 1.0).

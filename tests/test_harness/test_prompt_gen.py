@@ -28,13 +28,16 @@ from harness.prompt_gen import (
     estimate_bank_cost_for_plan,
     estimate_generation_cost,
     fingerprint_scan,
+    fixture_path_for_version,
     generate_cluster_prompts_safely,
     load_pricing,
     read_cluster_content,
 )
 from harness.schema import RunPlan
 
-FIXTURE_PATH = Path(__file__).parent.parent.parent / "seed_fixtures" / "seed_v2.json.gz"
+FIXTURES_DIR = Path(__file__).parent.parent.parent / "seed_fixtures"
+FIXTURE_PATH = FIXTURES_DIR / "seed_v2.json.gz"
+FIXTURE_PATH_V3 = FIXTURES_DIR / "seed_v3.json.gz"
 
 
 class FakeTextBlock:
@@ -111,6 +114,60 @@ def test_fingerprint_scan_uses_whole_word_matching():
 
 
 # ---------------------------------------------------------------------------
+# M28 — v3 two-tier fingerprint scan (spec §5)
+# ---------------------------------------------------------------------------
+
+def test_v3_fingerprint_scan_passes_own_cluster_entry_vocab():
+    # cluster_a's own entry vocabulary is free — that's how BM25 is meant
+    # to reach the hub.
+    text = "What format and structure applies to the output?"
+    assert fingerprint_scan(text, "cluster_a", version="v3") == []
+
+
+def test_v3_fingerprint_scan_fails_other_cluster_entry_vocab():
+    text = "What does the schema say about column validation?"
+    leaked = fingerprint_scan(text, "cluster_a", version="v3")
+    assert "schema" in leaked
+    assert "column" in leaked
+
+
+def test_v3_fingerprint_scan_fails_other_cluster_family_name():
+    text = "Ask Marrow about this."
+    assert "Marrow" in fingerprint_scan(text, "cluster_a", version="v3")
+
+
+def test_v3_fingerprint_scan_fails_answer_token_from_own_cluster():
+    # An answer token from the prompt's OWN target cluster is still a leak
+    # in v3 — it would let BM25 reach the gold spoke directly.
+    text = "What is TILDEBAR used for in this format?"
+    assert "TILDEBAR" in fingerprint_scan(text, "cluster_a", version="v3")
+
+
+def test_v3_fingerprint_scan_fails_answer_token_from_any_cluster():
+    # WAIVERKEY belongs to cluster_c; leaking it into a cluster_a prompt
+    # must still be caught (any-cluster rule, not just other-cluster).
+    text = "Does this relate to a WAIVERKEY somehow?"
+    assert "WAIVERKEY" in fingerprint_scan(text, "cluster_a", version="v3")
+
+
+def test_v3_fingerprint_scan_multiword_answer_token():
+    text = "Is this about spine order in the file?"
+    assert "spine order" in fingerprint_scan(text, "cluster_b", version="v3")
+
+
+# ---------------------------------------------------------------------------
+# M28 — fixture_path_for_version
+# ---------------------------------------------------------------------------
+
+def test_fixture_path_for_version_v2():
+    assert fixture_path_for_version("v2", FIXTURES_DIR) == FIXTURE_PATH
+
+
+def test_fixture_path_for_version_v3():
+    assert fixture_path_for_version("v3", FIXTURES_DIR) == FIXTURE_PATH_V3
+
+
+# ---------------------------------------------------------------------------
 # Deterministic N-distribution
 # ---------------------------------------------------------------------------
 
@@ -164,6 +221,31 @@ def test_generate_cluster_prompts_safely_falls_back_after_malformed_json_retry()
     assert items == [{}]
 
 
+def test_finalize_entry_v3_excludes_answer_token_leak():
+    # _finalize_entry must thread seed_fixture_version into _validate_one's
+    # fingerprint_scan call — an item whose prompt_text leaks an answer
+    # token must be excluded without ever reaching the Sonnet coherence
+    # call (fingerprint_scan short-circuits it), so no Sonnet response is
+    # queued at all — an unexpected call would raise AssertionError.
+    client = FakeAnthropicClient([
+        FakeResponse('[{"prompt_text": "clean retry", "criteria": ["c1"]}]'),  # regeneration attempt
+        FakeResponse("YES"),  # coherence check on the clean retry
+    ])
+    content = {"full_content": "cluster a content", "hub_text": "hub text", "spoke_text": "spoke text"}
+    target = {"hop_distance": 0, "target_text": "hub text"}
+    leaking_item = {"prompt_text": "What is TILDEBAR for?", "criteria": ["c1"]}
+
+    entry = _finalize_entry(
+        client, "claude-sonnet-5", "cluster_a", content, target, leaking_item,
+        "v3", "claude-sonnet-5@2026-07-11", max_retries=1, prompt_id="cluster_a_0000",
+        print_fn=lambda *_a, **_k: None,
+    )
+
+    assert entry.validated is True  # the retry succeeded cleanly
+    assert entry.prompt_text == "clean retry"
+    assert entry.seed_fixture_version == "v3"
+
+
 def test_malformed_json_triggers_one_retry_then_exclusion():
     # After generate_cluster_prompts_safely gives up, _finalize_entry must
     # exclude the prompt (never crash) with a specific reason.
@@ -213,8 +295,44 @@ def test_read_cluster_content_loads_all_four_clusters():
         assert c["full_content"]
 
 
+def test_read_cluster_content_loads_v3_fixture():
+    content = read_cluster_content(FIXTURE_PATH_V3, version="v3")
+    assert set(content.keys()) == {"cluster_a", "cluster_b", "cluster_c", "cluster_d"}
+    for cluster_id, c in content.items():
+        assert c["hub_text"], f"{cluster_id} hub_text should not be empty"
+        assert c["spoke_text"], f"{cluster_id} spoke_text should not be empty"
+        assert c["full_content"]
+    # cluster_a's hub asserts the Kestrel family name and every K-rule ID —
+    # a real content spot check, not just "non-empty".
+    assert "Kestrel" in content["cluster_a"]["hub_text"]
+
+
 def test_compute_fixture_manifest_hash_is_deterministic():
     assert compute_fixture_manifest_hash(FIXTURE_PATH) == compute_fixture_manifest_hash(FIXTURE_PATH)
+
+
+def test_compute_fixture_manifest_hash_differs_between_v2_and_v3():
+    assert compute_fixture_manifest_hash(FIXTURE_PATH) != compute_fixture_manifest_hash(FIXTURE_PATH_V3)
+
+
+# ---------------------------------------------------------------------------
+# M28 — version dispatch reaches the actual Sonnet generation prompt
+# ---------------------------------------------------------------------------
+
+def test_generate_cluster_prompts_safely_uses_v3_worked_example():
+    client = FakeAnthropicClient([
+        FakeResponse('[{"prompt_text": "q", "criteria": ["names rule K-1"], "hop_distance": 0}]'),
+    ])
+    content = {"full_content": "cluster a content", "hub_text": "hub text", "spoke_text": "spoke text"}
+    targets = [{"hop_distance": 0, "target_text": "hub text"}]
+
+    generate_cluster_prompts_safely(
+        client, "claude-sonnet-5", "cluster_a", content, targets, None,
+        print_fn=lambda *_a, **_k: None, version="v3",
+    )
+
+    sent_prompt = client.messages.calls[0]["messages"][0]["content"]
+    assert "names rule M-2" in sent_prompt  # the v3 worked example, not v2's
 
 
 # ---------------------------------------------------------------------------

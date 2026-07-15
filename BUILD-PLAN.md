@@ -4887,6 +4887,77 @@ experiment is planned, not in this wiring milestone.
 
 **Estimate:** 1 session.
 
+### Completion
+
+Complete — all 7 scope items built exactly as planned: `RunPlan.seed_fixture_version`
+(`schema.py`), `runner.py`'s `seed_graph(version=plan.seed_fixture_version)`,
+per-plan fixture-path resolution replacing the hardcoded `SEED_FIXTURE_PATH`
+constant in both `run_experiment_harness.py` and `run_experiment_queue.py`/
+`queue.py` (`_resolve_bank_for_plan` now takes a `fixtures_dir` and resolves
+`seed_{version}.json.gz` per plan, with a field-identifying `QueuePreflightError`
+— not a raw `FileNotFoundError` — when a plan's `seed_fixture_version` has no
+fixture on disk), `prompt_gen.py`'s version-dispatched two-tier fingerprint
+scan (`fingerprint_scan(..., version="v3")`: other-cluster entry vocabulary/
+family-name leak, plus any-cluster answer-token leak including the prompt's
+own target cluster — the fresh tier v2 never had), `probes/probe_set_v3.yaml`
+(28 `spoke_retrieval` probes, one per spoke per cluster), and
+`config.yaml`'s `reporting.pass_rank_thresholds.spoke_retrieval: 4`.
+`seed_fixtures/seed_v3.json.gz` (frozen in a prior session, previously
+untracked) is now committed. 30 new tests, 727 total, no regressions.
+
+**Live verification (real Docker backend + the real frozen `seed_v3.json.gz`,
+Docker was up this session) — two real authoring bugs caught and fixed by
+actually running the probe battery, not just reading the spec:**
+
+1. **First draft: every `cluster_d` probe returned zero candidates.**
+   `retrieve()` only takes the first `hyperparameters.retrieval_keyword_count`
+   (5) non-stopword tokens of the query as BM25 keywords (`backend/memory/
+   retrieval.py`) — the first-draft templates put the 3 picked entry-vocab
+   words at the *end* of the sentence, past position 5, so they were never
+   even considered as keywords. Fixed by front-loading them as the first
+   3 tokens of every prompt. This is the same "front-load exact vocabulary"
+   lesson the 2026-07-05 pilot bank already recorded — now it's cost a
+   second discovery on the probe side too.
+2. **Second draft: `vs_a2`'s gold surfaced directly at baseline (`gold_mu_rank=2`),
+   not via traversal.** The first fix excluded only each spoke's documented
+   "anchor" word from its own probe's word pool — but content gists are
+   free-form prose (spec §4 says "to taste"), and several spokes' real
+   generated content uses *more* entry-vocab words than just their assigned
+   anchor (e.g. `a_spoke2`'s frozen content contains "field" despite its
+   anchor being "delimiter"). Fixed by excluding, per spoke, every
+   entry-vocab word that actually appears (whole-word) in that spoke's real
+   frozen content from `seed_v3.json.gz` — not just its anchor label.
+
+**Final baseline check (fresh wipe + `seed_v3` reseed, zero training turns,
+all 28 probes run for real against the live backend):** 26/28 show
+`gold_mu_rank=None` (gold not surfaced at all). The remaining 2
+(`vs_b1`→rank 4, `vs_d1`→rank 2) are not authoring defects — inspecting the
+full retrieval trace confirmed both reach their gold purely via K2 hub→spoke
+traversal (never a direct lexical hit), using only generic, per-spoke-content-
+excluded vocabulary. This is the "seven/eight-way tie" property itself: every
+hub starts with 7 spoke edges *and* 1 hub↔bridge edge, all identical
+`Beta(1,1)`/weight 0.5 — something always wins that tie deterministically
+under `weight_mode: mean`. For `cluster_a` and `cluster_c` the winner happens
+to be the bridge (`bridge_ab`/`bridge_cd`), so all 14 of their spoke probes
+read clean at baseline; for `cluster_b` and `cluster_d` the winner happens to
+be `b_spoke1`/`d_spoke1` specifically. `_classify_probe_outcome()` uses
+`rank <= threshold` (confirmed by reading `experiment_report.py`), so this
+doesn't corrupt the pass/fail mechanism — but it **is** a real, useful
+finding for whoever designs the first real experiment: **`b_spoke1` and
+`d_spoke1` already read as "passing" at session 0 under the frozen fixture's
+default tie-break — picking a different spoke as the intentionally-trained
+target in each of those two clusters will show a cleaner fail→pass
+transition than picking the one that already wins by default.** (This is
+purely a property of today's frozen fixture + `weight_mode: mean`'s
+deterministic tie-break; `weight_mode: sample` would make it non-deterministic
+per query instead — one more reason that decision belongs to the actual
+experiment plan, not this milestone.)
+
+**Not done (explicitly out of scope, unchanged):** the actual v3 prompt bank
+— generating it requires a real, cost-incurring Sonnet call, which Paul
+initiates himself (`--generate-bank`) rather than the harness/agent
+triggering paid API spend unprompted.
+
 ---
 
 ## Status

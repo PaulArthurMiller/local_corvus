@@ -1,0 +1,278 @@
+version: "v3"
+
+# seed_v3 probe battery (Milestone 28). Golds are spoke MUs, one probe per
+# spoke per cluster (28 total: 7 spokes x 4 clusters) — see seed_v3_mu_spec.md
+# section 6 and BUILD-PLAN.md Milestone 28.
+#
+# Prompt text FRONT-LOADS that cluster's entry vocabulary (ENTRY_VOCAB in
+# generate_seed_v3.py) — the 3 picked words open every prompt, not just
+# appear somewhere in it, because retrieve() only takes the first
+# hyperparameters.retrieval_keyword_count (5) non-stopword tokens of the
+# query as BM25 keywords (backend/memory/retrieval.py); vocabulary placed
+# later in the sentence is silently invisible to retrieval.
+#
+# The 3 picked words are chosen from that cluster's entry vocabulary MINUS
+# every word that actually appears (whole-word) in the gold spoke's own
+# FROZEN content — not just its documented "anchor" word. Content gists were
+# free-form prose (spec §4 "to taste") and several spokes ended up using
+# more than their one assigned anchor word; picking against real content,
+# not the anchor label, is what actually guarantees BM25 can't find the gold
+# spoke directly via lexical match — confirmed live during M28 verification,
+# where an anchor-only exclusion still let one probe (a_spoke2, via "field")
+# surface its own gold directly (rank 2) instead of via K2 traversal only.
+#
+# No rule ID, answer token, or family name ever appears in a prompt.
+#
+# Retrieval to a specific spoke is query-independent by design: BM25 always
+# lands on the same cluster hub for a given cluster (K1), and K2's top_k=1 is
+# winner-take-all across all 7 reciprocal hub<->spoke edges, so it always
+# resolves to whichever single spoke currently holds the strongest edge —
+# never the probe's wording. Probing every spoke, not just the one that ends
+# up trained, is deliberate: the six untrained spokes are negative controls
+# whose gold_mu_rank should stay flat (None, never surfaced) across sessions —
+# that flatness is itself the discriminative-learning evidence (spec section 6).
+#
+# Pass criterion: same structural reasoning as v2's cross_cluster_transfer — a
+# spoke gold is reachable only via one K2 hop from the hub, so at best it
+# occupies rank 4 (K1(3) + K2(1)), never ranks 1-3. See config.yaml
+# reporting.pass_rank_thresholds.spoke_retrieval: 4.
+#
+# Live baseline check (M28, real backend + real seed_v3 fixture, fresh wipe
+# + reseed, zero training turns): all 28 probes' gold_mu_rank in {None, 4}
+# — every gold either not surfaced at all, or reached exactly at the
+# structural K2 position, never via a direct lexical hit. See BUILD-PLAN.md
+# Milestone 28 for the recorded distribution.
+
+phenomenon_map:
+  spoke_retrieval:
+    description: "Gold spoke MU reachable only via hub->spoke K2 traversal; only the currently-trained spoke per cluster should surface, the other six are negative controls"
+
+probes:
+  # cluster_a (Kestrel) — 7 spoke_retrieval probes, one per spoke.
+  - probe_id: "vs_a1"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "format, structure, delimiter — according to the rules for how files are written, what applies here?"
+    gold_mu_ids:
+      - "a0000002-aaaa-4aaa-8aaa-000000000002"   # a_spoke1 / rule K-1 (words present in own content excluded: ['field', 'output'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_a2"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "header, quoting, encoding — according to the rules for how files are written, what applies here?"
+    gold_mu_ids:
+      - "a0000003-aaaa-4aaa-8aaa-000000000003"   # a_spoke2 / rule K-2 (words present in own content excluded: ['delimiter', 'field'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_a3"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "padding, format, structure — according to the rules for how files are written, what applies here?"
+    gold_mu_ids:
+      - "a0000004-aaaa-4aaa-8aaa-000000000004"   # a_spoke3 / rule K-3 (words present in own content excluded: ['header', 'output'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_a4"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "field, delimiter, header — according to the rules for how files are written, what applies here?"
+    gold_mu_ids:
+      - "a0000005-aaaa-4aaa-8aaa-000000000005"   # a_spoke4 / rule K-4 (words present in own content excluded: ['output', 'padding'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_a5"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "format, structure, field — according to the rules for how files are written, what applies here?"
+    gold_mu_ids:
+      - "a0000006-aaaa-4aaa-8aaa-000000000006"   # a_spoke5 / rule K-5 (words present in own content excluded: ['delimiter', 'output', 'quoting'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_a6"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "structure, field, delimiter — according to the rules for how files are written, what applies here?"
+    gold_mu_ids:
+      - "a0000007-aaaa-4aaa-8aaa-000000000007"   # a_spoke6 / rule K-6 (words present in own content excluded: ['encoding', 'output'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_a7"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "quoting, encoding, padding — according to the rules for how files are written, what applies here?"
+    gold_mu_ids:
+      - "a0000008-aaaa-4aaa-8aaa-000000000008"   # a_spoke7 / rule K-7 (words present in own content excluded: ['field', 'output'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  # cluster_b (Marrow) — 7 spoke_retrieval probes, one per spoke.
+  - probe_id: "vs_b1"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "shape, validation, nesting — according to the standard for how tables are defined, what applies here?"
+    gold_mu_ids:
+      - "b0000002-bbbb-4bbb-8bbb-000000000002"   # b_spoke1 / rule M-1 (words present in own content excluded: ['column', 'data', 'schema', 'type'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_b2"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "version, range, shape — according to the standard for how tables are defined, what applies here?"
+    gold_mu_ids:
+      - "b0000003-bbbb-4bbb-8bbb-000000000003"   # b_spoke2 / rule M-2 (words present in own content excluded: ['column', 'data', 'schema', 'validation'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_b3"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "range, data, shape — according to the standard for how tables are defined, what applies here?"
+    gold_mu_ids:
+      - "b0000004-bbbb-4bbb-8bbb-000000000004"   # b_spoke3 / rule M-3 (words present in own content excluded: ['nesting', 'schema'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_b4"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "column, nesting, range — according to the standard for how tables are defined, what applies here?"
+    gold_mu_ids:
+      - "b0000005-bbbb-4bbb-8bbb-000000000005"   # b_spoke4 / rule M-4 (words present in own content excluded: ['data', 'schema', 'version'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_b5"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "shape, type, column — according to the standard for how tables are defined, what applies here?"
+    gold_mu_ids:
+      - "b0000006-bbbb-4bbb-8bbb-000000000006"   # b_spoke5 / rule M-5 (words present in own content excluded: ['data', 'schema', 'validation'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_b6"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "column, nesting, version — according to the standard for how tables are defined, what applies here?"
+    gold_mu_ids:
+      - "b0000007-bbbb-4bbb-8bbb-000000000007"   # b_spoke6 / rule M-6 (words present in own content excluded: ['data', 'range', 'schema'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_b7"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "nesting, version, shape — according to the standard for how tables are defined, what applies here?"
+    gold_mu_ids:
+      - "b0000008-bbbb-4bbb-8bbb-000000000008"   # b_spoke7 / rule M-7 (words present in own content excluded: ['data', 'range', 'schema', 'type', 'validation'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  # cluster_c (Vessel) — 7 spoke_retrieval probes, one per spoke.
+  - probe_id: "vs_c1"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "rule, enforce, comply — according to the code that governs how these matters are handled, what applies here?"
+    gold_mu_ids:
+      - "c0000002-cccc-4ccc-8ccc-000000000002"   # c_spoke1 / rule V-1 (words present in own content excluded: ['constraint', 'severity', 'violation'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_c2"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "exemption, escalation, deadline — according to the code that governs how these matters are handled, what applies here?"
+    gold_mu_ids:
+      - "c0000003-cccc-4ccc-8ccc-000000000003"   # c_spoke2 / rule V-2 (words present in own content excluded: ['constraint', 'rule', 'violation'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_c3"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "violation, enforce, comply — according to the code that governs how these matters are handled, what applies here?"
+    gold_mu_ids:
+      - "c0000004-cccc-4ccc-8ccc-000000000004"   # c_spoke3 / rule V-3 (words present in own content excluded: ['constraint', 'exemption', 'rule'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_c4"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "severity, exemption, deadline — according to the code that governs how these matters are handled, what applies here?"
+    gold_mu_ids:
+      - "c0000005-cccc-4ccc-8ccc-000000000005"   # c_spoke4 / rule V-4 (words present in own content excluded: ['constraint', 'escalation', 'rule'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_c5"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "severity, exemption, escalation — according to the code that governs how these matters are handled, what applies here?"
+    gold_mu_ids:
+      - "c0000006-cccc-4ccc-8ccc-000000000006"   # c_spoke5 / rule V-5 (words present in own content excluded: ['constraint', 'deadline', 'rule', 'violation'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_c6"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "enforce, comply, severity — according to the code that governs how these matters are handled, what applies here?"
+    gold_mu_ids:
+      - "c0000007-cccc-4ccc-8ccc-000000000007"   # c_spoke6 / rule V-6 (words present in own content excluded: ['constraint', 'rule'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_c7"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "enforce, comply, severity — according to the code that governs how these matters are handled, what applies here?"
+    gold_mu_ids:
+      - "c0000008-cccc-4ccc-8ccc-000000000008"   # c_spoke7 / rule V-7 (words present in own content excluded: ['constraint', 'rule', 'violation'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  # cluster_d (Ledger) — 7 spoke_retrieval probes, one per spoke.
+  - probe_id: "vs_d1"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "source, cite, origin — according to the process for how claims are recorded, what applies here?"
+    gold_mu_ids:
+      - "d0000002-dddd-4ddd-8ddd-000000000002"   # d_spoke1 / rule L-1 (words present in own content excluded: ['provenance'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_d2"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "attribution, timestamp, custody — according to the process for how claims are recorded, what applies here?"
+    gold_mu_ids:
+      - "d0000003-dddd-4ddd-8ddd-000000000003"   # d_spoke2 / rule L-2 (words present in own content excluded: ['origin', 'provenance'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_d3"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "retraction, source, cite — according to the process for how claims are recorded, what applies here?"
+    gold_mu_ids:
+      - "d0000004-dddd-4ddd-8ddd-000000000004"   # d_spoke3 / rule L-3 (words present in own content excluded: ['custody', 'provenance'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_d4"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "traceable, attribution, timestamp — according to the process for how claims are recorded, what applies here?"
+    gold_mu_ids:
+      - "d0000005-dddd-4ddd-8ddd-000000000005"   # d_spoke4 / rule L-4 (words present in own content excluded: ['provenance', 'source'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_d5"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "custody, retraction, source — according to the process for how claims are recorded, what applies here?"
+    gold_mu_ids:
+      - "d0000006-dddd-4ddd-8ddd-000000000006"   # d_spoke5 / rule L-5 (words present in own content excluded: ['provenance', 'timestamp'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_d6"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "cite, origin, traceable — according to the process for how claims are recorded, what applies here?"
+    gold_mu_ids:
+      - "d0000007-dddd-4ddd-8ddd-000000000007"   # d_spoke6 / rule L-6 (words present in own content excluded: ['attribution', 'provenance'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+
+  - probe_id: "vs_d7"
+    phenomenon_type: "spoke_retrieval"
+    prompt_text: "attribution, timestamp, custody — according to the process for how claims are recorded, what applies here?"
+    gold_mu_ids:
+      - "d0000008-dddd-4ddd-8ddd-000000000008"   # d_spoke7 / rule L-7 (words present in own content excluded: ['provenance', 'retraction'])
+    is_bridge_probe: false
+    bridge_pair_id: null
+

@@ -29,7 +29,12 @@ from harness.client import BackendConnectivityError
 from harness.cost import JUDGE_COST_PER_CALL_USD, estimate_prerun_cost
 from harness.manifest import compute_config_hash, compute_run_id, now_iso
 from harness.prompt_bank import bank_path_for_hash, compute_bank_hash, load_bank
-from harness.prompt_gen import compute_fixture_manifest_hash, estimate_bank_cost_for_plan, generation_params_for_plan
+from harness.prompt_gen import (
+    compute_fixture_manifest_hash,
+    estimate_bank_cost_for_plan,
+    fixture_path_for_version,
+    generation_params_for_plan,
+)
 from harness.schema import NotificationConfig, RunPlan, format_validation_error
 from harness.turn_resolution import TURN_TYPE_PROBE, resolve_turn_sequence
 
@@ -262,11 +267,18 @@ def _load_and_validate_plan(resolved_path: Path, plan_path_label: str) -> RunPla
 
 
 def _resolve_bank_for_plan(
-    plan: RunPlan, plan_path_label: str, fixture_path: Path, prompt_banks_dir: Path,
+    plan: RunPlan, plan_path_label: str, fixtures_dir: Path, prompt_banks_dir: Path,
 ) -> None:
     """Step 4 — mutates plan.prompt_bank_path in place when a cached bank is
     found. Raises QueuePreflightError for every case that would otherwise
-    need fresh Sonnet generation or run placeholder turns unattended."""
+    need fresh Sonnet generation or run placeholder turns unattended.
+
+    fixtures_dir is a directory, not a single file — different plans in the
+    same queue can request different seed_fixture_version values (M28), so
+    the actual fixture path is resolved per plan, not shared across the
+    whole queue."""
+    fixture_path = fixture_path_for_version(plan.seed_fixture_version, fixtures_dir)
+
     if plan.prompt_bank_path:
         try:
             load_bank(Path(plan.prompt_bank_path))
@@ -278,6 +290,12 @@ def _resolve_bank_for_plan(
         return
 
     if plan.conceptual_fields.subjects == "auto":
+        if not fixture_path.exists():
+            raise QueuePreflightError(
+                f"plan {plan_path_label!r}: seed_fixture_version "
+                f"{plan.seed_fixture_version!r} has no fixture at {fixture_path} — "
+                f"freeze it or fix seed_fixture_version before this plan can run"
+            )
         estimate = estimate_bank_cost_for_plan(plan, fixture_path, prompt_banks_dir)
         if estimate is not None:
             raise QueuePreflightError(
@@ -303,7 +321,7 @@ def run_preflight(
     queue_file_path: Path,
     client,
     judge_client,
-    fixture_path: Path,
+    fixtures_dir: Path,
     prompt_banks_dir: Path,
     project_root: Path,
     print_fn: Callable[[str], None] = print,
@@ -357,7 +375,7 @@ def run_preflight(
 
     # --- Step 4: per-plan effective-bank resolution ---
     for item in loaded:
-        _resolve_bank_for_plan(item["plan"], item["entry"].plan_path, fixture_path, prompt_banks_dir)
+        _resolve_bank_for_plan(item["plan"], item["entry"].plan_path, fixtures_dir, prompt_banks_dir)
 
     # --- Step 5: backend health + judge model availability ---
     try:

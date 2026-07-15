@@ -34,7 +34,7 @@ from harness.cost import BudgetExceededError, check_prerun_budget, estimate_prer
 from harness.elicit import elicit_plan, offer_to_save_plan  # noqa: E402
 from harness.judge import DEFAULT_JUDGE_HOST, OllamaJudgeClient  # noqa: E402
 from harness.prompt_bank import bank_path_for_hash  # noqa: E402
-from harness.prompt_gen import estimate_bank_cost_for_plan, generate_bank_for_plan  # noqa: E402
+from harness.prompt_gen import estimate_bank_cost_for_plan, fixture_path_for_version, generate_bank_for_plan  # noqa: E402
 from harness.runner import execute_run, load_probe_battery, scope_for_dry_run  # noqa: E402
 from harness.schema import RunPlan, format_validation_error  # noqa: E402
 from harness.turn_resolution import TURN_TYPE_PROBE, resolve_turn_sequence  # noqa: E402
@@ -48,7 +48,7 @@ DEFAULT_BACKEND_URL = "http://localhost:8000"
 RUNS_DIR = PROJECT_ROOT / "harness_runs"
 PROBES_DIR = PROJECT_ROOT / "probes"
 PROMPT_BANKS_DIR = PROJECT_ROOT / "prompt_banks"
-SEED_FIXTURE_PATH = PROJECT_ROOT / "seed_fixtures" / "seed_v2.json.gz"
+SEED_FIXTURES_DIR = PROJECT_ROOT / "seed_fixtures"
 
 
 def load_plan_from_file(plan_path: Path) -> RunPlan:
@@ -108,8 +108,12 @@ def main() -> None:
     if args.dry_run:
         plan.dry_run = True
 
+    # M28 — fixture path is resolved per plan (seed_fixture_version), not a
+    # single hardcoded constant, so a plan can request seed_v2 or seed_v3.
+    fixture_path = fixture_path_for_version(plan.seed_fixture_version, SEED_FIXTURES_DIR)
+
     if args.generate_bank:
-        generate_bank_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
+        generate_bank_for_plan(plan, fixture_path, PROMPT_BANKS_DIR)
         return
 
     # M19 Phase 3 — pre-run budget gate, before ANY Sonnet spend (bank
@@ -120,7 +124,7 @@ def main() -> None:
     needs_bank_generation = not plan.prompt_bank_path and plan.conceptual_fields.subjects == "auto"
     bank_generation_cost_usd = 0.0
     if needs_bank_generation:
-        bank_estimate = estimate_bank_cost_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
+        bank_estimate = estimate_bank_cost_for_plan(plan, fixture_path, PROMPT_BANKS_DIR)
         bank_generation_cost_usd = (bank_estimate or {}).get("estimated_cost_usd", 0.0)
 
     full_sequence = resolve_turn_sequence(plan)
@@ -142,7 +146,7 @@ def main() -> None:
     # generate one now (cost-confirmation gate happens inside prompt_gen.py)
     # before any wipe/seed call.
     if needs_bank_generation:
-        bank = generate_bank_for_plan(plan, SEED_FIXTURE_PATH, PROMPT_BANKS_DIR)
+        bank = generate_bank_for_plan(plan, fixture_path, PROMPT_BANKS_DIR)
         plan.prompt_bank_path = str(bank_path_for_hash(bank.content_hash, PROMPT_BANKS_DIR))
 
     # M21 — the probe battery drives real POST /admin/run-probe measurements;

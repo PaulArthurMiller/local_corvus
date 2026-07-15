@@ -46,7 +46,7 @@ DEFAULT_BACKEND_URL = "http://localhost:8000"
 QUEUES_RUNS_DIR = PROJECT_ROOT / "harness_runs" / "queues"
 PROBES_DIR = PROJECT_ROOT / "probes"
 PROMPT_BANKS_DIR = PROJECT_ROOT / "prompt_banks"
-SEED_FIXTURE_PATH = PROJECT_ROOT / "seed_fixtures" / "seed_v2.json.gz"
+SEED_FIXTURES_DIR = PROJECT_ROOT / "seed_fixtures"
 
 
 def main() -> None:
@@ -79,7 +79,7 @@ def main() -> None:
         try:
             resolution = run_preflight(
                 queue_file, Path(args.queue), client, judge_client,
-                SEED_FIXTURE_PATH, PROMPT_BANKS_DIR, PROJECT_ROOT,
+                SEED_FIXTURES_DIR, PROMPT_BANKS_DIR, PROJECT_ROOT,
             )
         except QueuePreflightError as exc:
             print(f"ERROR: preflight failed: {exc}")

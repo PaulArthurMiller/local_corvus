@@ -43,7 +43,9 @@ from harness.queue import (
 from harness.schema import RunPlan
 from pydantic import ValidationError
 
-REAL_FIXTURE_PATH = Path(__file__).parent.parent.parent / "seed_fixtures" / "seed_v2.json.gz"
+FIXTURES_DIR = Path(__file__).parent.parent.parent / "seed_fixtures"
+REAL_FIXTURE_PATH = FIXTURES_DIR / "seed_v2.json.gz"
+REAL_FIXTURE_PATH_V3 = FIXTURES_DIR / "seed_v3.json.gz"
 
 
 # ---------------------------------------------------------------------------
@@ -113,13 +115,14 @@ def _write_queue(path: Path, plans: list, **overrides):
 
 
 def _preflight_deps(tmp_path):
-    """Standard (client, judge_client, fixture_path, prompt_banks_dir,
+    """Standard (client, judge_client, fixtures_dir, prompt_banks_dir,
     project_root) tuple for run_preflight() calls that don't need to
-    exercise the real fixture-reading path."""
+    exercise the real fixture-reading path (e.g. an explicit prompt_bank_path
+    plan never dereferences fixtures_dir)."""
     return (
         FakeBackendClient(),
         FakeJudgeClient(),
-        tmp_path / "unused_fixture.json.gz",
+        tmp_path / "unused_fixtures_dir",
         tmp_path / "prompt_banks",
         tmp_path,
     )
@@ -279,8 +282,50 @@ def test_preflight_cached_hash_resolution_stamps_the_plan(tmp_path):
     queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
     qf = load_queue_file(queue_path)
     client, judge, _, _, root = _preflight_deps(tmp_path)
-    resolution = run_preflight(qf, queue_path, client, judge, REAL_FIXTURE_PATH, banks_dir, root)
+    resolution = run_preflight(qf, queue_path, client, judge, FIXTURES_DIR, banks_dir, root)
     assert resolution.manifest.plans[0].bank_path == str(bank_path_for_hash(content_hash, banks_dir))
+
+
+def test_preflight_cached_hash_resolution_stamps_the_plan_for_v3(tmp_path):
+    """M28 — a plan requesting seed_fixture_version='v3' resolves its
+    cached bank against the v3 fixture's own hash, not v2's."""
+    plan_path = _write_plan(
+        tmp_path / "planA.json",
+        conceptual_fields={"count": 4, "subjects": "auto"},
+        seed_fixture_version="v3",
+    )
+    plan = RunPlan(**json.loads(plan_path.read_text()))
+
+    banks_dir = tmp_path / "prompt_banks"
+    banks_dir.mkdir()
+    fixture_hash = compute_fixture_manifest_hash(REAL_FIXTURE_PATH_V3)
+    params = generation_params_for_plan(plan)
+    content_hash = compute_bank_hash(fixture_hash, params)
+    existing_bank = PromptBank(entries=[], generation_params=params, content_hash=content_hash)
+    save_bank(existing_bank, banks_dir)
+
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client, judge, _, _, root = _preflight_deps(tmp_path)
+    resolution = run_preflight(qf, queue_path, client, judge, FIXTURES_DIR, banks_dir, root)
+    assert resolution.manifest.plans[0].bank_path == str(bank_path_for_hash(content_hash, banks_dir))
+
+
+def test_preflight_unknown_seed_fixture_version_hard_stops(tmp_path):
+    """A plan requesting a seed_fixture_version with no fixture file on
+    disk must hard-stop with a plan-identifying message, not a raw
+    FileNotFoundError traceback."""
+    _write_plan(
+        tmp_path / "planA.json",
+        conceptual_fields={"count": 4, "subjects": "auto"},
+        seed_fixture_version="v99",
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    banks_dir = tmp_path / "empty_banks"
+    client, judge = FakeBackendClient(), FakeJudgeClient()
+    with pytest.raises(QueuePreflightError, match="seed_fixture_version 'v99'"):
+        run_preflight(qf, queue_path, client, judge, FIXTURES_DIR, banks_dir, tmp_path)
 
 
 def test_preflight_fresh_bank_generation_needed_hard_stops(tmp_path):
@@ -293,7 +338,7 @@ def test_preflight_fresh_bank_generation_needed_hard_stops(tmp_path):
     banks_dir = tmp_path / "empty_banks"
     client, judge = FakeBackendClient(), FakeJudgeClient()
     with pytest.raises(QueuePreflightError, match="--generate-bank"):
-        run_preflight(qf, queue_path, client, judge, REAL_FIXTURE_PATH, banks_dir, tmp_path)
+        run_preflight(qf, queue_path, client, judge, FIXTURES_DIR, banks_dir, tmp_path)
 
 
 def test_preflight_neither_bank_nor_auto_hard_stops(tmp_path):

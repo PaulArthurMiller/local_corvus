@@ -140,6 +140,13 @@ class RunPlan(BaseModel):
     # Passed through to POST /admin/run-probe; the backend loads its own copy
     # of the same file (both sides read probes/ — one mounted, one local).
     probe_set_version: str = Field(default="v2", min_length=1)
+    # M28 — which seed_fixtures/seed_{version}.json.gz the harness wipes+seeds
+    # per condition (POST /admin/seed-graph) and reads cluster content from
+    # for prompt-bank generation. Same convention as probe_set_version: a
+    # free string resolved at runtime, not an enum — a bad value fails
+    # loudly (missing fixture file / missing generator module) rather than
+    # at schema-validation time.
+    seed_fixture_version: str = Field(default="v2", min_length=1)
 
     difficulty: DifficultyConfig = Field(default_factory=DifficultyConfig)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)

@@ -1,14 +1,17 @@
 """
-Prompt bank generator (M19 Phase 1) — the only file that talks to the
-Anthropic API. Runs once per (seed fixture version + generation params),
-host-side, from a terminal — never from inside Docker, never during an
-experiment turn. Once a bank file exists, runs are fully offline again.
+Prompt bank generator (M19 Phase 1; M28 adds seed_fixture_version dispatch)
+— the only file that talks to the Anthropic API. Runs once per (seed
+fixture version + generation params), host-side, from a terminal — never
+from inside Docker, never during an experiment turn. Once a bank file
+exists, runs are fully offline again.
 
-Reads cluster MU content directly from seed_fixtures/seed_v2.json.gz (mirrors
-the verify_seed_v2.py convention — no backend dependency, works with Docker
-down). Imports the fingerprint vocabulary from generate_seed_v2.py so the
-lexical-distinctness check has exactly one source of truth for "what counts
-as cluster C vocabulary".
+Reads cluster MU content directly from seed_fixtures/seed_{version}.json.gz
+(mirrors the verify_seed_v{version}.py convention — no backend dependency,
+works with Docker down). Imports the fingerprint vocabulary from
+generate_seed_v2.py / generate_seed_v3.py so the lexical-distinctness check
+has exactly one source of truth for "what counts as cluster C vocabulary"
+per fixture version — v2's is a single-tier flat fingerprint list; v3's is
+two-tier (entry vocabulary + answer tokens, see fingerprint_scan()).
 """
 
 import gzip
@@ -24,7 +27,8 @@ from typing import Callable, Optional
 import anthropic
 import yaml
 
-from generate_seed_v2 import CLUSTER_A_FP, CLUSTER_B_FP, CLUSTER_C_FP, CLUSTER_D_FP, MU_IDS
+import generate_seed_v2
+import generate_seed_v3
 from harness.prompt_bank import PromptBank, PromptBankEntry, bank_path_for_hash, compute_bank_hash, load_bank, save_bank
 from harness.schema import RunPlan
 
@@ -32,14 +36,35 @@ logger = logging.getLogger("harness.prompt_gen")
 
 CLUSTERS = ["cluster_a", "cluster_b", "cluster_c", "cluster_d"]
 
-FINGERPRINT_BY_CLUSTER = {
-    "cluster_a": CLUSTER_A_FP,
-    "cluster_b": CLUSTER_B_FP,
-    "cluster_c": CLUSTER_C_FP,
-    "cluster_d": CLUSTER_D_FP,
+# v2: single-tier flat fingerprint list per cluster — a prompt aimed at
+# cluster_id must not leak any OTHER cluster's fingerprint terms.
+_V2_FINGERPRINT_BY_CLUSTER = {
+    "cluster_a": generate_seed_v2.CLUSTER_A_FP,
+    "cluster_b": generate_seed_v2.CLUSTER_B_FP,
+    "cluster_c": generate_seed_v2.CLUSTER_C_FP,
+    "cluster_d": generate_seed_v2.CLUSTER_D_FP,
 }
 
-SEED_FIXTURE_VERSION = "v2"
+# v3: two-tier (spec §5). Entry vocabulary + family name leak the same way
+# v2's fingerprint does (OTHER cluster only — a prompt's own cluster's entry
+# vocabulary is free, that's how BM25 is meant to reach the hub). Answer
+# tokens are a second, stricter tier: forbidden from ANY cluster's prompts,
+# including the prompt's own target cluster — an answer token in a bulk
+# prompt would let BM25 reach the gold spoke directly and destroy the
+# headroom the two-tier design exists to create.
+_V3_ENTRY_VOCAB_BY_CLUSTER = {
+    c: list(generate_seed_v3.ENTRY_VOCAB[c]) + [generate_seed_v3.FAMILY_NAMES[c]]
+    for c in CLUSTERS
+}
+_V3_ALL_ANSWER_TOKENS = [
+    tok for toks in generate_seed_v3.ANSWER_TOKENS.values() for tok in toks
+]
+
+_MU_IDS_BY_VERSION = {
+    "v2": generate_seed_v2.MU_IDS,
+    "v3": generate_seed_v3.MU_IDS,
+}
+
 CHARS_PER_TOKEN_ESTIMATE = 4
 
 CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
@@ -90,13 +115,31 @@ def _cluster_letter(cluster_id: str) -> str:
     return cluster_id.rsplit("_", 1)[-1]
 
 
-def read_cluster_content(fixture_path: Path) -> dict:
+def fixture_path_for_version(version: str, fixtures_dir: Path) -> Path:
+    """seed_fixtures/seed_{version}.json.gz — the one place this naming
+    convention is spelled out, so callers (run_experiment_harness.py,
+    run_experiment_queue.py, queue.py) never hardcode it themselves."""
+    return Path(fixtures_dir) / f"seed_{version}.json.gz"
+
+
+def read_cluster_content(fixture_path: Path, version: str = "v2") -> dict:
     """
-    Read seed_v2.json.gz and group MU content by cluster (bridges excluded —
-    Phase 1 draws bulk-turn content from the 4 real clusters only).
+    Read a seed_{version}.json.gz fixture and group MU content by cluster
+    (bridges excluded — bulk-turn content is drawn from the 4 real clusters
+    only). `version` selects which generator module's MU_IDS resolves
+    hub/spoke UUIDs to content — v3 reuses v2's UUIDs verbatim (see
+    generate_seed_v3.py's MU_IDS comment), so this only matters if that
+    ever changes.
 
     Returns {cluster_id: {"full_content": str, "hub_text": str, "spoke_text": str}}.
+
+    "spoke_text" is always spoke1 of the cluster — the designated single
+    trained target per cluster (M28 / spec §6: K2's top_k=1 is
+    winner-take-all, so training more than one spoke per cluster makes
+    their edges fight over the same slot).
     """
+    mu_ids = _MU_IDS_BY_VERSION[version]
+
     with gzip.open(fixture_path, "rt", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -111,8 +154,8 @@ def read_cluster_content(fixture_path: Path) -> dict:
     for cluster_id in CLUSTERS:
         mus_in_cluster = by_cluster.get(cluster_id, [])
         letter = _cluster_letter(cluster_id)
-        hub_id = MU_IDS.get(f"{letter}_hub")
-        spoke_id = MU_IDS.get(f"{letter}_spoke1")
+        hub_id = mu_ids.get(f"{letter}_hub")
+        spoke_id = mu_ids.get(f"{letter}_spoke1")
         hub_text = next((m["raw_content"] for m in mus_in_cluster if m["mu_id"] == hub_id), "")
         spoke_text = next((m["raw_content"] for m in mus_in_cluster if m["mu_id"] == spoke_id), "")
         result[cluster_id] = {
@@ -163,21 +206,44 @@ def distribute_hop_levels(n: int, levels: list) -> list:
 # Lexical-distinctness check (pure Python, no API call)
 # ---------------------------------------------------------------------------
 
-def fingerprint_scan(prompt_text: str, cluster_id: str) -> list:
+def _leak_whole_word(lower_prompt: str, terms) -> list:
+    return [t for t in terms if re.search(r"\b" + re.escape(t.lower()) + r"\b", lower_prompt)]
+
+
+def fingerprint_scan(prompt_text: str, cluster_id: str, version: str = "v2") -> list:
     """
-    Return fingerprint terms from OTHER clusters found in prompt_text
-    (whole-word, case-insensitive). A prompt aimed at cluster_id must not
-    leak another cluster's vocabulary — see the module docstring in
-    generate_seed_v2.py for why this corrupts the hop-distance measurement.
+    Return leaked vocabulary terms found in prompt_text (whole-word/whole-
+    phrase, case-insensitive). What counts as a leak is version-dependent:
+
+    v2 (unchanged since M19 Phase 1): a prompt aimed at cluster_id must not
+    contain any OTHER cluster's fingerprint terms — see generate_seed_v2.py's
+    module docstring for why this corrupts the hop-distance measurement.
+
+    v3 (spec §5, two-tier): same OTHER-cluster rule, but applied to entry
+    vocabulary + family name instead of a flat fingerprint list — a
+    cluster's OWN entry vocabulary is free (that's how BM25 is meant to
+    reach the hub). Answer tokens are stricter: forbidden from EVERY
+    cluster's prompts, including the prompt's own target cluster — an
+    answer token appearing in a bulk prompt would let BM25 find the gold
+    spoke directly, destroying the headroom only graph traversal should
+    provide.
     """
     lower = prompt_text.lower()
+
+    if version == "v3":
+        leaked = []
+        for other_cluster, terms in _V3_ENTRY_VOCAB_BY_CLUSTER.items():
+            if other_cluster == cluster_id:
+                continue
+            leaked.extend(_leak_whole_word(lower, terms))
+        leaked.extend(_leak_whole_word(lower, _V3_ALL_ANSWER_TOKENS))
+        return leaked
+
     leaked = []
-    for other_cluster, terms in FINGERPRINT_BY_CLUSTER.items():
+    for other_cluster, terms in _V2_FINGERPRINT_BY_CLUSTER.items():
         if other_cluster == cluster_id:
             continue
-        for term in terms:
-            if re.search(r"\b" + re.escape(term.lower()) + r"\b", lower):
-                leaked.append(term)
+        leaked.extend(_leak_whole_word(lower, terms))
     return leaked
 
 
@@ -211,20 +277,35 @@ def _extract_json_array(text: str) -> list:
     return json.loads(match.group(0))
 
 
-_WORKED_EXAMPLE = (
+_WORKED_EXAMPLE_V2 = (
     '{"prompt_text": "What is the rule about how a file\'s header row should '
     'relate to its data rows?", "criteria": ["mentions the header must mirror '
     'data row structure", "mentions consequences for downstream consumers"], '
     '"hop_distance": 0}'
 )
 
+# v3 criteria follow the spec §6 template: two binary-checkable items, one
+# naming the rule ID and one naming the invented value token — a
+# judge-gradeable checklist that only a response actually containing the
+# gold spoke's content can satisfy. The example below uses real cluster_b
+# vocabulary (rule M-2, "girth line") so Sonnet sees the pattern, not just
+# an abstract description of it.
+_WORKED_EXAMPLE_V3 = (
+    '{"prompt_text": "What does the Marrow Schema Standard say a table must '
+    'declare about its column count?", "criteria": ["names rule M-2", '
+    '"states girth line"], "hop_distance": 0}'
+)
 
-def _build_generation_prompt(cluster_content: str, targets: list, subject_constraint: Optional[str]) -> str:
+
+def _build_generation_prompt(
+    cluster_content: str, targets: list, subject_constraint: Optional[str], version: str = "v2",
+) -> str:
     target_lines = "\n".join(
         f"{i + 1}. hop_distance={t['hop_distance']} — steer this prompt's vocabulary toward: {t['target_text']!r}"
         for i, t in enumerate(targets)
     )
     subject_line = f"\nFocus the prompts on this subject if possible: {subject_constraint}\n" if subject_constraint else ""
+    worked_example = _WORKED_EXAMPLE_V3 if version == "v3" else _WORKED_EXAMPLE_V2
     return (
         "You are building a bulk-interaction prompt bank for a memory-retrieval experiment.\n\n"
         "Below is the full content of one conceptual cluster from the experiment's seed graph:\n"
@@ -238,7 +319,7 @@ def _build_generation_prompt(cluster_content: str, targets: list, subject_constr
         "should only be answerable using that content, testing whether the assistant retrieves it.\n\n"
         "For each prompt, also produce 1-3 binary-checkable criteria a grader could use to verify "
         "the response is correct, and echo back the hop_distance you were given.\n\n"
-        f"Worked example of a well-formed item:\n{_WORKED_EXAMPLE}\n\n"
+        f"Worked example of a well-formed item:\n{worked_example}\n\n"
         f"Targets:\n{target_lines}\n\n"
         f"Return ONLY a JSON array of exactly {len(targets)} objects, each with keys "
         '"prompt_text", "criteria" (list of 1-3 strings), "hop_distance" (integer). No prose, '
@@ -257,10 +338,13 @@ def _build_validation_prompt(cluster_content: str, prompt_text: str) -> str:
     )
 
 
-def generate_cluster_prompts(client, model: str, content: dict, targets: list, subject_constraint: Optional[str] = None) -> list:
+def generate_cluster_prompts(
+    client, model: str, content: dict, targets: list,
+    subject_constraint: Optional[str] = None, version: str = "v2",
+) -> list:
     """One Sonnet call producing len(targets) prompt items. Raises ValueError/
     json.JSONDecodeError on malformed output — caller decides how to retry."""
-    prompt = _build_generation_prompt(content["full_content"], targets, subject_constraint)
+    prompt = _build_generation_prompt(content["full_content"], targets, subject_constraint, version)
     text, _, _ = _call_sonnet(client, model, prompt, max_tokens=400 * max(1, len(targets)))
     items = _extract_json_array(text)
     if not isinstance(items, list):
@@ -270,7 +354,7 @@ def generate_cluster_prompts(client, model: str, content: dict, targets: list, s
 
 def generate_cluster_prompts_safely(
     client, model: str, cluster_id: str, content: dict, targets: list,
-    subject_constraint: Optional[str], print_fn: Callable[[str], None],
+    subject_constraint: Optional[str], print_fn: Callable[[str], None], version: str = "v2",
 ) -> list:
     """
     One Sonnet call per cluster (happy path). On malformed JSON or a
@@ -280,7 +364,7 @@ def generate_cluster_prompts_safely(
     """
     for attempt in range(2):
         try:
-            items = generate_cluster_prompts(client, model, content, targets, subject_constraint)
+            items = generate_cluster_prompts(client, model, content, targets, subject_constraint, version)
             if len(items) == len(targets):
                 return items
             print_fn(f"  {cluster_id}: expected {len(targets)} items, got {len(items)} (attempt {attempt + 1})")
@@ -292,7 +376,7 @@ def generate_cluster_prompts_safely(
     items = []
     for target in targets:
         try:
-            single = generate_cluster_prompts(client, model, content, [target], subject_constraint)
+            single = generate_cluster_prompts(client, model, content, [target], subject_constraint, version)
             items.append(single[0] if single else {})
         except (ValueError, json.JSONDecodeError) as exc:
             logger.error("prompt_gen: %s per-prompt fallback also malformed: %s", cluster_id, exc)
@@ -300,13 +384,13 @@ def generate_cluster_prompts_safely(
     return items
 
 
-def _validate_one(client, model: str, content_full: str, prompt_text: str, cluster_id: str) -> list:
+def _validate_one(client, model: str, content_full: str, prompt_text: str, cluster_id: str, version: str = "v2") -> list:
     """Return a list of failure reasons; empty list means the prompt passed."""
     if not prompt_text:
         return ["missing prompt_text from generation"]
 
     reasons = []
-    leaked = fingerprint_scan(prompt_text, cluster_id)
+    leaked = fingerprint_scan(prompt_text, cluster_id, version)
     if leaked:
         reasons.append(f"fingerprint leak: {leaked}")
         return reasons  # skip the Sonnet call — already failed lexically
@@ -336,7 +420,7 @@ def _finalize_entry(
         if not prompt_text:
             reasons.append("missing prompt_text from generation")
         else:
-            reasons.extend(_validate_one(client, model, content["full_content"], prompt_text, cluster_id))
+            reasons.extend(_validate_one(client, model, content["full_content"], prompt_text, cluster_id, seed_fixture_version))
         if not (1 <= len(criteria) <= 3):
             reasons.append(f"criteria count out of range: {len(criteria)}")
 
@@ -355,7 +439,7 @@ def _finalize_entry(
         if attempt < max_retries:
             print_fn(f"  {prompt_id}: validation failed ({reasons}) — retrying ({attempt + 1}/{max_retries})")
             try:
-                raw = generate_cluster_prompts(client, model, content, [target])
+                raw = generate_cluster_prompts(client, model, content, [target], version=seed_fixture_version)
                 attempt_item = raw[0] if raw else {}
             except (ValueError, json.JSONDecodeError) as exc:
                 logger.error("prompt_gen: %s retry generation malformed: %s", prompt_id, exc)
@@ -461,7 +545,7 @@ def estimate_bank_cost_for_plan(
     if bank_path_for_hash(content_hash, output_dir).exists():
         return None
 
-    cluster_content = read_cluster_content(fixture_path)
+    cluster_content = read_cluster_content(fixture_path, plan.seed_fixture_version)
     n_bulk = round((plan.total_prompts or 0) * (1 - plan.probe_ratio))
     counts = distribute_counts(n_bulk)
     price_in, price_out = load_pricing()
@@ -491,7 +575,7 @@ def build_bank(
         print_fn(f"Prompt bank already exists for hash={content_hash} — reusing (no API calls).")
         return load_bank(existing_path)
 
-    cluster_content = read_cluster_content(fixture_path)
+    cluster_content = read_cluster_content(fixture_path, plan.seed_fixture_version)
     n_bulk = round((plan.total_prompts or 0) * (1 - plan.probe_ratio))
     counts = distribute_counts(n_bulk)
 
@@ -526,14 +610,17 @@ def build_bank(
         ]
 
         print_fn(f"Generating {count} prompt(s) for {cluster_id}...")
-        items = generate_cluster_prompts_safely(client, plan.prompt_gen.model, cluster_id, content, targets, subject_constraint, print_fn)
+        items = generate_cluster_prompts_safely(
+            client, plan.prompt_gen.model, cluster_id, content, targets, subject_constraint,
+            print_fn, plan.seed_fixture_version,
+        )
 
         entries = []
         for i, (target, item) in enumerate(zip(targets, items)):
             prompt_id = f"{cluster_id}_{i:04d}"
             entry = _finalize_entry(
                 client, plan.prompt_gen.model, cluster_id, content, target, item,
-                SEED_FIXTURE_VERSION, generated_by, plan.prompt_gen.max_retries, prompt_id, print_fn,
+                plan.seed_fixture_version, generated_by, plan.prompt_gen.max_retries, prompt_id, print_fn,
             )
             entries.append(entry)
         all_entries.extend(entries)

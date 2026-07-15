@@ -107,6 +107,7 @@ async def retrieve(
     config: dict,
     condition: str = "static_weight",
     rng: Optional[random.Random] = None,
+    weight_mode_override: Optional[str] = None,
 ) -> RetrievalResult:
     """
     Run BM25 + traversal funnel against all MUs in the store.
@@ -123,6 +124,15 @@ async def retrieve(
     process-scoped RNG for reproducibility; defaults to an unseeded
     module-level RNG for read-only callers (e.g. probe measurement) that
     don't need reproducible samples.
+
+    weight_mode_override (M30 — dual-mode probe battery) bypasses
+    config["edge_update"]["weight_mode"] for this call only, when given.
+    Real turns (backend/core/orchestrator.py) never pass this — training
+    behavior is governed solely by the committed config.yaml value. Only
+    read-only probe measurement (POST /admin/run-probe) uses it, to measure
+    both the deterministic "mean" posterior and the behavioral "sample"
+    pass-frequency at the same checkpoint regardless of what weight_mode is
+    currently committed for training turns.
     """
     hp = config.get("hyperparameters", {})
     pool_size: int = hp.get("retrieval_keyword_pool_size", 20)
@@ -130,7 +140,7 @@ async def retrieve(
     level1_k: int = hp.get("retrieval_level1_top_k", 3)
     level2_k: int = hp.get("retrieval_level2_top_k", 1)
     dir_multiplier: float = float(hp.get("directional_edge_weight_multiplier", 1.5))
-    weight_mode: str = config.get("edge_update", {}).get("weight_mode", "mean")
+    weight_mode: str = weight_mode_override or config.get("edge_update", {}).get("weight_mode", "mean")
     rng = rng if rng is not None else _DEFAULT_RNG
 
     all_mus = await store.get_all_mus()

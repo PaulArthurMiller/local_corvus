@@ -42,6 +42,15 @@ class TurnCheckpoint(BaseModel):
     # analogue of a chat turn's run_id).
     probe_id: Optional[str] = None
     measurement_session_index: Optional[int] = None
+    # M30 — dual-mode probe battery. `detail` above is repurposed to hold the
+    # deterministic weight_mode="mean" pass's result_id for a probe turn
+    # (unchanged meaning — still "the probe result_id"); these two fields
+    # additionally record the K weight_mode="sample" repeats' result_ids and
+    # how many were actually completed, so a soft-continued partial battery
+    # (e.g. a connectivity blip mid-sweep) is visible in the checkpoint
+    # rather than silently looking identical to a full K-repeat pass.
+    probe_sample_result_ids: list[str] = Field(default_factory=list)
+    probe_sample_repeats_completed: int = 0
 
 
 class SeriesReportRecord(BaseModel):

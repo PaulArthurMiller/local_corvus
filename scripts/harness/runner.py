@@ -66,6 +66,27 @@ from harness.turn_resolution import (
 
 logger = logging.getLogger("harness.runner")
 
+_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
+
+# M30 — fallback if config.yaml has no probe_measurement section (matches
+# config.yaml's own committed default).
+_DEFAULT_SAMPLE_BATTERY_REPEATS = 25
+
+
+def load_sample_battery_repeats(config_path: Path = _CONFIG_PATH) -> int:
+    """Read the dual-mode probe battery's K (sample-mode repeat count) from
+    config.yaml's probe_measurement section — host-side read, same
+    convention as prompt_gen.py's load_pricing(). This governs how many
+    times the harness itself calls POST /admin/run-probe per checkpoint, not
+    backend behavior, so no backend restart is needed to change it."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return _DEFAULT_SAMPLE_BATTERY_REPEATS
+    pm = config.get("probe_measurement") or {}
+    return int(pm.get("sample_battery_repeats", _DEFAULT_SAMPLE_BATTERY_REPEATS))
+
 
 class HardStopError(Exception):
     """Raised internally to unwind the turn loop on a hard-stop condition."""
@@ -377,6 +398,7 @@ def execute_run(
     wait_for_health_fn: Callable[..., None] = wait_for_health,
     bank_generation_cost_usd: float = 0.0,
     judge_cost_per_call: float = JUDGE_COST_PER_CALL_USD,
+    sample_battery_repeats: Optional[int] = None,
 ) -> RunOutcome:
     """
     Run the full harness skeleton against `client` and return a RunOutcome.
@@ -410,6 +432,18 @@ def execute_run(
     when an existing bank is reused. Combined with a judge-call estimate
     and checked against plan.budget_cap before any graph mutation.
 
+    sample_battery_repeats (M30 — dual-mode probe battery) is K, the number
+    of independent weight_mode="sample" battery passes run at every probe
+    checkpoint, in addition to the one always-run weight_mode="mean" pass.
+    None (the default) resolves it from config.yaml via
+    load_sample_battery_repeats() at call time — injectable so tests don't
+    need a real config.yaml on disk. Every probe checkpoint costs 1+K calls
+    to POST /admin/run-probe (each a $0 pure-retrieval read, no LLM call)
+    instead of 1; identically in all three conditions — a non-"learned"
+    condition's K sample repeats are expected to read back K identical
+    results, since compute_effective_weight() never samples for those
+    conditions (see backend/learning/edge_update.py).
+
     experiment_id/series_id collision note: run_id/experiment_id are
     derived from plan_id (+ an "_attemptN" suffix beyond the first attempt
     at a given identity). Accepting a resume of an incomplete run keeps
@@ -420,6 +454,9 @@ def execute_run(
     otherwise mix an old trial's rows into a new one's experiment_id.
     """
     probes = probes or []
+    sample_battery_repeats = (
+        sample_battery_repeats if sample_battery_repeats is not None else load_sample_battery_repeats()
+    )
     config_hash = compute_config_hash(plan)
 
     # --- Resume / attempt-identity detection ---
@@ -709,29 +746,94 @@ def execute_run(
                 status = STATUS_OK
                 detail = None
                 response = None
+                probe_sample_result_ids: list[str] = []
+                probe_sample_repeats_completed = 0
                 if turn["turn_type"] == TURN_TYPE_PROBE:
-                    # M21 — probe turns are real measurements: read-only
+                    # M21/M30 — probe turns are real measurements: read-only
                     # retrieval via POST /admin/run-probe, recording a
                     # probe_results row. Never /chat (which would create MUs
                     # and edges), never judged (guarded again below).
+                    #
+                    # M30 — dual-mode probe battery: every probe checkpoint
+                    # runs one deterministic weight_mode="mean" pass (the
+                    # posterior-mean readout — `detail` holds this pass's
+                    # result_id, same field the pre-M30 single-mode call
+                    # used) plus sample_battery_repeats independent
+                    # weight_mode="sample" passes (the behavioral
+                    # pass-frequency readout, recorded in
+                    # probe_sample_result_ids). Both override whatever
+                    # edge_update.weight_mode is currently committed for
+                    # training turns. Identical in all three conditions — a
+                    # non-"learned" condition's sample repeats are expected
+                    # to read back K identical results, since
+                    # compute_effective_weight() never samples outside
+                    # condition="learned".
                     try:
-                        probe_response = client.run_probe(
+                        mean_response = client.run_probe(
                             probe_id=turn["probe_id"],
                             measurement_session_index=turn["measurement_session_index"],
                             condition_label=condition,
                             probe_set_version=plan.probe_set_version,
+                            series_id=series_id,
+                            weight_mode="mean",
+                            battery_mode="mean",
                         )
-                        detail = probe_response.get("result_id")
+                        detail = mean_response.get("result_id")
                     except BackendConnectivityError as exc:
                         if error_policy.get("connectivity") == "hard_stop":
-                            error_summary = f"connectivity during probe turn {key}: {exc}"
+                            error_summary = f"connectivity during probe turn {key} (mean pass): {exc}"
                             raise HardStopError(error_summary) from exc
                         status, detail = STATUS_SOFT_CONTINUE, str(exc)
                     except BackendTurnError as exc:
                         if error_policy.get("turn_ambiguous") == "hard_stop":
-                            error_summary = f"probe turn error {key}: {exc}"
+                            error_summary = f"probe turn error {key} (mean pass): {exc}"
                             raise HardStopError(error_summary) from exc
                         status, detail = STATUS_SOFT_CONTINUE, str(exc)
+
+                    if status == STATUS_OK:
+                        for repeat_index in range(sample_battery_repeats):
+                            try:
+                                sample_response = client.run_probe(
+                                    probe_id=turn["probe_id"],
+                                    measurement_session_index=turn["measurement_session_index"],
+                                    condition_label=condition,
+                                    probe_set_version=plan.probe_set_version,
+                                    series_id=series_id,
+                                    weight_mode="sample",
+                                    battery_mode="sample",
+                                    battery_repeat_index=repeat_index,
+                                )
+                                probe_sample_result_ids.append(sample_response.get("result_id"))
+                                probe_sample_repeats_completed += 1
+                            except BackendConnectivityError as exc:
+                                if error_policy.get("connectivity") == "hard_stop":
+                                    error_summary = (
+                                        f"connectivity during probe turn {key} "
+                                        f"(sample repeat {repeat_index}): {exc}"
+                                    )
+                                    raise HardStopError(error_summary) from exc
+                                status = STATUS_SOFT_CONTINUE
+                                print_fn(
+                                    f"  probe {turn['probe_id']} sample repeat {repeat_index} "
+                                    f"failed (soft-continue), stopping this checkpoint's sample "
+                                    f"battery early ({probe_sample_repeats_completed}/"
+                                    f"{sample_battery_repeats} completed): {exc}"
+                                )
+                                break
+                            except BackendTurnError as exc:
+                                if error_policy.get("turn_ambiguous") == "hard_stop":
+                                    error_summary = (
+                                        f"probe turn error {key} (sample repeat {repeat_index}): {exc}"
+                                    )
+                                    raise HardStopError(error_summary) from exc
+                                status = STATUS_SOFT_CONTINUE
+                                print_fn(
+                                    f"  probe {turn['probe_id']} sample repeat {repeat_index} "
+                                    f"failed (soft-continue), stopping this checkpoint's sample "
+                                    f"battery early ({probe_sample_repeats_completed}/"
+                                    f"{sample_battery_repeats} completed): {exc}"
+                                )
+                                break
                 else:
                     message = build_turn_message(turn, condition, prompt_lookup)
                     try:
@@ -809,12 +911,15 @@ def execute_run(
                     judge_error=judge_error,
                     probe_id=turn.get("probe_id"),
                     measurement_session_index=turn.get("measurement_session_index"),
+                    probe_sample_result_ids=probe_sample_result_ids,
+                    probe_sample_repeats_completed=probe_sample_repeats_completed,
                 ))
                 save_checkpoint(checkpoint, run_base_dir)
                 turns_processed += 1
                 verdict_note = f" verdict={verdict_str}" if verdict_str else ""
                 probe_note = (
-                    f" probe={turn['probe_id']} session={turn['measurement_session_index']}"
+                    f" probe={turn['probe_id']} session={turn['measurement_session_index']} "
+                    f"sample_repeats={probe_sample_repeats_completed}/{sample_battery_repeats}"
                     if turn["turn_type"] == TURN_TYPE_PROBE else ""
                 )
                 print_fn(f"  turn {key} type={turn['turn_type']} -> {status}{verdict_note}{probe_note}")

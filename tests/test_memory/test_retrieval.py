@@ -429,6 +429,37 @@ class TestConditionDispatch:
 
             assert result1.edge_weights_used == result2.edge_weights_used
 
+    def test_weight_mode_override_bypasses_config_mean(self):
+        """M30 — weight_mode_override="sample" must be used even when
+        config["edge_update"]["weight_mode"] is committed to "mean"."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[9], weight=0.9, alpha=3.0, beta=3.0))
+            cfg = _minimal_config(level1_k=3, level2_k=2)
+            cfg["edge_update"] = {"weight_mode": "mean"}
+
+            result = run(retrieve(
+                "elephant mammal", s, cfg, condition="learned",
+                rng=random.Random(123), weight_mode_override="sample",
+            ))
+
+            assert result.edge_weights_used
+            assert all(info["mode"] == "sample" for info in result.edge_weights_used.values())
+
+    def test_weight_mode_override_none_falls_back_to_config(self):
+        """M30 — weight_mode_override=None (the default) preserves pre-M30
+        behavior of reading config["edge_update"]["weight_mode"]."""
+        with TempDBStore() as s:
+            ids = _populate_10_mus(s)
+            run(s.create_edge(source_mu_id=ids[0], target_mu_id=ids[9], weight=0.9, alpha=3.0, beta=3.0))
+            cfg = _minimal_config(level1_k=3, level2_k=2)
+            cfg["edge_update"] = {"weight_mode": "mean"}
+
+            result = run(retrieve("elephant mammal", s, cfg, condition="learned"))
+
+            assert result.edge_weights_used
+            assert all(info["mode"] == "mean" for info in result.edge_weights_used.values())
+
 
 # ---------------------------------------------------------------------------
 # M22 — retrieval_exclude_source_types candidacy filter

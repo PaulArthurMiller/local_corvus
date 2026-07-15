@@ -129,16 +129,30 @@ class BackendClient:
         measurement_session_index: int,
         condition_label: str,
         probe_set_version: str = "v2",
+        series_id: Optional[str] = None,
+        weight_mode: Optional[str] = None,
+        battery_mode: str = "mean",
+        battery_repeat_index: Optional[int] = None,
     ) -> dict:
         """POST /admin/run-probe (M21) — run one probe through the backend's
         read-only retrieval path and record a probe_results row. No MUs are
         created and no edges are written (the endpoint enforces this), so a
-        probe turn never mutates the graph the way a /chat turn does."""
+        probe turn never mutates the graph the way a /chat turn does.
+
+        M30 — series_id lets the result be scoped to one series by
+        series_report.py. weight_mode overrides whatever edge_update.
+        weight_mode is currently committed in config.yaml for this call only
+        (None preserves pre-M30 behavior); battery_mode/battery_repeat_index
+        record which pass of the dual-mode battery this call belongs to."""
         body = {
             "probe_id": probe_id,
             "measurement_session_index": measurement_session_index,
             "condition_label": condition_label,
             "probe_set_version": probe_set_version,
+            "series_id": series_id,
+            "weight_mode": weight_mode,
+            "battery_mode": battery_mode,
+            "battery_repeat_index": battery_repeat_index,
         }
         try:
             resp = self._client.post("/admin/run-probe", json=body)

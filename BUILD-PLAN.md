@@ -5113,16 +5113,23 @@ tail end of Ollama's restart and failed independently — resolved cleanly on a
 second invocation, which also exercised resume-of-a-fully-aborted-checkpoint);
 (d) full suite green throughout. AWAITING PAUL: PR review.
 
-Milestone 28 (Seed Fixture v3 — Harness Wiring) is now CODE COMPLETE (see its
-own Completion section above) — PR #48, awaiting Paul's review/merge. Its
-live baseline check found `b_spoke1`/`d_spoke1` already read as a baseline
-PASS under the frozen fixture's default tie-break, motivating Milestone 29
-(Per-Cluster Trained-Spoke Selection — see section above): a `RunPlan.
-trained_spokes` knob so each cluster's trained target is a documented,
-headroom-checked plan choice instead of a hardcoded spoke1. Not yet built.
-Sequence before the real v3 bank generation: merge PR #48 -> build M29 ->
-confirm the M28 tie-break is stable across a second wipe+reseed+probe pass
--> pick spokes with clean headroom in all 4 clusters -> generate the bank.
+Milestone 28 (Seed Fixture v3 — Harness Wiring) is MERGED to main (PR #48).
+Its live baseline check found `b_spoke1`/`d_spoke1` already read as a
+baseline PASS under the frozen fixture's default tie-break, motivating
+Milestone 29 (Per-Cluster Trained-Spoke Selection — see section above): a
+`RunPlan.trained_spokes` knob so each cluster's trained target is a
+documented, headroom-checked plan choice instead of a hardcoded spoke1.
+
+Milestone 29 (Per-Cluster Trained-Spoke Selection) is now CODE COMPLETE, in
+PR review (branch `milestone-29-trained-spoke-selection`) — `RunPlan.
+trained_spokes` added (schema.py, shape-validated), threaded through
+`read_cluster_content()`/`build_bank()`/`estimate_bank_cost_for_plan()`/
+`generation_params_for_plan()` (prompt_gen.py), with a named `ValueError` on
+an unresolvable spoke key and `trained_spokes` now part of the hashed
+prompt-bank generation params. 30 new tests (760 total, all passing).
+Sequence before the real v3 bank generation: merge M29's PR -> confirm the
+M28 tie-break is stable across a second wipe+reseed+probe pass -> pick
+spokes with clean headroom in all 4 clusters -> generate the bank.
 Last updated: 2026-07-15
 ```
 

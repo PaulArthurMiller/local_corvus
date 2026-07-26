@@ -392,3 +392,108 @@ def test_compute_probe_result_experiment_id_defaults_to_none():
 
     assert result.experiment_id is None
     print("[PASS] experiment_id defaults to None for legacy callers")
+
+
+# ---------------------------------------------------------------------------
+# M30 — dual-mode probe battery: series_id/battery_mode/battery_repeat_index
+# ---------------------------------------------------------------------------
+
+def test_compute_probe_result_stamps_series_id_battery_mode_and_repeat_index():
+    """compute_probe_result() carries series_id/battery_mode/battery_repeat_index
+    through to the ProbeResult so series_report.py can scope + separate the
+    dual-mode battery's mean vs. sample rows."""
+    probe = ProbeDefinition(
+        probe_id="p01",
+        phenomenon_type="ranking_improvement",
+        prompt_text="test prompt",
+        gold_mu_ids=["mu-gold"],
+        is_bridge_probe=False,
+        probe_set_version="v1",
+    )
+    retrieval_result = _make_retrieval_result(["mu-gold"])
+
+    result = run(compute_probe_result(
+        probe=probe,
+        retrieval_result=retrieval_result,
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learned",
+        series_id="run1_learned_s0",
+        battery_mode="sample",
+        battery_repeat_index=7,
+    ))
+
+    assert result.series_id == "run1_learned_s0"
+    assert result.battery_mode == "sample"
+    assert result.battery_repeat_index == 7
+    print("[PASS] compute_probe_result stamps series_id/battery_mode/battery_repeat_index")
+
+
+def test_compute_probe_result_battery_mode_defaults_to_mean():
+    """Callers that predate M30 (no battery_mode argument) still work — defaults
+    to 'mean', matching a single-pass measurement with no dual-mode context."""
+    probe = ProbeDefinition(
+        probe_id="p01",
+        phenomenon_type="ranking_improvement",
+        prompt_text="test prompt",
+        gold_mu_ids=["mu-gold"],
+        is_bridge_probe=False,
+        probe_set_version="v1",
+    )
+    retrieval_result = _make_retrieval_result(["mu-gold"])
+
+    result = run(compute_probe_result(
+        probe=probe,
+        retrieval_result=retrieval_result,
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learning",
+    ))
+
+    assert result.battery_mode == "mean"
+    assert result.battery_repeat_index is None
+    assert result.series_id is None
+    print("[PASS] battery_mode defaults to 'mean', series_id/battery_repeat_index default to None")
+
+
+def test_probe_result_rejects_invalid_battery_mode():
+    """ProbeResult's battery_mode field_validator rejects anything outside
+    VALID_BATTERY_MODES ('mean', 'sample')."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        ProbeResult(
+            probe_id="p01",
+            measurement_session_index=1,
+            condition_label="learning",
+            battery_mode="bogus",
+        )
+    print("[PASS] ProbeResult rejects battery_mode='bogus'")
+
+
+def test_record_probe_result_includes_m30_fields():
+    """record_probe_result() passes series_id/battery_mode/battery_repeat_index
+    through to graph_store.insert_probe_result."""
+    probe_result = ProbeResult(
+        probe_id="p01",
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learning",
+        retrieved_mu_ids=["mu-a"],
+        gold_mu_rank=1,
+        retrieval_precision=1.0,
+        retrieval_recall=1.0,
+        series_id="run1_learned_s0",
+        battery_mode="sample",
+        battery_repeat_index=3,
+    )
+
+    with patch("analytics.probes.graph_store") as mock_store:
+        mock_store.insert_probe_result = AsyncMock()
+        run(record_probe_result(probe_result))
+        call_arg = mock_store.insert_probe_result.call_args[0][0]
+        assert call_arg["series_id"] == "run1_learned_s0"
+        assert call_arg["battery_mode"] == "sample"
+        assert call_arg["battery_repeat_index"] == 3
+
+    print("[PASS] record_probe_result includes M30 dual-mode battery fields")

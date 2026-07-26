@@ -897,3 +897,147 @@ class TestProbeResultExperimentId:
             assert results[0]["result_id"] == "old-row"
             assert results[0]["experiment_id"] is None
             print("[PASS] migration adds probe_results.experiment_id; legacy rows read back as None")
+
+
+# ---------------------------------------------------------------------------
+# M30: series_id / battery_mode / battery_repeat_index on probe_results
+# ---------------------------------------------------------------------------
+
+
+class TestProbeResultDualModeBattery:
+    """probe_results rows carry series_id (so series_report.py can scope
+    dual-mode probe measurements to one series) and battery_mode/
+    battery_repeat_index (so the deterministic "mean" checkpoint pass is
+    separable from the K independent "sample" repeats)."""
+
+    @staticmethod
+    def _probe_result(result_id, session, series_id=None, battery_mode="mean", battery_repeat_index=None):
+        return {
+            "result_id": result_id,
+            "probe_id": "p06",
+            "run_id": None,
+            "measurement_session_index": session,
+            "condition_label": "learned",
+            "retrieved_mu_ids": ["mu-a"],
+            "gold_mu_rank": 1,
+            "retrieval_precision": 1.0,
+            "retrieval_recall": 1.0,
+            "bm25_scores_per_mu": {"mu-a": 2.0},
+            "experiment_id": "plan1_learned",
+            "series_id": series_id,
+            "battery_mode": battery_mode,
+            "battery_repeat_index": battery_repeat_index,
+        }
+
+    @staticmethod
+    def _sync_probe(store):
+        run(store.sync_probes([{
+            "probe_id": "p06",
+            "probe_set_version": "v2",
+            "phenomenon_type": "ranking_improvement",
+            "prompt_text": "test",
+            "gold_mu_ids": ["mu-a"],
+            "is_bridge_probe": False,
+            "bridge_pair_id": None,
+        }]))
+
+    def test_insert_and_query_by_series_id(self):
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            run(store.insert_probe_result(self._probe_result("r1", 1, series_id="run1_learned_s0")))
+            run(store.insert_probe_result(self._probe_result("r2", 1, series_id="run1_learned_s1")))
+
+            results = run(store.query_probe_results(series_id="run1_learned_s0"))
+            assert [r["result_id"] for r in results] == ["r1"]
+            assert results[0]["series_id"] == "run1_learned_s0"
+            print("[PASS] query_probe_results filters by series_id")
+
+    def test_insert_and_query_by_battery_mode(self):
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            run(store.insert_probe_result(self._probe_result(
+                "mean-pass", 1, series_id="run1_learned_s0", battery_mode="mean",
+            )))
+            for i in range(3):
+                run(store.insert_probe_result(self._probe_result(
+                    f"sample-{i}", 1, series_id="run1_learned_s0",
+                    battery_mode="sample", battery_repeat_index=i,
+                )))
+
+            mean_results = run(store.query_probe_results(series_id="run1_learned_s0", battery_mode="mean"))
+            sample_results = run(store.query_probe_results(series_id="run1_learned_s0", battery_mode="sample"))
+
+            assert [r["result_id"] for r in mean_results] == ["mean-pass"]
+            assert mean_results[0]["battery_repeat_index"] is None
+            assert {r["result_id"] for r in sample_results} == {"sample-0", "sample-1", "sample-2"}
+            assert sorted(r["battery_repeat_index"] for r in sample_results) == [0, 1, 2]
+            print("[PASS] query_probe_results filters by battery_mode, repeat_index round-trips")
+
+    def test_battery_mode_defaults_to_mean_when_omitted(self):
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            result = self._probe_result("r1", 1)
+            del result["battery_mode"]  # omitted entirely, like a pre-M30 caller
+            run(store.insert_probe_result(result))
+
+            results = run(store.query_probe_results(probe_id="p06"))
+            assert results[0]["battery_mode"] == "mean"
+            print("[PASS] battery_mode defaults to 'mean' in the DB when omitted from the insert dict")
+
+    def test_migration_adds_dual_mode_columns_to_existing_probe_results_table(self):
+        """A pre-M30 DB (probe_results without series_id/battery_mode/
+        battery_repeat_index) gains the columns on next open; existing rows
+        read back with series_id=None, battery_mode='mean' (the column
+        default), battery_repeat_index=None."""
+        import aiosqlite
+
+        async def _build_old_db(db_path):
+            db = await aiosqlite.connect(db_path)
+            await db.execute("""
+                CREATE TABLE probes (
+                    probe_id TEXT PRIMARY KEY,
+                    probe_set_version TEXT NOT NULL,
+                    phenomenon_type TEXT NOT NULL,
+                    prompt_text TEXT NOT NULL,
+                    gold_mu_ids TEXT NOT NULL DEFAULT '[]',
+                    is_bridge_probe INTEGER NOT NULL DEFAULT 0,
+                    bridge_pair_id TEXT
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE probe_results (
+                    result_id TEXT PRIMARY KEY,
+                    probe_id TEXT NOT NULL REFERENCES probes(probe_id),
+                    run_id TEXT,
+                    measurement_session_index INTEGER NOT NULL,
+                    condition_label TEXT NOT NULL,
+                    retrieved_mu_ids TEXT NOT NULL DEFAULT '[]',
+                    gold_mu_rank INTEGER,
+                    retrieval_precision REAL,
+                    retrieval_recall REAL,
+                    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}',
+                    outcome_override TEXT,
+                    experiment_id TEXT
+                )
+            """)
+            await db.execute(
+                "INSERT INTO probe_results (result_id, probe_id, measurement_session_index, condition_label) "
+                "VALUES ('old-row', 'p06', 1, 'learning')"
+            )
+            await db.commit()
+            await db.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "old_graph.db"
+            run(_build_old_db(db_path))
+
+            with mock.patch.object(store_module, "_DB_PATH", db_path):
+                store = GraphStore()
+                results = run(store.query_probe_results(probe_id="p06"))
+
+            assert len(results) == 1
+            assert results[0]["result_id"] == "old-row"
+            assert results[0]["series_id"] is None
+            assert results[0]["battery_mode"] == "mean"
+            assert results[0]["battery_repeat_index"] is None
+            print("[PASS] migration adds probe_results dual-mode columns; legacy rows default correctly")

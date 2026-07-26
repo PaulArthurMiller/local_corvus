@@ -15,8 +15,19 @@ from harness.client import BackendConnectivityError, BackendTurnError, ReportGen
 from harness.docker_lifecycle import DockerLifecycleError
 from harness.manifest import compute_config_hash, compute_run_id, load_manifest
 from harness.prompt_bank import PromptBank, PromptBankEntry, save_bank
-from harness.runner import execute_run, resolve_run_attempt
+from harness.runner import execute_run as _real_execute_run
+from harness.runner import resolve_run_attempt
 from harness.schema import RunPlan
+
+
+def execute_run(plan, client, run_base_dir, *args, **kwargs):
+    """Test-local shim: default sample_battery_repeats=0 so the ~60 existing
+    call sites in this file (none of which test M30 dual-mode probe battery
+    behavior) keep exercising the pre-M30 single-call-per-probe-turn shape.
+    Dedicated dual-mode tests pass sample_battery_repeats explicitly, which
+    this setdefault never overrides."""
+    kwargs.setdefault("sample_battery_repeats", 0)
+    return _real_execute_run(plan, client, run_base_dir, *args, **kwargs)
 
 
 class FakeBackendClient:
@@ -115,13 +126,20 @@ class FakeBackendClient:
             raise self.randomize_error
         return {"edges_randomized": 32}
 
-    def run_probe(self, probe_id, measurement_session_index, condition_label, probe_set_version="v2"):
+    def run_probe(
+        self, probe_id, measurement_session_index, condition_label, probe_set_version="v2",
+        series_id=None, weight_mode=None, battery_mode="mean", battery_repeat_index=None,
+    ):
         idx = len(self.probe_calls)
         self.probe_calls.append({
             "probe_id": probe_id,
             "measurement_session_index": measurement_session_index,
             "condition_label": condition_label,
             "probe_set_version": probe_set_version,
+            "series_id": series_id,
+            "weight_mode": weight_mode,
+            "battery_mode": battery_mode,
+            "battery_repeat_index": battery_repeat_index,
         })
         if idx in self.probe_errors:
             raise self.probe_errors[idx]
@@ -595,6 +613,153 @@ def test_resume_skips_already_completed_probe_turns_and_replays_same_schedule(tm
     # positions the interrupted run would have given them.
     assert [c["probe_id"] for c in healthy_client.probe_calls] == ["p07", "p06"]
     assert [c["measurement_session_index"] for c in healthy_client.probe_calls] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# M30 — dual-mode probe battery: one weight_mode="mean" pass + K
+# weight_mode="sample" repeats per probe checkpoint, identically in every
+# condition. sample_battery_repeats is passed explicitly here (never relying
+# on the module-level shim's default 0) since these tests exist specifically
+# to exercise K > 0.
+# ---------------------------------------------------------------------------
+
+def test_probe_checkpoint_runs_mean_pass_plus_k_sample_repeats(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient()
+
+    outcome = execute_run(
+        plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print,
+        sample_battery_repeats=3,
+    )
+
+    assert outcome.status == "complete"
+    # 1 mean pass + 3 sample repeats for this single probe turn
+    assert len(client.probe_calls) == 4
+    assert client.probe_calls[0]["weight_mode"] == "mean"
+    assert client.probe_calls[0]["battery_mode"] == "mean"
+    assert client.probe_calls[0]["battery_repeat_index"] is None
+    for i, call in enumerate(client.probe_calls[1:]):
+        assert call["weight_mode"] == "sample"
+        assert call["battery_mode"] == "sample"
+        assert call["battery_repeat_index"] == i
+    # Every call in the checkpoint's battery is the same probe_id/session.
+    assert {c["probe_id"] for c in client.probe_calls} == {"p06"}
+    assert {c["measurement_session_index"] for c in client.probe_calls} == {1}
+
+
+def test_probe_calls_pass_series_id_matching_the_turns_own_series(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient()
+
+    execute_run(
+        plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print,
+        sample_battery_repeats=2,
+    )
+
+    series_ids = {c["series_id"] for c in client.probe_calls}
+    assert len(series_ids) == 1
+    assert None not in series_ids
+
+
+def test_probe_checkpoint_records_sample_result_ids_and_completed_count(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient()
+
+    outcome = execute_run(
+        plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print,
+        sample_battery_repeats=3,
+    )
+
+    turn = outcome.checkpoint.turns[0]
+    assert turn.detail == "probe-result-0"  # the mean pass's result_id, unchanged field meaning
+    assert turn.probe_sample_repeats_completed == 3
+    assert turn.probe_sample_result_ids == ["probe-result-1", "probe-result-2", "probe-result-3"]
+
+
+def test_probe_sample_repeat_soft_continue_stops_battery_early_and_records_partial(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end")
+    # Call index 0 is the mean pass (succeeds); index 2 is sample repeat 1
+    # (mean=0, sample repeat 0=1, sample repeat 1=2) — fails soft-continue.
+    client = FakeBackendClient(probe_errors={2: BackendTurnError("malformed")})
+
+    outcome = execute_run(
+        plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print,
+        sample_battery_repeats=5,
+    )
+
+    assert outcome.status == "complete"
+    turn = outcome.checkpoint.turns[0]
+    assert turn.status == STATUS_SOFT_CONTINUE
+    assert turn.probe_sample_repeats_completed == 1  # only repeat 0 succeeded before the break
+    assert turn.probe_sample_result_ids == ["probe-result-1"]
+    # The battery stopped early — never attempted repeats 2-4.
+    assert len(client.probe_calls) == 3  # mean + repeat 0 (ok) + repeat 1 (failed)
+
+
+def test_probe_sample_repeat_connectivity_error_hard_stops_by_default(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient(probe_errors={1: BackendConnectivityError("backend down")})
+
+    outcome = execute_run(
+        plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print,
+        sample_battery_repeats=2,
+    )
+
+    assert outcome.status == "aborted"
+    assert "connectivity during probe turn" in outcome.error_summary
+    assert "sample repeat 0" in outcome.error_summary
+
+
+def test_dual_mode_battery_runs_identically_in_every_condition(tmp_path):
+    # compute_effective_weight() never samples outside condition="learned" —
+    # the sample repeats are still executed identically in every condition
+    # (the protocol is condition-agnostic), just expected to read back K
+    # identical results for the two non-learned conditions.
+    for condition in ("learned", "static_weight", "random_weight"):
+        plan = _plan(
+            dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end",
+            conditions=[condition],
+        )
+        client = FakeBackendClient()
+
+        outcome = execute_run(
+            plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print,
+            sample_battery_repeats=3,
+        )
+
+        assert outcome.status == "complete"
+        assert len(client.probe_calls) == 4  # 1 mean + 3 sample, same as "learned"
+        assert all(c["condition_label"] == condition for c in client.probe_calls)
+
+
+def test_zero_sample_battery_repeats_runs_only_the_mean_pass(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient()
+
+    outcome = execute_run(
+        plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print,
+        sample_battery_repeats=0,
+    )
+
+    assert outcome.status == "complete"
+    assert len(client.probe_calls) == 1
+    assert client.probe_calls[0]["weight_mode"] == "mean"
+    turn = outcome.checkpoint.turns[0]
+    assert turn.probe_sample_repeats_completed == 0
+    assert turn.probe_sample_result_ids == []
+
+
+def test_default_sample_battery_repeats_resolves_from_config_yaml(tmp_path):
+    # sample_battery_repeats=None (not passed at all) resolves via
+    # load_sample_battery_repeats() reading the real repo config.yaml, whose
+    # committed probe_measurement.sample_battery_repeats is 25.
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=1.0, probe_placement="end")
+    client = FakeBackendClient()
+
+    outcome = _real_execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert len(client.probe_calls) == 26  # 1 mean + 25 sample (config.yaml default)
 
 
 # ---------------------------------------------------------------------------

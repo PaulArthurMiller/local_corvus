@@ -31,12 +31,19 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from analytics.probes import ProbeResult, compute_probe_result, load_probe_set, record_probe_result
+from analytics.probes import (
+    VALID_BATTERY_MODES,
+    ProbeResult,
+    compute_probe_result,
+    load_probe_set,
+    record_probe_result,
+)
 from analytics.reports.experiment_report import generate_experiment_report, write_experiment_report
 from analytics.reports.series_report import generate_series_report, write_series_report
 from analytics.run_log import query_runs
 from analytics.seed_fixture import register_fixture
-from core.orchestrator import EDGE_RNG, EXPERIMENT_ID, RUN_CONDITION
+from core.orchestrator import EXPERIMENT_ID, RUN_CONDITION
+from learning.edge_update import VALID_WEIGHT_MODES
 from memory.retrieval import retrieve
 from memory.snapshot import take_archive_snapshot, take_battery_snapshot
 from memory.store import store as graph_store
@@ -257,6 +264,18 @@ class RunProbeRequest(BaseModel):
     measurement_session_index: int
     condition_label: str
     probe_set_version: str = "v1"   # default "v1" preserves backward compat
+    # M30 — dual-mode probe battery. series_id lets the result be scoped to
+    # one series by series_report.py (probe turns create no analytics row,
+    # so this is the only way to join a probe result back to a series).
+    # weight_mode overrides config.yaml's committed edge_update.weight_mode
+    # for this call only — None (default) preserves the pre-M30 behavior of
+    # reading whatever is currently committed. battery_mode/
+    # battery_repeat_index are recorded alongside the result for reporting;
+    # they do not themselves affect retrieval (weight_mode does).
+    series_id: Optional[str] = None
+    weight_mode: Optional[str] = None
+    battery_mode: str = "mean"
+    battery_repeat_index: Optional[int] = None
 
 
 @router.post("/run-probe")
@@ -266,14 +285,32 @@ async def run_probe(body: RunProbeRequest):
 
     INVARIANT: This endpoint MUST NOT call run_interaction(). It only calls
     retrieve() — no MUs are created, no edges are written, no feedback events
-    are generated. run_id in the ProbeResult is always None.
+    are generated. run_id in the ProbeResult is always None. This holds
+    identically regardless of weight_mode override (M30) — compute_effective_
+    weight() is a pure read in both "mean" and "sample" modes; no counter
+    (alpha/beta) is ever written by this endpoint or by retrieve() itself.
     """
     logger.info(
-        "admin/run-probe: probe_id=%s session_index=%d condition=%s",
+        "admin/run-probe: probe_id=%s session_index=%d condition=%s weight_mode=%s "
+        "battery_mode=%s battery_repeat_index=%s",
         body.probe_id,
         body.measurement_session_index,
         body.condition_label,
+        body.weight_mode,
+        body.battery_mode,
+        body.battery_repeat_index,
     )
+
+    if body.weight_mode is not None and body.weight_mode not in VALID_WEIGHT_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"weight_mode must be one of {VALID_WEIGHT_MODES} or omitted, got {body.weight_mode!r}",
+        )
+    if body.battery_mode not in VALID_BATTERY_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"battery_mode must be one of {VALID_BATTERY_MODES}, got {body.battery_mode!r}",
+        )
 
     # Load probe definitions from YAML to find the requested probe
     try:
@@ -297,11 +334,23 @@ async def run_probe(body: RunProbeRequest):
         logger.error("admin/run-probe: could not load config — %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # Run retrieval — read-only; no MU creation, no edges written
+    # Run retrieval — read-only; no MU creation, no edges written. rng is
+    # deliberately NOT the orchestrator's process-scoped EDGE_RNG (real turns'
+    # RNG) — M30 finding: probe measurement must never consume draws from the
+    # same stream real training turns use for weight_mode: sample, or a probe
+    # checkpoint would silently perturb the reproducibility of subsequent
+    # training turns' sample draws even though it writes no counters. Passing
+    # no rng here lets retrieve() fall back to its own unseeded module-level
+    # RNG (see retrieval.py's _DEFAULT_RNG docstring, which already documented
+    # this as the intended behavior for read-only probe callers — this was
+    # previously not followed). weight_mode_override lets one checkpoint run
+    # the deterministic "mean" pass and K independent "sample" repeats
+    # regardless of what edge_update.weight_mode is currently committed for
+    # training turns.
     try:
         retrieval_result = await retrieve(
             probe.prompt_text, graph_store, config,
-            condition=RUN_CONDITION, rng=EDGE_RNG,
+            condition=RUN_CONDITION, weight_mode_override=body.weight_mode,
         )
     except Exception as exc:
         logger.error("admin/run-probe: retrieval failed — %s", exc)
@@ -319,6 +368,9 @@ async def run_probe(body: RunProbeRequest):
         measurement_session_index=body.measurement_session_index,
         condition_label=body.condition_label,
         experiment_id=EXPERIMENT_ID,
+        series_id=body.series_id,
+        battery_mode=body.battery_mode,
+        battery_repeat_index=body.battery_repeat_index,
     )
 
     # Persist the result
@@ -343,6 +395,8 @@ async def get_probe_results(
     probe_id: Optional[str] = Query(default=None, description="Filter by probe ID"),
     condition_label: Optional[str] = Query(default=None, description="Filter by condition label"),
     measurement_session_index: Optional[int] = Query(default=None, description="Filter by session index"),
+    series_id: Optional[str] = Query(default=None, description="Filter by series ID"),
+    battery_mode: Optional[str] = Query(default=None, description="Filter by battery mode (mean|sample)"),
 ):
     """
     Return probe results with optional filters.
@@ -350,16 +404,20 @@ async def get_probe_results(
     Results ordered by measurement_session_index ASC.
     """
     logger.info(
-        "admin/probe-results: probe_id=%s condition=%s session=%s",
+        "admin/probe-results: probe_id=%s condition=%s session=%s series_id=%s battery_mode=%s",
         probe_id,
         condition_label,
         measurement_session_index,
+        series_id,
+        battery_mode,
     )
     try:
         results = await graph_store.query_probe_results(
             probe_id=probe_id,
             condition_label=condition_label,
             measurement_session_index=measurement_session_index,
+            series_id=series_id,
+            battery_mode=battery_mode,
         )
     except Exception as exc:
         logger.error("admin/probe-results: query failed — %s", exc)

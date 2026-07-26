@@ -281,6 +281,27 @@ def _render_s61(section: dict) -> str:
                 f"| {counts.get('flat_pass', 0)} |"
             )
 
+    # Sample-repeat pass rate (weight_mode=sample battery repeats, M30)
+    sample_pass_rates = section.get("sample_pass_rates") or {}
+    configured_repeats = section.get("sample_battery_repeats_configured", 25)
+    lines += [
+        "\n### Sample-Repeat Pass Rate (`weight_mode=sample`)\n",
+        "| probe_id | session | pass_rate | repeats_completed/configured | flag |",
+        "|---|---|---|---|---|",
+    ]
+    for p in sample_pass_rates.get("per_probe") or []:
+        for s in p.get("sessions") or []:
+            pass_rate = s.get("pass_rate")
+            pass_rate_str = f"{pass_rate:.4f}" if pass_rate is not None else "—"
+            flag = " ⚠ PARTIAL BATTERY" if s.get("partial_battery") else ""
+            lines.append(
+                f"| {p.get('probe_id', '—')} "
+                f"| {s.get('session_index', '—')} "
+                f"| {pass_rate_str} "
+                f"| {s.get('repeats_completed', 0)}/{configured_repeats} "
+                f"|{flag} |"
+            )
+
     # Edge delta ledger
     ledger = section.get("edge_delta_ledger") or {}
     orphan_count = ledger.get("orphan_update_count", 0)

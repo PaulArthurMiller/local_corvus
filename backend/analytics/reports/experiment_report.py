@@ -664,6 +664,91 @@ def _compute_state_transitions(
     }
 
 
+def _compute_sample_pass_rates(
+    probes: list[dict],
+    sample_results_by_probe: dict[str, list[dict]],
+    pass_rank_threshold: int,
+    configured_repeats: int,
+    phenomenon_thresholds: Optional[dict] = None,
+) -> dict:
+    """
+    For each probe, group its weight_mode=sample battery repeats by
+    measurement_session_index and compute a pass_rate per session.
+
+    Parallel in shape to _compute_state_transitions, but a "session" here is
+    a set of K independent Thompson-sample repeats rather than a single
+    deterministic read — pass_rate is the fraction of non-flagged repeats
+    that passed, not a single pass/fail outcome. partial_battery flags a
+    session that stopped short of configured_repeats (a soft-continued
+    battery), so a truncated read is never silently treated as a full one.
+    """
+    by_phenomenon: dict[str, dict] = {}
+    per_probe: list[dict] = []
+
+    for probe in probes:
+        probe_id = probe["probe_id"]
+        phenomenon = probe.get("phenomenon_type", "unknown")
+        results = sample_results_by_probe.get(probe_id, [])
+
+        by_session: dict[int, list[dict]] = {}
+        for r in results:
+            idx = r.get("measurement_session_index")
+            by_session.setdefault(idx, []).append(r)
+
+        sessions: list[dict] = []
+        for session_idx in sorted(by_session.keys()):
+            rows = by_session[session_idx]
+            outcomes = [
+                _classify_probe_outcome(
+                    r, pass_rank_threshold,
+                    phenomenon_type=phenomenon,
+                    phenomenon_thresholds=phenomenon_thresholds,
+                )
+                for r in rows
+            ]
+            non_flagged = [o for o in outcomes if o != "negative_flagged"]
+            pass_count = sum(1 for o in non_flagged if o == "pass")
+            fail_count = len(non_flagged) - pass_count
+            pass_rate = (
+                round(pass_count / len(non_flagged), 4) if non_flagged else None
+            )
+            sessions.append({
+                "session_index": session_idx,
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "repeats_completed": len(rows),
+                "pass_rate": pass_rate,
+                "partial_battery": len(rows) < configured_repeats,
+            })
+
+        per_probe.append({
+            "probe_id": probe_id,
+            "phenomenon_type": phenomenon,
+            "sessions": sessions,
+        })
+
+        if phenomenon not in by_phenomenon:
+            by_phenomenon[phenomenon] = {
+                "probe_count": 0,
+                "session_count": 0,
+                "partial_battery_count": 0,
+            }
+        by_phenomenon[phenomenon]["probe_count"] += 1
+        by_phenomenon[phenomenon]["session_count"] += len(sessions)
+        by_phenomenon[phenomenon]["partial_battery_count"] += sum(
+            1 for s in sessions if s["partial_battery"]
+        )
+
+    logger.info(
+        "experiment_report §6.1 sample_pass_rates: probes=%d configured_repeats=%d",
+        len(per_probe), configured_repeats,
+    )
+    return {
+        "per_probe": per_probe,
+        "by_phenomenon": by_phenomenon,
+    }
+
+
 def _compute_mus_by_probe_outcome(
     probes: list[dict],
     results_by_probe: dict[str, list[dict]],
@@ -1071,6 +1156,7 @@ async def _section_61_learning_measures(
         results_by_probe[pid] = await store.query_probe_results(
             probe_id=pid,
             experiment_id=experiment_id,
+            battery_mode="mean",
         )
     if not any(results_by_probe.values()) and condition_label is not None:
         for probe in probes:
@@ -1078,6 +1164,29 @@ async def _section_61_learning_measures(
             results_by_probe[pid] = await store.query_probe_results(
                 probe_id=pid,
                 condition_label=condition_label,
+                battery_mode="mean",
+            )
+
+    # Sample-mode battery repeats (M30) — same experiment_id-first,
+    # condition_label-fallback pattern as the mean rows above, but filtered
+    # to battery_mode="sample" instead. Kept as a separate lookup rather than
+    # merged into results_by_probe, since mean and sample rows must never be
+    # classified together (that's the exact bug this milestone fixes).
+    sample_results_by_probe: dict[str, list[dict]] = {}
+    for probe in probes:
+        pid = probe["probe_id"]
+        sample_results_by_probe[pid] = await store.query_probe_results(
+            probe_id=pid,
+            experiment_id=experiment_id,
+            battery_mode="sample",
+        )
+    if not any(sample_results_by_probe.values()) and condition_label is not None:
+        for probe in probes:
+            pid = probe["probe_id"]
+            sample_results_by_probe[pid] = await store.query_probe_results(
+                probe_id=pid,
+                condition_label=condition_label,
+                battery_mode="sample",
             )
 
     # Restrict §6.1 to probes that actually recorded measurements for this
@@ -1137,6 +1246,14 @@ async def _section_61_learning_measures(
 
     saturation_analysis = _compute_saturation_analysis(all_runs, saturation_threshold)
 
+    configured_repeats = config.get("probe_measurement", {}).get(
+        "sample_battery_repeats", 25
+    )
+    sample_pass_rates = _compute_sample_pass_rates(
+        probes, sample_results_by_probe, pass_rank_threshold,
+        configured_repeats, phenomenon_thresholds,
+    )
+
     # Per-probe pass rate: fraction of non-flagged sessions where the probe passed.
     # Derived from state_transitions so it stays in sync with pass/fail classification.
     probe_pass_rates: dict[str, Optional[float]] = {}
@@ -1165,6 +1282,8 @@ async def _section_61_learning_measures(
         "cross_series_probe_mus": cross_series_probe_mus,
         "bridge_mu_analysis": bridge_mu_analysis,
         "saturation_analysis": saturation_analysis,
+        "sample_battery_repeats_configured": configured_repeats,
+        "sample_pass_rates": sample_pass_rates,
     }
 
 

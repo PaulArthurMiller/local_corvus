@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from memory.store import store as graph_store
 
@@ -41,6 +41,9 @@ class ProbeDefinition(BaseModel):
     probe_set_version: str
 
 
+VALID_BATTERY_MODES = ("mean", "sample")
+
+
 class ProbeResult(BaseModel):
     result_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     probe_id: str
@@ -55,6 +58,23 @@ class ProbeResult(BaseModel):
     # M21 — which experiment this measurement belongs to. condition_label alone
     # is shared across attempts/dry-runs, so reports scope by experiment_id.
     experiment_id: Optional[str] = None
+    # M30 — dual-mode probe battery. series_id lets series_report.py scope
+    # probe measurements to one series (probe turns create no analytics row,
+    # so this is the only way to join a probe result back to a series —
+    # mirrors the §5.3/§5.4 series_id convention). battery_mode distinguishes
+    # the single deterministic weight_mode="mean" pass at a checkpoint from
+    # each of the K weight_mode="sample" repeats; battery_repeat_index is the
+    # 0-indexed repeat number for a "sample" row, None for "mean".
+    series_id: Optional[str] = None
+    battery_mode: str = "mean"
+    battery_repeat_index: Optional[int] = None
+
+    @field_validator("battery_mode")
+    @classmethod
+    def _validate_battery_mode(cls, v: str) -> str:
+        if v not in VALID_BATTERY_MODES:
+            raise ValueError(f"battery_mode must be one of {VALID_BATTERY_MODES}, got {v!r}")
+        return v
 
 
 def load_probe_set(version: str = "v1") -> list[ProbeDefinition]:
@@ -104,6 +124,9 @@ async def compute_probe_result(
     measurement_session_index: int,
     condition_label: str,
     experiment_id: Optional[str] = None,
+    series_id: Optional[str] = None,
+    battery_mode: str = "mean",
+    battery_repeat_index: Optional[int] = None,
 ) -> ProbeResult:
     """
     Compute precision, recall, and gold_mu_rank from a retrieval result.
@@ -140,4 +163,7 @@ async def compute_probe_result(
         retrieval_recall=retrieval_recall,
         bm25_scores_per_mu=dict(retrieval_result.bm25_scores_per_mu),
         experiment_id=experiment_id,
+        series_id=series_id,
+        battery_mode=battery_mode,
+        battery_repeat_index=battery_repeat_index,
     )

@@ -267,6 +267,27 @@ reporting:
   # Range: 0.01–0.2.
   random_control_variance_floor: 0.05
 
+probe_measurement:
+  # M30 — dual-mode probe battery. At every probe checkpoint the harness
+  # always runs one deterministic weight_mode="mean" battery pass (the
+  # posterior-mean readout) plus this many independent weight_mode="sample"
+  # battery repeats (the behavioral pass-frequency readout — see
+  # docs/m28_tiebreak_learned_mode_findings_2026-07-15.md for why a single
+  # sample-mode read is too noisy to trust: N=25 wasn't enough to tell a
+  # genuinely low-probability spoke from noise). Both override whatever
+  # edge_update.weight_mode is committed above for training turns; probe
+  # calls use their own RNG stream (never the training-turn EDGE_RNG — see
+  # backend/api/admin.py's run_probe()), so measurement never perturbs
+  # training-turn sample-draw reproducibility. Read directly from this file
+  # by scripts/harness/runner.py (host-side, same convention as
+  # prompt_gen.py's Sonnet pricing read) — no backend restart needed to
+  # change it, since it only affects how many times the harness calls
+  # POST /admin/run-probe, not backend behavior itself.
+  # Cost is $0/repeat (pure retrieval read, no LLM call) but wall-clock
+  # scales linearly with battery_size * sample_battery_repeats per
+  # checkpoint. Range: 1-500.
+  sample_battery_repeats: 25
+
 edge_update:
   # M20 Phase 1 — Beta(alpha, beta) posterior edge-weight learning.
   # Applies only when the backend's RUN_CONDITION is "learned" (see

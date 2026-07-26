@@ -161,7 +161,10 @@ CREATE TABLE IF NOT EXISTS probe_results (
     retrieval_recall REAL,
     bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}',
     outcome_override TEXT,
-    experiment_id TEXT
+    experiment_id TEXT,
+    series_id TEXT,
+    battery_mode TEXT NOT NULL DEFAULT 'mean',
+    battery_repeat_index INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
@@ -250,6 +253,17 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         # reports never mix probe rows across attempts/dry-runs that share a
         # condition_label (same contamination class as the M19 attempt fix).
         ("probe_results", "experiment_id", "TEXT"),
+        # M30: dual-mode probe battery (see BUILD-PLAN.md). series_id lets
+        # series_report.py scope probe measurements to one series, matching
+        # the §5.3/§5.4 convention — probe turns create no analytics row, so
+        # series_id can't be joined in any other way. battery_mode/
+        # battery_repeat_index distinguish the single weight_mode=mean
+        # deterministic pass ("mean", repeat_index=None) from each of the
+        # K weight_mode=sample repeats ("sample", repeat_index=0..K-1) run
+        # at the same probe checkpoint.
+        ("probe_results", "series_id", "TEXT"),
+        ("probe_results", "battery_mode", "TEXT NOT NULL DEFAULT 'mean'"),
+        ("probe_results", "battery_repeat_index", "INTEGER"),
     ]
     for table, column, col_type in add_column_migrations:
         try:
@@ -272,6 +286,16 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         await db.commit()
     except Exception:
         logger.warning("store: could not create idx_probe_results_experiment", exc_info=True)
+
+    # --- M30: index on the migrated probe_results.series_id column ---
+    try:
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_probe_results_series "
+            "ON probe_results(series_id)"
+        )
+        await db.commit()
+    except Exception:
+        logger.warning("store: could not create idx_probe_results_series", exc_info=True)
 
     # --- M12: rename analytics.session_id → series_id (SQLite >= 3.25) ---
     try:
@@ -1018,8 +1042,9 @@ class GraphStore:
                     (result_id, probe_id, run_id, measurement_session_index,
                      condition_label, retrieved_mu_ids, gold_mu_rank,
                      retrieval_precision, retrieval_recall, bm25_scores_per_mu,
-                     outcome_override, experiment_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     outcome_override, experiment_id, series_id, battery_mode,
+                     battery_repeat_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result["result_id"],
@@ -1034,6 +1059,9 @@ class GraphStore:
                     _json.dumps(result.get("bm25_scores_per_mu", {})),
                     result.get("outcome_override"),
                     result.get("experiment_id"),
+                    result.get("series_id"),
+                    result.get("battery_mode", "mean"),
+                    result.get("battery_repeat_index"),
                 ),
             )
             await db.commit()
@@ -1051,6 +1079,8 @@ class GraphStore:
         condition_label: Optional[str] = None,
         measurement_session_index: Optional[int] = None,
         experiment_id: Optional[str] = None,
+        series_id: Optional[str] = None,
+        battery_mode: Optional[str] = None,
     ) -> list[dict]:
         """Query probe results with optional filters."""
         import json as _json
@@ -1068,6 +1098,12 @@ class GraphStore:
         if experiment_id:
             conditions.append("experiment_id = ?")
             params.append(experiment_id)
+        if series_id:
+            conditions.append("series_id = ?")
+            params.append(series_id)
+        if battery_mode:
+            conditions.append("battery_mode = ?")
+            params.append(battery_mode)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = f"SELECT * FROM probe_results {where} ORDER BY measurement_session_index ASC"

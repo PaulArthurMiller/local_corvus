@@ -38,5 +38,6 @@
   },
   "dry_run": false,
   "dry_run_n": 2,
-  "random_seed": 20260726
+  "random_seed": 20260726,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
 }

@@ -323,7 +323,23 @@ edge_update:
   # Deterministic posterior mean vs. Thompson-sampled draw as the single
   # weight traversal actually reads.
   # Values: "mean" | "sample"
-  weight_mode: mean
+  #
+  # Set to "sample" for experiment 0 (2026-07-26) — this is a requirement of
+  # the experiment, not a preference. Every hub in seed_v3 has 8 outgoing
+  # edges (7 spokes + 1 bridge) seeded at Beta(1,1), and K2's top_k=1 is
+  # winner-take-all. Under "mean" all 8 read exactly 0.5, so the argmax is
+  # deterministic and the SAME neighbour wins every training turn; since
+  # process_verdict_for_learning() only credits edges on the actual traversal
+  # path, no other spoke can ever gain evidence. That makes a trained spoke
+  # outside the initial tie-break winner structurally unable to learn
+  # (cluster_a/cluster_c credit only the bridge; cluster_b/cluster_d only
+  # spoke1) — a null result for mechanical, not scientific, reasons. Under
+  # "sample" each edge gets an independent Thompson draw per retrieve(), so
+  # the trained spoke is traversed ~1/8 of turns, earns credit when the judge
+  # grades its content "up", and climbs. Probe measurement is unaffected
+  # either way: M30's dual-mode battery overrides this value and reads both
+  # regimes at every checkpoint (see probe_measurement above).
+  weight_mode: sample
 
   evidence_cap:
     # Ship the knob; default-off for the pilot. When enabled, an edge's

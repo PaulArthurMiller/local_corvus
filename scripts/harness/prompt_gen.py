@@ -280,13 +280,26 @@ def fingerprint_scan(prompt_text: str, cluster_id: str, version: str = "v2") -> 
 # Sonnet calls
 # ---------------------------------------------------------------------------
 
-def _call_sonnet(client, model: str, prompt: str, max_tokens: int):
-    """Single-message, non-streaming call. Returns (text, input_tokens, output_tokens)."""
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
+def _call_sonnet(client, model: str, prompt: str, max_tokens: int, disable_thinking: bool = False):
+    """
+    Single-message, non-streaming call. Returns (text, input_tokens, output_tokens).
+
+    disable_thinking sends thinking={"type": "disabled"}. Needed for any call
+    with a small max_tokens: on claude-sonnet-5 adaptive thinking is ON by
+    default (omitting the parameter does NOT mean "no thinking"), and
+    thinking.display defaults to "omitted". max_tokens caps thinking + response
+    text together, so a tight budget is consumed entirely by an empty-text
+    thinking block and this function extracts "" — the model never gets to
+    answer. See the coherence-gate bug in PROGRESS.md (2026-07-26).
+    """
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if disable_thinking:
+        kwargs["thinking"] = {"type": "disabled"}
+    response = client.messages.create(**kwargs)
     text = "".join(block.text for block in response.content if block.type == "text")
     return text, response.usage.input_tokens, response.usage.output_tokens
 
@@ -424,7 +437,14 @@ def _validate_one(client, model: str, content_full: str, prompt_text: str, clust
         reasons.append(f"fingerprint leak: {leaked}")
         return reasons  # skip the Sonnet call — already failed lexically
 
-    verdict_text, _, _ = _call_sonnet(client, model, _build_validation_prompt(content_full, prompt_text), max_tokens=10)
+    # The coherence gate asks for exactly one word (YES/NO), so thinking is both
+    # unnecessary and actively harmful here — see _call_sonnet's docstring. The
+    # budget is small but not 10: enough for a leading newline or a short
+    # preamble, since the check below is a substring match, not an exact one.
+    verdict_text, _, _ = _call_sonnet(
+        client, model, _build_validation_prompt(content_full, prompt_text),
+        max_tokens=64, disable_thinking=True,
+    )
     if "yes" not in verdict_text.strip().lower():
         reasons.append(f"coherence validation failed: {verdict_text.strip()!r}")
     return reasons

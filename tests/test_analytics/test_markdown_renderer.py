@@ -23,6 +23,7 @@ from analytics.reports.markdown_renderer import (
     _render_s56,
     _render_s57,
     _render_s58,
+    _render_s61,
 )
 
 SECTION_HEADERS = [
@@ -229,3 +230,54 @@ def test_failure_summary_with_ghost_mus():
     print(f"Ghost MU section:\n{md}")
     assert "Ghost-MU" in md
     assert "empty_output" in md
+
+
+def test_s61_renders_sample_pass_rate_section():
+    """M30: §6.1's new Sample-Repeat Pass Rate block renders its header and
+    flags a partial-battery session with the ⚠ PARTIAL BATTERY marker."""
+    section = {
+        "condition_label": "learned",
+        "pass_rank_threshold": 3,
+        "probe_count": 1,
+        "run_count": 1,
+        "state_transitions": {"per_probe": [], "by_phenomenon": {}},
+        "edge_delta_ledger": {},
+        "bridge_mu_analysis": {},
+        "saturation_analysis": {},
+        "sample_battery_repeats_configured": 25,
+        "sample_pass_rates": {
+            "per_probe": [
+                {
+                    "probe_id": "vs_a1",
+                    "phenomenon_type": "spoke_retrieval",
+                    "sessions": [
+                        {
+                            "session_index": 0,
+                            "pass_count": 20,
+                            "fail_count": 5,
+                            "repeats_completed": 25,
+                            "pass_rate": 0.8,
+                            "partial_battery": False,
+                        },
+                        {
+                            "session_index": 1,
+                            "pass_count": 5,
+                            "fail_count": 5,
+                            "repeats_completed": 10,
+                            "pass_rate": 0.5,
+                            "partial_battery": True,
+                        },
+                    ],
+                },
+            ],
+            "by_phenomenon": {},
+        },
+    }
+
+    md = _render_s61(section)
+    print(f"§6.1 sample pass rate section:\n{md}")
+    assert "Sample-Repeat Pass Rate" in md
+    assert "weight_mode=sample" in md
+    assert "vs_a1" in md
+    assert "0.8" in md
+    assert "⚠ PARTIAL BATTERY" in md

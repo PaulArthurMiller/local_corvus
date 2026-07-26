@@ -629,7 +629,10 @@ def test_json_structure_complete():
 # ---------------------------------------------------------------------------
 
 
-def _insert_probe_row(store, probe_id, session_idx, condition_label, experiment_id=None, gold_mu_rank=None):
+def _insert_probe_row(
+    store, probe_id, session_idx, condition_label, experiment_id=None,
+    gold_mu_rank=None, battery_mode="mean", battery_repeat_index=None,
+):
     run(store.insert_probe_result({
         "result_id": str(uuid.uuid4()),
         "probe_id": probe_id,
@@ -642,6 +645,8 @@ def _insert_probe_row(store, probe_id, session_idx, condition_label, experiment_
         "retrieval_recall": None,
         "bm25_scores_per_mu": {},
         "experiment_id": experiment_id,
+        "battery_mode": battery_mode,
+        "battery_repeat_index": battery_repeat_index,
     }))
 
 
@@ -791,6 +796,214 @@ def test_learning_measures_keep_all_probes_when_no_results_exist():
         print(f"probe_count with no results: {measures['probe_count']}")
         assert measures["probe_count"] == 1
         assert measures["probe_pass_rates"] == {"p01": None}
+
+
+# ---------------------------------------------------------------------------
+# M30 Part B — §6.1 dual-mode battery consumption (battery_mode filtering +
+# sample_pass_rates)
+# ---------------------------------------------------------------------------
+
+
+def test_learning_measures_ignores_sample_repeats_for_mean_sections():
+    """Regression test for the actual M30 bug: mean-section subsections must
+    only ever see battery_mode='mean' rows. Before the fix, a dual-mode
+    battery's mean pass + K sample repeats shared one measurement_session_index
+    and query_probe_results() had no battery_mode filter, so every mean-only
+    subsection silently received 1 + K rows per checkpoint instead of 1."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v3",
+            "phenomenon_type": "spoke_retrieval", "prompt_text": "test probe",
+            "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+
+        # 1 mean row at session 0, passing.
+        _insert_probe_row(
+            store, "p01", 0, "learned", experiment_id=experiment_id,
+            gold_mu_rank=1, battery_mode="mean",
+        )
+        # 5 sample repeats at the same session index, mixed pass/fail —
+        # these must never reach state_transitions/probe_pass_rates.
+        for i, rank in enumerate([1, None, None, 1, None]):
+            _insert_probe_row(
+                store, "p01", 0, "learned", experiment_id=experiment_id,
+                gold_mu_rank=rank, battery_mode="sample", battery_repeat_index=i,
+            )
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        p01 = next(
+            p for p in measures["state_transitions"]["per_probe"] if p["probe_id"] == "p01"
+        )
+        print(f"state_transitions p01: {p01}")
+        assert len(p01["session_indices"]) == 1  # not 6
+        assert p01["outcome_sequence"] == ["pass"]
+        assert measures["probe_pass_rates"]["p01"] == 1.0
+
+
+def test_sample_pass_rates_computed_from_repeats():
+    """A known pass/fail mix of sample repeats at one session must produce
+    exact pass_count/fail_count/repeats_completed/pass_rate."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v3",
+            "phenomenon_type": "spoke_retrieval", "prompt_text": "test probe",
+            "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+        _insert_probe_row(
+            store, "p01", 0, "learned", experiment_id=experiment_id,
+            gold_mu_rank=1, battery_mode="mean",
+        )
+        # 4 sample repeats: 3 pass (rank 1), 1 fail (rank None).
+        for i, rank in enumerate([1, 1, 1, None]):
+            _insert_probe_row(
+                store, "p01", 0, "learned", experiment_id=experiment_id,
+                gold_mu_rank=rank, battery_mode="sample", battery_repeat_index=i,
+            )
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        p01 = next(
+            p for p in measures["sample_pass_rates"]["per_probe"] if p["probe_id"] == "p01"
+        )
+        session = p01["sessions"][0]
+        print(f"sample_pass_rates session: {session}")
+        assert session["pass_count"] == 3
+        assert session["fail_count"] == 1
+        assert session["repeats_completed"] == 4
+        assert session["pass_rate"] == 0.75
+
+
+def test_sample_pass_rates_full_battery_not_flagged_partial():
+    """Exactly configured_repeats rows must not be flagged partial_battery."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v3",
+            "phenomenon_type": "spoke_retrieval", "prompt_text": "test probe",
+            "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+        _insert_probe_row(
+            store, "p01", 0, "learned", experiment_id=experiment_id,
+            gold_mu_rank=1, battery_mode="mean",
+        )
+        configured_repeats = 3
+        for i in range(configured_repeats):
+            _insert_probe_row(
+                store, "p01", 0, "learned", experiment_id=experiment_id,
+                gold_mu_rank=1, battery_mode="sample", battery_repeat_index=i,
+            )
+
+        measures = run(_section_61_learning_measures(
+            experiment_id, store,
+            {"reporting": {}, "probe_measurement": {"sample_battery_repeats": configured_repeats}},
+        ))
+
+        p01 = next(
+            p for p in measures["sample_pass_rates"]["per_probe"] if p["probe_id"] == "p01"
+        )
+        session = p01["sessions"][0]
+        print(f"full-battery session: {session}")
+        assert session["repeats_completed"] == configured_repeats
+        assert session["partial_battery"] is False
+
+
+def test_sample_pass_rates_scoped_to_experiment_id():
+    """A contaminating attempt under a different experiment_id must not leak
+    into this experiment's sample pass rate — mirrors the existing mean-row
+    scoping test."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v3",
+            "phenomenon_type": "spoke_retrieval", "prompt_text": "test probe",
+            "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+        _insert_probe_row(
+            store, "p01", 0, "learned", experiment_id=experiment_id,
+            gold_mu_rank=1, battery_mode="mean",
+        )
+        # This experiment: both sample repeats pass.
+        _insert_probe_row(
+            store, "p01", 0, "learned", experiment_id=experiment_id,
+            gold_mu_rank=1, battery_mode="sample", battery_repeat_index=0,
+        )
+        _insert_probe_row(
+            store, "p01", 0, "learned", experiment_id=experiment_id,
+            gold_mu_rank=1, battery_mode="sample", battery_repeat_index=1,
+        )
+        # Contaminating attempt, same condition_label, all failing.
+        _insert_probe_row(
+            store, "p01", 0, "learned", experiment_id="plan1_attempt2_learned",
+            gold_mu_rank=None, battery_mode="sample", battery_repeat_index=0,
+        )
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        p01 = next(
+            p for p in measures["sample_pass_rates"]["per_probe"] if p["probe_id"] == "p01"
+        )
+        session = p01["sessions"][0]
+        print(f"scoped sample session: {session}")
+        assert session["repeats_completed"] == 2  # not 3 — other attempt excluded
+        assert session["pass_rate"] == 1.0
+
+
+def test_sample_pass_rates_empty_when_no_sample_rows():
+    """An experiment with only mean-mode rows (every pre-M30 experiment)
+    still generates §6.1 cleanly — sample_pass_rates.per_probe present with
+    empty sessions, no crash."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "plan1_learned"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        run(store.sync_probes([{
+            "probe_id": "p01", "probe_set_version": "v2",
+            "phenomenon_type": "ranking_improvement", "prompt_text": "test probe",
+            "gold_mu_ids": ["mu-gold"], "is_bridge_probe": False, "bridge_pair_id": None,
+        }]))
+        _insert_probe_row(
+            store, "p01", 1, "learned", experiment_id=experiment_id,
+            gold_mu_rank=1, battery_mode="mean",
+        )
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        p01 = next(
+            p for p in measures["sample_pass_rates"]["per_probe"] if p["probe_id"] == "p01"
+        )
+        print(f"empty sample_pass_rates p01: {p01}")
+        assert p01["sessions"] == []
 
 
 # ---------------------------------------------------------------------------

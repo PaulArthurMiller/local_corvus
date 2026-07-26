@@ -64,8 +64,13 @@ class FakeMessages:
         self._responses = list(responses)
         self.calls = []
 
-    def create(self, model, max_tokens, messages):
-        self.calls.append({"model": model, "max_tokens": max_tokens, "messages": messages})
+    def create(self, model, max_tokens, messages, **kwargs):
+        # **kwargs so the fake accepts every optional request field the real
+        # SDK does — `thinking` in particular (see the coherence-gate
+        # regression test below). Recorded, not ignored: tests assert on it.
+        self.calls.append({
+            "model": model, "max_tokens": max_tokens, "messages": messages, **kwargs,
+        })
         if not self._responses:
             raise AssertionError("FakeMessages exhausted; unexpected Sonnet call")
         resp = self._responses.pop(0)
@@ -106,6 +111,76 @@ def test_fingerprint_scan_fails_for_wrong_cluster():
 def test_fingerprint_scan_passes_for_own_cluster():
     text = "This response discusses the rule and the constraint in detail."
     assert fingerprint_scan(text, "cluster_c") == []
+
+
+# ---------------------------------------------------------------------------
+# Coherence gate must disable thinking (regression, 2026-07-26)
+#
+# On claude-sonnet-5 adaptive thinking is ON when the `thinking` parameter is
+# omitted, and thinking.display defaults to "omitted". Since max_tokens caps
+# thinking + response text together, the coherence gate's tight budget was
+# consumed entirely by an empty-text thinking block: _call_sonnet extracted
+# "" and EVERY prompt that got past the fingerprint scan was scored
+# "coherence validation failed", making a usable bank impossible to generate.
+# ---------------------------------------------------------------------------
+
+def test_validate_one_disables_thinking_on_the_coherence_call():
+    client = FakeAnthropicClient([FakeResponse("YES")])
+
+    reasons = prompt_gen_module._validate_one(
+        client, "claude-sonnet-5", "cluster content here",
+        "A prompt with no leaked vocabulary at all.", "cluster_a", "v3",
+    )
+
+    assert reasons == []
+    call = client.messages.calls[0]
+    assert call["thinking"] == {"type": "disabled"}, (
+        "the coherence gate must disable thinking — with it on by default, the "
+        "max_tokens budget goes to an empty-text thinking block and the gate "
+        "always reads ''"
+    )
+
+
+def test_validate_one_budget_survives_a_preamble():
+    """The gate is a substring match, so max_tokens must leave room for more
+    than a bare 'YES' — a 10-token budget was the original failure mode."""
+    client = FakeAnthropicClient([FakeResponse("YES")])
+
+    prompt_gen_module._validate_one(
+        client, "claude-sonnet-5", "cluster content here",
+        "A prompt with no leaked vocabulary at all.", "cluster_a", "v3",
+    )
+
+    assert client.messages.calls[0]["max_tokens"] >= 32
+
+
+def test_validate_one_empty_text_is_still_reported_as_a_failure():
+    """If a future model returns no text despite thinking being disabled, the
+    gate must fail loudly rather than silently passing the prompt."""
+    client = FakeAnthropicClient([FakeResponse("")])
+
+    reasons = prompt_gen_module._validate_one(
+        client, "claude-sonnet-5", "cluster content here",
+        "A prompt with no leaked vocabulary at all.", "cluster_a", "v3",
+    )
+
+    assert len(reasons) == 1
+    assert "coherence validation failed" in reasons[0]
+
+
+def test_generation_call_does_not_disable_thinking():
+    """Only the coherence gate disables thinking. Generation gets a large
+    max_tokens and benefits from reasoning, so it keeps the model default."""
+    client = FakeAnthropicClient([FakeResponse('[{"prompt_text": "q", "criteria": ["c"], "hop_distance": 0}]')])
+
+    prompt_gen_module.generate_cluster_prompts(
+        client, "claude-sonnet-5",
+        {"full_content": "cluster content"},
+        [{"hop_distance": 0, "target_text": "target"}],
+        version="v3",
+    )
+
+    assert "thinking" not in client.messages.calls[0]
 
 
 def test_fingerprint_scan_uses_whole_word_matching():

@@ -34,7 +34,13 @@ from harness.cost import BudgetExceededError, check_prerun_budget, estimate_prer
 from harness.elicit import elicit_plan, offer_to_save_plan  # noqa: E402
 from harness.judge import DEFAULT_JUDGE_HOST, OllamaJudgeClient  # noqa: E402
 from harness.prompt_bank import bank_path_for_hash  # noqa: E402
-from harness.prompt_gen import estimate_bank_cost_for_plan, fixture_path_for_version, generate_bank_for_plan  # noqa: E402
+from harness.prompt_gen import (  # noqa: E402
+    GenerationAborted,
+    MissingApiKeyError,
+    estimate_bank_cost_for_plan,
+    fixture_path_for_version,
+    generate_bank_for_plan,
+)
 from harness.runner import execute_run, load_probe_battery, scope_for_dry_run  # noqa: E402
 from harness.schema import RunPlan, format_validation_error  # noqa: E402
 from harness.turn_resolution import TURN_TYPE_PROBE, resolve_turn_sequence  # noqa: E402
@@ -69,6 +75,30 @@ def load_plan_from_file(plan_path: Path) -> RunPlan:
     except ValidationError as exc:
         print("ERROR: plan validation failed:")
         print(format_validation_error(exc))
+        sys.exit(1)
+
+
+def generate_bank_or_exit(plan: RunPlan, fixture_path: Path, output_dir: Path):
+    """
+    Wrap generate_bank_for_plan()'s two operator-facing failure modes so the
+    CLI exits cleanly instead of surfacing a raw traceback — the same
+    convention load_plan_from_file() already follows for plan validation.
+
+    Both are expected operator outcomes, not defects: declining the cost gate
+    is a deliberate choice, and a missing API key is a setup step. Printing a
+    stack trace immediately after a cost-confirmation prompt is actively
+    harmful — it reads as a crash mid-call, leaving the operator unsure
+    whether any spend or file write happened (neither did).
+    """
+    try:
+        return generate_bank_for_plan(plan, fixture_path, output_dir)
+    except GenerationAborted:
+        # confirm_cost() has already printed the "no API calls made, no
+        # charges, no files written" line; don't restate it.
+        print("Prompt bank generation declined — nothing generated.")
+        sys.exit(1)
+    except MissingApiKeyError as exc:
+        print(f"ERROR: {exc}")
         sys.exit(1)
 
 
@@ -113,7 +143,7 @@ def main() -> None:
     fixture_path = fixture_path_for_version(plan.seed_fixture_version, SEED_FIXTURES_DIR)
 
     if args.generate_bank:
-        generate_bank_for_plan(plan, fixture_path, PROMPT_BANKS_DIR)
+        generate_bank_or_exit(plan, fixture_path, PROMPT_BANKS_DIR)
         return
 
     # M19 Phase 3 — pre-run budget gate, before ANY Sonnet spend (bank
@@ -146,7 +176,7 @@ def main() -> None:
     # generate one now (cost-confirmation gate happens inside prompt_gen.py)
     # before any wipe/seed call.
     if needs_bank_generation:
-        bank = generate_bank_for_plan(plan, fixture_path, PROMPT_BANKS_DIR)
+        bank = generate_bank_or_exit(plan, fixture_path, PROMPT_BANKS_DIR)
         plan.prompt_bank_path = str(bank_path_for_hash(bank.content_hash, PROMPT_BANKS_DIR))
 
     # M21 — the probe battery drives real POST /admin/run-probe measurements;

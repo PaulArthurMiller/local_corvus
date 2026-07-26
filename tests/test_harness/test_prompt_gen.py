@@ -12,6 +12,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+# backend/ too, so the keyword-window mirror tests can compare prompt_gen's
+# duplicated tokenizer against retrieval.py's real one (same insert
+# test_memory/test_retrieval.py uses; `memory` must resolve to backend/memory,
+# not the repo-root memory/ data directory).
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
 import harness.prompt_gen as prompt_gen_module
 from harness.prompt_bank import PromptBank, PromptBankEntry, save_bank
@@ -69,7 +74,8 @@ class FakeMessages:
         # SDK does — `thinking` in particular (see the coherence-gate
         # regression test below). Recorded, not ignored: tests assert on it.
         self.calls.append({
-            "model": model, "max_tokens": max_tokens, "messages": messages, **kwargs,
+            "model": model, "max_tokens": max_tokens, "messages": messages,
+            "streamed": False, **kwargs,
         })
         if not self._responses:
             raise AssertionError("FakeMessages exhausted; unexpected Sonnet call")
@@ -77,6 +83,36 @@ class FakeMessages:
         if isinstance(resp, Exception):
             raise resp
         return resp
+
+    def stream(self, model, max_tokens, messages, **kwargs):
+        """Generation calls stream (large max_tokens; see _call_sonnet). Recorded
+        with streamed=True so tests can assert which endpoint was used."""
+        self.calls.append({
+            "model": model, "max_tokens": max_tokens, "messages": messages,
+            "streamed": True, **kwargs,
+        })
+        if not self._responses:
+            raise AssertionError("FakeMessages exhausted; unexpected Sonnet call")
+        return FakeStreamContext(self._responses.pop(0))
+
+
+class FakeStreamContext:
+    """Mimics the SDK's messages.stream() context manager well enough for
+    _call_sonnet: `with client.messages.stream(...) as s: s.get_final_message()`."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
 
 
 class FakeAnthropicClient:
@@ -168,6 +204,45 @@ def test_validate_one_empty_text_is_still_reported_as_a_failure():
     assert "coherence validation failed" in reasons[0]
 
 
+class TestGenerationOutputBudget:
+    """The flat 400-per-target budget broke in both directions once adaptive
+    thinking became the default — see generation_max_tokens()."""
+
+    def test_single_target_gets_the_floor_not_400(self):
+        """The per-target retry/fallback path is what got 400 and returned ''."""
+        assert prompt_gen_module.generation_max_tokens(1) >= 8000
+
+    def test_budget_scales_with_target_count(self):
+        assert prompt_gen_module.generation_max_tokens(53) > prompt_gen_module.generation_max_tokens(3)
+
+    def test_a_full_cluster_batch_has_real_headroom(self):
+        """53 prompts is the real experiment-0 per-cluster batch; the old
+        formula gave 21200 for it, all of which had to cover thinking too."""
+        assert prompt_gen_module.generation_max_tokens(53) >= 700 * 53
+
+    def test_zero_targets_still_gets_the_floor(self):
+        assert prompt_gen_module.generation_max_tokens(0) >= 8000
+
+    def test_generation_streams(self):
+        """A large max_tokens non-streaming risks an SDK HTTP timeout."""
+        client = FakeAnthropicClient([FakeResponse('[{"prompt_text": "q", "criteria": ["c"], "hop_distance": 0}]')])
+        prompt_gen_module.generate_cluster_prompts(
+            client, "claude-sonnet-5", {"full_content": "content"},
+            [{"hop_distance": 0, "target_text": "t"}], version="v3", cluster_id="cluster_a",
+        )
+        call = client.messages.calls[0]
+        assert call["streamed"] is True
+        assert call["max_tokens"] == prompt_gen_module.generation_max_tokens(1)
+
+    def test_coherence_gate_does_not_stream(self):
+        """Small budget, tiny response — streaming buys nothing there."""
+        client = FakeAnthropicClient([FakeResponse("YES")])
+        prompt_gen_module._validate_one(
+            client, "claude-sonnet-5", "content", "A clean prompt.", "cluster_a", "v3",
+        )
+        assert client.messages.calls[0]["streamed"] is False
+
+
 def test_generation_call_does_not_disable_thinking():
     """Only the coherence gate disables thinking. Generation gets a large
     max_tokens and benefits from reasoning, so it keeps the model default."""
@@ -181,6 +256,132 @@ def test_generation_call_does_not_disable_thinking():
     )
 
     assert "thinking" not in client.messages.calls[0]
+
+
+# ---------------------------------------------------------------------------
+# v3 keyword-window scoping (2026-07-26)
+#
+# The cross-cluster entry-vocabulary rule is enforced only inside the BM25
+# keyword window — the first retrieval_keyword_count non-stopword tokens,
+# which is all retrieve() ever reads as keywords. Answer tokens stay
+# whole-prompt. See fingerprint_scan's docstring for the full rationale.
+# ---------------------------------------------------------------------------
+
+class TestBm25KeywordWindowMirror:
+    """prompt_gen duplicates retrieval.py's tokenizer (host-side script, no
+    backend import). These tests fail if the copies ever diverge."""
+
+    def test_stopwords_match_the_backend(self):
+        from memory import retrieval
+
+        assert prompt_gen_module._STOPWORDS == retrieval._STOPWORDS
+
+    def test_word_regex_matches_the_backend(self):
+        from memory import retrieval
+
+        assert prompt_gen_module._WORD_RE.pattern == retrieval._WORD_RE.pattern
+
+    def test_tokenization_matches_the_backend(self):
+        from memory import retrieval
+
+        text = "Format, structure and the delimiter -- what does rule K-2 require of a file?"
+        assert (
+            prompt_gen_module.bm25_keywords(text, keyword_count=5)
+            == retrieval._tokenize(text)[:5]
+        )
+
+    def test_keyword_count_read_from_config(self):
+        """The real config.yaml value is what generation is validated against."""
+        assert prompt_gen_module.load_retrieval_keyword_count() == 5
+
+
+class TestV3FingerprintKeywordWindow:
+    def test_other_cluster_vocab_inside_the_window_still_leaks(self):
+        # "schema" (cluster_b) lands in the first 5 non-stopword tokens.
+        prompt = "Schema and data questions aside, what does the Kestrel index cover?"
+        leaked = fingerprint_scan(prompt, "cluster_a", "v3")
+        assert "schema" in leaked
+
+    def test_other_cluster_vocab_past_the_window_is_allowed(self):
+        # Own-cluster vocab front-loaded; "rule" (cluster_c) sits well past
+        # token 5, where retrieve() can never see it. This is the exact shape
+        # that was previously unsatisfiable.
+        prompt = (
+            "Format, structure, delimiter, header, encoding — which numbered "
+            "rule covers the ordering of columns in a data file?"
+        )
+        assert fingerprint_scan(prompt, "cluster_a", "v3") == []
+
+    def test_the_word_rule_is_now_usable_outside_the_window(self):
+        """The headline unblocker: cluster_a/b/d prompts may say "rule"."""
+        prompt = "Kestrel output format conventions — which rule governs padding?"
+        assert "rule" not in fingerprint_scan(prompt, "cluster_a", "v3")
+
+    def test_answer_tokens_leak_anywhere_in_the_prompt(self):
+        """Tier 1 is unchanged: whole-prompt, every cluster. An answer token
+        past the window still hands the agent the answer, so it must fail."""
+        prompt = (
+            "Format, structure, delimiter, header, encoding — does this file "
+            "have to follow the declared spine order?"
+        )
+        leaked = fingerprint_scan(prompt, "cluster_a", "v3")
+        assert "spine order" in leaked
+
+    def test_own_cluster_answer_token_also_leaks(self):
+        prompt = "Marrow schema shape rules: what is a girth line?"
+        assert "girth line" in fingerprint_scan(prompt, "cluster_b", "v3")
+
+    def test_own_cluster_entry_vocab_is_free_inside_the_window(self):
+        prompt = "Format, structure, output, field, header conventions — what applies?"
+        assert fingerprint_scan(prompt, "cluster_a", "v3") == []
+
+    def test_window_width_is_injectable(self):
+        """A wider window catches a term a narrower one lets through, proving
+        the scan is genuinely position-scoped rather than accidentally passing."""
+        prompt = "Format structure output field schema questions"  # "schema" is token 5
+        assert fingerprint_scan(prompt, "cluster_a", "v3", keyword_count=4) == []
+        assert "schema" in fingerprint_scan(prompt, "cluster_a", "v3", keyword_count=5)
+
+    def test_v2_scan_is_untouched_by_the_change(self):
+        """v2 keeps whole-prompt semantics — no v2 bank is being regenerated."""
+        text = "A long preamble that eventually gets around to the constraint at the end."
+        assert "constraint" in fingerprint_scan(text, "cluster_a", "v2")
+
+
+class TestV3GenerationPromptStatesItsRules:
+    def test_brief_names_own_vocab_and_other_cluster_vocab(self):
+        brief = prompt_gen_module._v3_vocabulary_brief("cluster_a", keyword_count=5)
+        assert "Kestrel" in brief          # own family name — required up front
+        assert "delimiter" in brief        # own entry vocab
+        assert "rule" in brief             # cluster_c's, to keep out of the window
+        assert "first 5 non-trivial words" in brief
+
+    def test_v3_generation_prompt_includes_the_brief(self):
+        prompt = prompt_gen_module._build_generation_prompt(
+            "cluster content", [{"hop_distance": 0, "target_text": "t"}],
+            None, "v3", "cluster_a",
+        )
+        assert "VOCABULARY RULES" in prompt
+        # v2's blanket instruction must not also be present — it points the
+        # opposite way for v3 (own-cluster vocab is required, not forbidden).
+        assert "must NOT quote or repeat the cluster's distinctive vocabulary" not in prompt
+
+    def test_v2_generation_prompt_unchanged(self):
+        prompt = prompt_gen_module._build_generation_prompt(
+            "cluster content", [{"hop_distance": 0, "target_text": "t"}], None, "v2",
+        )
+        assert "VOCABULARY RULES" not in prompt
+        assert "must NOT quote or repeat the cluster's distinctive vocabulary" in prompt
+
+    def test_generation_threads_cluster_id_into_the_prompt(self):
+        client = FakeAnthropicClient([FakeResponse('[{"prompt_text": "q", "criteria": ["c"], "hop_distance": 0}]')])
+        prompt_gen_module.generate_cluster_prompts(
+            client, "claude-sonnet-5", {"full_content": "content"},
+            [{"hop_distance": 0, "target_text": "t"}], version="v3", cluster_id="cluster_c",
+        )
+        sent = client.messages.calls[0]["messages"][0]["content"]
+        assert "VOCABULARY RULES" in sent
+        assert "Vessel" in sent  # cluster_c's family name
 
 
 def test_fingerprint_scan_uses_whole_word_matching():

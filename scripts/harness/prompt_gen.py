@@ -79,6 +79,30 @@ CHARS_PER_TOKEN_ESTIMATE = 4
 
 CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
 
+# --- BM25 keyword-window mirror (see fingerprint_scan) --------------------
+# Duplicated verbatim from backend/memory/retrieval.py rather than imported:
+# that module pulls in the BM25 library and the learning layer, which is not
+# appropriate for a standalone host-side script (same reasoning as
+# compute_fixture_manifest_hash below). test_prompt_gen.py asserts these stay
+# byte-identical to the backend's, so the duplication can't silently drift.
+_WORD_RE = re.compile(r"\b\w+\b")
+
+_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "for",
+    "of", "and", "or", "but", "not", "with", "this", "that", "i",
+    "you", "he", "she", "we", "they", "be", "was", "were", "are",
+    "has", "have", "had", "do", "did", "does", "will", "would",
+    "could", "should", "may", "might", "can",
+})
+
+# Fallback if config.yaml has no hyperparameters section — mirrors
+# retrieve()'s own default for retrieval_keyword_count.
+_DEFAULT_RETRIEVAL_KEYWORD_COUNT = 5
+
+# Generation output budget — see generation_max_tokens().
+_GENERATION_MIN_MAX_TOKENS = 8000
+_GENERATION_TOKENS_PER_TARGET = 700
+
 # Fallback pricing if config.yaml has no prompt_gen section — Sonnet 5
 # standard rate ($3/$15 per MTok; see config.yaml for the current value).
 _DEFAULT_PRICE_IN = 3.0
@@ -101,6 +125,30 @@ def _get_api_key() -> str:
             "(host-side only — never set inside the Docker container)."
         )
     return key
+
+
+def load_retrieval_keyword_count(config_path: Path = CONFIG_PATH) -> int:
+    """Read hyperparameters.retrieval_keyword_count from config.yaml — the
+    number of leading non-stopword tokens retrieve() actually uses as BM25
+    keywords, and therefore the width of the window fingerprint_scan()
+    enforces the cross-cluster entry-vocabulary rule over."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return _DEFAULT_RETRIEVAL_KEYWORD_COUNT
+    hp = config.get("hyperparameters") or {}
+    return int(hp.get("retrieval_keyword_count", _DEFAULT_RETRIEVAL_KEYWORD_COUNT))
+
+
+def bm25_keywords(text: str, keyword_count: Optional[int] = None) -> list:
+    """The exact token list retrieve() would use as BM25 keywords for `text`:
+    lowercase word tokens, stopwords removed, truncated to keyword_count.
+    Mirrors retrieval.py's _tokenize() + `query_tokens[:keyword_count]`."""
+    if keyword_count is None:
+        keyword_count = load_retrieval_keyword_count()
+    tokens = [w for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS]
+    return tokens[:keyword_count]
 
 
 def load_pricing(config_path: Path = CONFIG_PATH) -> tuple:
@@ -239,7 +287,10 @@ def _leak_whole_word(lower_prompt: str, terms) -> list:
     return [t for t in terms if re.search(r"\b" + re.escape(t.lower()) + r"\b", lower_prompt)]
 
 
-def fingerprint_scan(prompt_text: str, cluster_id: str, version: str = "v2") -> list:
+def fingerprint_scan(
+    prompt_text: str, cluster_id: str, version: str = "v2",
+    keyword_count: Optional[int] = None,
+) -> list:
     """
     Return leaked vocabulary terms found in prompt_text (whole-word/whole-
     phrase, case-insensitive). What counts as a leak is version-dependent:
@@ -248,24 +299,50 @@ def fingerprint_scan(prompt_text: str, cluster_id: str, version: str = "v2") -> 
     contain any OTHER cluster's fingerprint terms — see generate_seed_v2.py's
     module docstring for why this corrupts the hop-distance measurement.
 
-    v3 (spec §5, two-tier): same OTHER-cluster rule, but applied to entry
-    vocabulary + family name instead of a flat fingerprint list — a
-    cluster's OWN entry vocabulary is free (that's how BM25 is meant to
-    reach the hub). Answer tokens are stricter: forbidden from EVERY
-    cluster's prompts, including the prompt's own target cluster — an
-    answer token appearing in a bulk prompt would let BM25 find the gold
-    spoke directly, destroying the headroom only graph traversal should
-    provide.
+    v3 (spec §5, two-tier) applies its two tiers over DIFFERENT SCOPES, which
+    is the whole subtlety of this function:
+
+      * Answer tokens — WHOLE PROMPT, every cluster including the prompt's
+        own. Two independent reasons: an answer token in the first few tokens
+        lets BM25 reach the gold spoke directly, and an answer token anywhere
+        at all hands the agent the answer without retrieval, which corrupts
+        the judge's verdict. Neither depends on token position.
+
+      * Other clusters' entry vocabulary + family name — only within the
+        BM25 KEYWORD WINDOW (the first `keyword_count` non-stopword tokens,
+        default from config.yaml's hyperparameters.retrieval_keyword_count).
+        The prompt's own cluster's entry vocabulary is free everywhere — that
+        is how BM25 is meant to reach the hub.
+
+    Why the window, not the whole prompt (changed 2026-07-26): this rule
+    exists to stop a prompt from pulling ANOTHER cluster's hub into K1 and
+    corrupting the hop-distance measurement. `retrieve()` only ever takes the
+    first `retrieval_keyword_count` non-stopword tokens of the message as its
+    BM25 keywords, so a term past that window is invisible to retrieval and
+    cannot pull in anything. Enforcing it over the whole prompt was therefore
+    stricter than the mechanism requires — and unsatisfiable in practice,
+    because seed_v3's four entry vocabularies are ordinary English words from
+    one shared domain (27 of the 30 terms forbidden per cluster are generic:
+    `data`, `type`, `source`, `format`, ...). Most sharply, `rule` belongs to
+    cluster_c, so no cluster_a/b/d prompt could contain the word "rule" while
+    the entire fixture is a set of rule families. A real generation run
+    failed 8 of its first 10 prompts on this; see PROGRESS.md 2026-07-26.
     """
     lower = prompt_text.lower()
 
     if version == "v3":
-        leaked = []
+        # Tier 1 — answer tokens, whole prompt, all clusters.
+        leaked = _leak_whole_word(lower, _V3_ALL_ANSWER_TOKENS)
+
+        # Tier 2 — other clusters' entry vocab, BM25 keyword window only.
+        # Matched against the token list rather than via regex: every entry
+        # vocabulary term is a single word, and the window is already
+        # tokenized exactly the way retrieve() tokenizes it.
+        window = set(bm25_keywords(prompt_text, keyword_count))
         for other_cluster, terms in _V3_ENTRY_VOCAB_BY_CLUSTER.items():
             if other_cluster == cluster_id:
                 continue
-            leaked.extend(_leak_whole_word(lower, terms))
-        leaked.extend(_leak_whole_word(lower, _V3_ALL_ANSWER_TOKENS))
+            leaked.extend(t for t in terms if t.lower() in window)
         return leaked
 
     leaked = []
@@ -280,9 +357,12 @@ def fingerprint_scan(prompt_text: str, cluster_id: str, version: str = "v2") -> 
 # Sonnet calls
 # ---------------------------------------------------------------------------
 
-def _call_sonnet(client, model: str, prompt: str, max_tokens: int, disable_thinking: bool = False):
+def _call_sonnet(
+    client, model: str, prompt: str, max_tokens: int,
+    disable_thinking: bool = False, stream: bool = False,
+):
     """
-    Single-message, non-streaming call. Returns (text, input_tokens, output_tokens).
+    Single-message call. Returns (text, input_tokens, output_tokens).
 
     disable_thinking sends thinking={"type": "disabled"}. Needed for any call
     with a small max_tokens: on claude-sonnet-5 adaptive thinking is ON by
@@ -291,6 +371,12 @@ def _call_sonnet(client, model: str, prompt: str, max_tokens: int, disable_think
     text together, so a tight budget is consumed entirely by an empty-text
     thinking block and this function extracts "" — the model never gets to
     answer. See the coherence-gate bug in PROGRESS.md (2026-07-26).
+
+    stream uses the streaming endpoint and collects the result via
+    get_final_message(). Required for the generation calls: they need a large
+    max_tokens (thinking plus a long JSON array), and a non-streaming request
+    at that size risks an SDK HTTP timeout. Behaviour is otherwise identical —
+    same response object, same text extraction.
     """
     kwargs = {
         "model": model,
@@ -299,9 +385,35 @@ def _call_sonnet(client, model: str, prompt: str, max_tokens: int, disable_think
     }
     if disable_thinking:
         kwargs["thinking"] = {"type": "disabled"}
-    response = client.messages.create(**kwargs)
+
+    if stream:
+        with client.messages.stream(**kwargs) as stream_ctx:
+            response = stream_ctx.get_final_message()
+    else:
+        response = client.messages.create(**kwargs)
+
     text = "".join(block.text for block in response.content if block.type == "text")
     return text, response.usage.input_tokens, response.usage.output_tokens
+
+
+def generation_max_tokens(n_targets: int) -> int:
+    """
+    Output budget for one generation call, covering thinking AND the JSON array.
+
+    The old value was a flat 400 per target, which broke in both directions
+    once adaptive thinking became the default (2026-07-26 trial run):
+
+      * A batch of 3 targets (1200) truncated mid-array on its first attempt.
+      * The per-target retry/fallback path got 400 — enough to be consumed
+        entirely by thinking, returning "" and yielding a placeholder entry.
+        That is the coherence-gate failure again, on the generation path.
+
+    So: a floor generous enough that a single-target call always has room for
+    thinking plus one small object, and a per-target allowance with headroom.
+    Costs nothing to raise — billing is on tokens actually produced, and
+    max_tokens is only a ceiling.
+    """
+    return max(_GENERATION_MIN_MAX_TOKENS, _GENERATION_TOKENS_PER_TARGET * max(1, n_targets))
 
 
 def _extract_json_array(text: str) -> list:
@@ -339,15 +451,74 @@ _WORKED_EXAMPLE_V3 = (
 )
 
 
+def _v3_vocabulary_brief(cluster_id: str, keyword_count: Optional[int] = None) -> str:
+    """
+    The v3-specific vocabulary constraints, stated in the terms the validator
+    actually enforces. Without this, Sonnet is generating blind against three
+    rules it was never told, and the generic v2 instruction ("must NOT repeat
+    the cluster's distinctive vocabulary") actively points the wrong way for
+    v3: a v3 prompt MUST use its own cluster's entry vocabulary up front, or
+    BM25 never reaches the hub and every condition flatlines (the failure
+    docs/harness_usage.md §4 records from the first 75-prompt draft, where
+    48/75 prompts found nothing at baseline).
+    """
+    if keyword_count is None:
+        keyword_count = load_retrieval_keyword_count()
+
+    own = list(generate_seed_v3.ENTRY_VOCAB[cluster_id])
+    own_family = generate_seed_v3.FAMILY_NAMES[cluster_id]
+    others = sorted({
+        t for oc, terms in _V3_ENTRY_VOCAB_BY_CLUSTER.items() if oc != cluster_id
+        for t in terms
+    })
+    return (
+        "\nVOCABULARY RULES (a prompt breaking any of these is discarded):\n\n"
+        f"1. OPEN each prompt with at least two of these words — they are how the "
+        f"retrieval system finds this cluster at all, so they must fall inside the "
+        f"first {keyword_count} non-trivial words of the prompt, not later:\n"
+        f"   {', '.join([own_family] + own)}\n\n"
+        f"2. Keep ALL of these words out of the first {keyword_count} non-trivial words "
+        f"(they belong to other clusters and would misdirect retrieval). Later in the "
+        f"sentence they are harmless — you do not need to avoid them entirely, and you "
+        f"should not contort the wording to do so:\n"
+        f"   {', '.join(others)}\n\n"
+        "3. NEVER use an invented value token or coined term from the cluster content "
+        "anywhere in a prompt — no rule IDs, no all-caps coinages, no distinctive "
+        "multi-word names for specific values. Those are the answers. The prompt asks "
+        "for them; it must not contain them. (They belong in the criteria instead.)\n"
+    )
+
+
 def _build_generation_prompt(
     cluster_content: str, targets: list, subject_constraint: Optional[str], version: str = "v2",
+    cluster_id: Optional[str] = None,
 ) -> str:
     target_lines = "\n".join(
         f"{i + 1}. hop_distance={t['hop_distance']} — steer this prompt's vocabulary toward: {t['target_text']!r}"
         for i, t in enumerate(targets)
     )
     subject_line = f"\nFocus the prompts on this subject if possible: {subject_constraint}\n" if subject_constraint else ""
-    worked_example = _WORKED_EXAMPLE_V3 if version == "v3" else _WORKED_EXAMPLE_V2
+    is_v3 = version == "v3"
+    worked_example = _WORKED_EXAMPLE_V3 if is_v3 else _WORKED_EXAMPLE_V2
+
+    if is_v3 and cluster_id:
+        # v3 states its own vocabulary rules, which replace v2's blanket
+        # "don't repeat the cluster's vocabulary" — see _v3_vocabulary_brief.
+        style_line = (
+            f"Generate exactly {len(targets)} prompts. Each prompt must be a question or task a "
+            "user would naturally ask an assistant that already knows the cluster content above, "
+            "and must be answerable only from that content — testing whether the assistant "
+            "retrieves it.\n"
+            f"{_v3_vocabulary_brief(cluster_id)}"
+        )
+    else:
+        style_line = (
+            f"Generate exactly {len(targets)} prompts. Each prompt must be a question or task a user "
+            "would naturally ask an assistant that already knows the cluster content above — the "
+            "prompt itself must NOT quote or repeat the cluster's distinctive vocabulary verbatim; it "
+            "should only be answerable using that content, testing whether the assistant retrieves it.\n"
+        )
+
     return (
         "You are building a bulk-interaction prompt bank for a memory-retrieval experiment.\n\n"
         "Below is the full content of one conceptual cluster from the experiment's seed graph:\n"
@@ -355,10 +526,7 @@ def _build_generation_prompt(
         f"{cluster_content}\n"
         "---\n"
         f"{subject_line}\n"
-        f"Generate exactly {len(targets)} prompts. Each prompt must be a question or task a user "
-        "would naturally ask an assistant that already knows the cluster content above — the "
-        "prompt itself must NOT quote or repeat the cluster's distinctive vocabulary verbatim; it "
-        "should only be answerable using that content, testing whether the assistant retrieves it.\n\n"
+        f"{style_line}\n"
         "For each prompt, also produce 1-3 binary-checkable criteria a grader could use to verify "
         "the response is correct, and echo back the hop_distance you were given.\n\n"
         f"Worked example of a well-formed item:\n{worked_example}\n\n"
@@ -383,11 +551,21 @@ def _build_validation_prompt(cluster_content: str, prompt_text: str) -> str:
 def generate_cluster_prompts(
     client, model: str, content: dict, targets: list,
     subject_constraint: Optional[str] = None, version: str = "v2",
+    cluster_id: Optional[str] = None,
 ) -> list:
     """One Sonnet call producing len(targets) prompt items. Raises ValueError/
-    json.JSONDecodeError on malformed output — caller decides how to retry."""
-    prompt = _build_generation_prompt(content["full_content"], targets, subject_constraint, version)
-    text, _, _ = _call_sonnet(client, model, prompt, max_tokens=400 * max(1, len(targets)))
+    json.JSONDecodeError on malformed output — caller decides how to retry.
+
+    cluster_id is required for v3 to state its vocabulary rules in the prompt
+    (see _v3_vocabulary_brief); v2 ignores it."""
+    prompt = _build_generation_prompt(
+        content["full_content"], targets, subject_constraint, version, cluster_id,
+    )
+    text, _, _ = _call_sonnet(
+        client, model, prompt,
+        max_tokens=generation_max_tokens(len(targets)),
+        stream=True,
+    )
     items = _extract_json_array(text)
     if not isinstance(items, list):
         raise ValueError("Sonnet generation response JSON was not a list")
@@ -406,7 +584,9 @@ def generate_cluster_prompts_safely(
     """
     for attempt in range(2):
         try:
-            items = generate_cluster_prompts(client, model, content, targets, subject_constraint, version)
+            items = generate_cluster_prompts(
+                client, model, content, targets, subject_constraint, version, cluster_id,
+            )
             if len(items) == len(targets):
                 return items
             print_fn(f"  {cluster_id}: expected {len(targets)} items, got {len(items)} (attempt {attempt + 1})")
@@ -418,7 +598,9 @@ def generate_cluster_prompts_safely(
     items = []
     for target in targets:
         try:
-            single = generate_cluster_prompts(client, model, content, [target], subject_constraint, version)
+            single = generate_cluster_prompts(
+                client, model, content, [target], subject_constraint, version, cluster_id,
+            )
             items.append(single[0] if single else {})
         except (ValueError, json.JSONDecodeError) as exc:
             logger.error("prompt_gen: %s per-prompt fallback also malformed: %s", cluster_id, exc)
@@ -488,7 +670,10 @@ def _finalize_entry(
         if attempt < max_retries:
             print_fn(f"  {prompt_id}: validation failed ({reasons}) — retrying ({attempt + 1}/{max_retries})")
             try:
-                raw = generate_cluster_prompts(client, model, content, [target], version=seed_fixture_version)
+                raw = generate_cluster_prompts(
+                    client, model, content, [target],
+                    version=seed_fixture_version, cluster_id=cluster_id,
+                )
                 attempt_item = raw[0] if raw else {}
             except (ValueError, json.JSONDecodeError) as exc:
                 logger.error("prompt_gen: %s retry generation malformed: %s", prompt_id, exc)

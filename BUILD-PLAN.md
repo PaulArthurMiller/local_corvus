@@ -5081,6 +5081,173 @@ change plus tests, no new runtime behavior to verify live.
 
 ---
 
+## Dual-Mode Probe Battery — Milestone 30
+
+**Source:** the 2026-07-15 smoketest finding (PR #51,
+`docs/m28_tiebreak_learned_mode_findings_2026-07-15.md`) that M28/M29's
+"pick a spoke that deterministically fails" premise is `weight_mode:
+mean`-specific and doesn't hold under `weight_mode: sample` — every probe
+reads a noisy 0–36% pass rate there, not a clean split. That finding left
+`trained_spokes` selection blocked on a methodology decision: either chase
+a larger N to rule out noise, or stop trying to pre-select a "clean-fail"
+spoke and measure pass-*rate* directly instead. This milestone builds the
+instrumentation for the second path — it does not make the call itself.
+
+This milestone has two parts, built in two separate sessions without a
+BUILD-PLAN entry at the time (a process gap this section exists to close —
+see the Part A note below).
+
+### Part A — Harness + backend dual-mode dispatch (ALREADY BUILT)
+
+Built 2026-07-15, commit `aea3a24` on `fix/smoketest-2026-07-15` —
+**code-complete and tested, but never written up here or in PROGRESS.md,
+and still unpushed** (local-only, along with docs commit `1f39c23`). Recorded
+retroactively:
+
+- At every probe checkpoint, the harness now issues **1 deterministic
+  `weight_mode="mean"` battery pass + K independent `weight_mode="sample"`
+  repeats** (K = `probe_measurement.sample_battery_repeats`, default 25,
+  new config.yaml Hyperparameter Registry entry, host-read by
+  `runner.py` — no backend restart needed to change it), identically in
+  all three conditions.
+- `retrieve()` gains `weight_mode_override`, scoped to the single
+  `POST /admin/run-probe` call — real training turns never pass it, so
+  training-turn behavior is completely unaffected.
+- `RunProbeRequest`/`ProbeResult`/`probe_results` gain `series_id`,
+  `battery_mode` (`"mean"|"sample"`), `battery_repeat_index`.
+- **Real bug fixed:** `admin.py`'s `run_probe()` was passing the
+  orchestrator's process-scoped `EDGE_RNG` into `retrieve()` — the same RNG
+  stream real training turns use for `weight_mode: sample`. A probe
+  checkpoint run under `sample` mode was silently perturbing the
+  reproducibility of subsequent training turns' sample draws. Fixed by no
+  longer passing `rng=` from `run_probe()` — matches `retrieval.py`'s own
+  `_DEFAULT_RNG` docstring, which already documented probe callers as the
+  intended user of the unseeded fallback.
+- 25 new tests (785 total, all passing): dispatch/error-handling/config
+  default (`test_runner.py`), `ProbeResult` new fields
+  (`test_probes.py`), the admin.py endpoint incl. the RNG fix
+  (`test_run_probe_dual_mode.py`), `weight_mode_override`
+  (`test_retrieval.py`), `series_id`/`battery_mode` filtering + migration
+  (`test_store.py`).
+
+### Part B — §6.1 report consumption (NEW SCOPE — this is what /build builds)
+
+Part A stores the dual-mode data correctly but **nothing reads it back
+correctly**: `experiment_report.py`'s §6.1 section (`_section_61_learning_measures`)
+calls `store.query_probe_results(probe_id=pid, experiment_id=experiment_id)`
+with no `battery_mode` filter, and both the mean pass and all K sample
+repeats share the same `measurement_session_index`. The moment a real
+dual-mode battery runs through a real experiment, every §6.1 subsection that
+assumes one result per probe per checkpoint — `state_transitions`
+(fail→pass/pass→fail detection), `bridge_mu_analysis` (rank trajectory,
+transfer-candidate detection), `probe_pass_rates`, `mus_by_probe_outcome`,
+`cross_series_probe_mus` — receives 26 rows instead of 1 and silently
+corrupts. None of Part A's 25 tests touch `experiment_report.py`, so this
+wasn't caught.
+
+1. **`backend/analytics/reports/experiment_report.py` — `_section_61_learning_measures()`:**
+   add `battery_mode="mean"` to both `query_probe_results()` calls (the
+   `experiment_id`-scoped call and the `condition_label`-fallback call).
+   Behavior-preserving for every experiment ever recorded — pre-M30 rows
+   already default to `battery_mode='mean'` at the schema level, so this
+   changes nothing for existing data and fixes the corruption for future
+   dual-mode data. This is the regression fix; give it its own test (below).
+
+2. **Same file — new `_compute_sample_pass_rates()`:** parallel in shape to
+   the existing `_compute_state_transitions()`. Fetch `battery_mode="sample"`
+   rows per probe the same way the mean rows are fetched (mirror the
+   `experiment_id`-first, `condition_label`-fallback pattern for symmetry).
+   Group by `measurement_session_index`; classify each row via the existing
+   `_classify_probe_outcome()` (reuse, don't reimplement); per session
+   compute `pass_count`, `fail_count` (excluding `negative_flagged` from the
+   denominator — same convention `probe_pass_rates` already uses),
+   `repeats_completed = len(rows)`, `pass_rate = pass_count / non_flagged_count`
+   (or `None` if zero), and `partial_battery = repeats_completed < configured_repeats`
+   (a soft-continued battery that stopped short of K — must be visible, not
+   silently averaged as if it were a full read, per this project's own
+   never-fail-silently convention). Read `configured_repeats` from
+   `config.get("probe_measurement", {}).get("sample_battery_repeats", 25)` —
+   same default `runner.py` already uses. Return
+   `{"per_probe": [...], "by_phenomenon": {...}}`, same two-level shape as
+   `state_transitions`. Wire into `_section_61_learning_measures()`'s
+   returned dict as `"sample_battery_repeats_configured"` and
+   `"sample_pass_rates"`.
+
+3. **`backend/analytics/reports/markdown_renderer.py` — `_render_s61()`:**
+   new "### Sample-Repeat Pass Rate (`weight_mode=sample`)" block, placed
+   after "State Transitions" (same probe-measurement grouping). Table:
+   `probe_id | session | pass_rate | repeats_completed/configured | flag`.
+   A partial-battery row gets a `⚠ PARTIAL BATTERY` flag — same visual
+   pattern as the existing orphan-update flag in the Edge Delta Ledger
+   block.
+
+4. **Tests — `tests/test_analytics/test_experiment_report.py`:** extend the
+   `_insert_probe_row()` helper with `battery_mode` (default `"mean"`, so
+   every existing call site is unaffected) and `battery_repeat_index`
+   params.
+   - `test_learning_measures_ignores_sample_repeats_for_mean_sections` —
+     **the regression test for the actual bug found this session**: 1 mean
+     row (passing) + 5 sample rows (mixed pass/fail) at the same session
+     index; assert `state_transitions.per_probe[0].session_indices` has
+     length 1 (not 6) and `probe_pass_rates` reflects only the mean row.
+   - `test_sample_pass_rates_computed_from_repeats` — N sample rows at one
+     session with a known pass/fail mix; assert `pass_count`/`fail_count`/
+     `repeats_completed`/`pass_rate` match exactly.
+   - `test_sample_pass_rates_full_battery_not_flagged_partial` — insert
+     exactly `configured_repeats` rows (override config to a small number
+     for test speed); assert `partial_battery is False`.
+   - `test_sample_pass_rates_scoped_to_experiment_id` — mirror the existing
+     `test_learning_measures_probe_results_scoped_to_experiment_id` pattern:
+     a contaminating attempt under a different `experiment_id` must not leak
+     into this experiment's sample pass rate.
+   - `test_sample_pass_rates_empty_when_no_sample_rows` — an experiment with
+     only mean-mode rows (every pre-M30 experiment) still generates §6.1
+     cleanly, `sample_pass_rates.per_probe` present with empty `sessions`,
+     no crash — preserves the existing "still generates with empty data"
+     contract.
+   - `tests/test_analytics/test_markdown_renderer.py`:
+     `test_s61_renders_sample_pass_rate_section` — construct a section dict
+     with `sample_pass_rates` populated (including one `partial_battery=True`
+     entry) and assert the rendered markdown contains the new header and the
+     ⚠ flag text.
+
+### Branch / PR handling (operational note, so /build doesn't have to guess)
+
+Do **not** branch fresh off `main` — `main` doesn't have Part A's code yet,
+and the current local `fix/smoketest-2026-07-15` branch already has it
+(commits `1f39c23`, `aea3a24`, both unpushed), with its first commit
+already open as PR #51. Build Part B as new commits on this same branch;
+pushing updates PR #51 automatically. Retitle/re-describe PR #51 once done
+to reflect the fuller scope (tie-break finding → dual-mode battery →
+report fix) rather than opening a second PR — these three commits tell one
+continuous story and splitting them now would just be git archaeology
+later. Also backfill, as part of this same push: a PROGRESS.md session-log
+entry for Part A (retroactive, dated 2026-07-15 — built via Claude Code,
+not logged at the time) and a new entry for Part B.
+
+### Explicitly out of scope
+
+- **The actual `weight_mode`/`trained_spokes` decision.** This milestone
+  builds the measurement tool; it does not make the call. Next step after
+  this ships: run a real dual-mode probe battery through a real experiment
+  and read `sample_pass_rates` to actually decide.
+- `docs/experiment_protocol.md`'s still-missing `trained_spokes` row — M29's
+  own flagged, still-outstanding doc debt. Separate and small; not folded
+  in here to keep this milestone's diff reviewable.
+- Any live Docker/Sonnet verification. This is a report-generation-layer
+  change over already-stored DB rows, not new runtime behavior — unit tests
+  (TempDB-backed, matching the existing §6.1 test style, which is itself a
+  real-SQLite integration test) are sufficient, same reasoning M29 used for
+  a similarly contained, non-runtime-behavior change. A live proof (real
+  dual-mode battery → real report → real `sample_pass_rates`) happens
+  naturally once the weight_mode/trained_spokes decision unblocks an actual
+  experiment run — not a blocker for this milestone.
+
+**Estimate:** under 1 session — two report-layer files plus tests, no new
+runtime behavior, no backend/harness changes.
+
+---
+
 ## Status
 
 ```
@@ -5163,7 +5330,29 @@ session-0 pass-rate noise as inherent to `weight_mode: sample` and handle it
 via RunPlan measurement methodology (e.g. averaging multiple session-0
 probe batteries) rather than `trained_spokes` pre-selection. `--generate-bank`
 should not run until this is resolved.
-Last updated: 2026-07-15
+
+**Milestone 30 (Dual-Mode Probe Battery) is COMPLETE — pushed to PR #51,
+awaiting Paul's review/merge.** Part A (harness + backend dual-mode
+dispatch, commit `aea3a24`) was built 2026-07-15 but never logged here or
+in PROGRESS.md at the time, and stayed unpushed until reconciled during a
+2026-07-26 /catchup. Part B (§6.1 report-layer consumption of the
+dual-mode data — `battery_mode="mean"` filtering on both
+`query_probe_results()` calls in `_section_61_learning_measures()`, plus a
+new `_compute_sample_pass_rates()` subsection surfaced as
+`sample_pass_rates` in both the JSON report and `markdown_renderer.py`'s
+`_render_s61()`) was built 2026-07-26, closing the gap found during that
+same reconciliation: existing report sections never filtered by
+`battery_mode`, so they'd have silently corrupted the moment a real
+dual-mode run happened. 6 new tests (791 total, all passing, no
+regressions). Both parts landed as commits on the existing
+`fix/smoketest-2026-07-15` branch, updating the already-open PR #51 rather
+than opening a second one. This milestone is the direct answer to the
+paragraph above: it builds the tool for measuring `sample_pass_rates`
+directly rather than pre-selecting a clean-fail `trained_spokes`, but does
+not itself make that decision — that's still Paul's call once the PR is
+merged and a real dual-mode battery has been run through a real
+experiment.
+Last updated: 2026-07-26
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.
@@ -5221,6 +5410,8 @@ Last updated: 2026-07-15
 **Milestone 25:** Code complete, in PR review (awaiting Paul's content review + human freeze) — `scripts/generate_seed_v3.py` (two-tier counterfactual vocabulary, per-MU-category hub/sibling/bridge forbidden derivation, import-time answer-token uniqueness + format self-checks, 64 reciprocal edges, and a `seed_v3_generation_manifest.json` failure ledger), `scripts/verify_seed_v3.py` (9 checks vs. v2's 5, with a `--draft`/`--frozen` flag defaulting to `--draft` so the manifest-repair loop runs on the uncompressed draft), and `tests/test_scripts/test_generate_seed_v3.py` (31 tests over the pure-Python validation surface; importing the module runs the self-checks on the real spec data as a free regression guard). Required-terms lists copied verbatim from `seed_v3_mu_spec.md` §4; a few content gists were paraphrased in the generation prompts to avoid naming a sibling spoke's answer token (which sibling-exclusion forbids — e.g. `a_spoke7`'s "spine order", `c_spoke4`'s "amber/crimson breach"), with no token/rule-ID/required-term changed. **Live run (real Ollama `gemma4:e4b`):** produced `seed_v3_draft.json` (34 MUs, 64 edges) with a clean manifest (`failures: []`) on the first pass — no MU needed hand-repair. `verify_seed_v3.py --draft` passes all 9 checks; check 9's two-hit-bar sub-check WARNs (not FAIL) on `a_spoke3`/`a_spoke5`, whose generated prose adds "structure" on top of the "output" that the family name "Kestrel Output Conventions" already injects into every cluster_a MU — a content-review item, not a defect. **Sabotage proof (build-step 5):** forced one MU to fail against real Ollama by validating against an impossible term the prompt never mentions (lesson: telling Gemma to "include X" makes it copy any nonsense X verbatim, so the impossible token must be hidden from the prompt) — 3 real attempts exhausted, manifest record matched the BUILD-PLAN schema exactly. 680 tests passing (649 baseline + 31 new), no regressions. **Still Paul's to do:** review the draft prose, freeze to `seed_v3.json.gz`, run `verify_seed_v3.py --frozen`. Branch: `milestone-25-seed-fixture-v3`.
 
 **Milestone 25 (planned, pre-build):** planned 2026-07-11 via /planner. See "Seed Fixture v3 — Milestone 25" section above; build spec derived from the approved `seed_v3_mu_spec.md`.
+
+**Milestone 30:** Complete — see "Dual-Mode Probe Battery — Milestone 30" section above. Part A (harness + backend dual-mode dispatch, `retrieve()`'s `weight_mode_override`, the `run_probe()` EDGE_RNG fix, 25 tests) was code-complete 2026-07-15 but unpushed and undocumented until a 2026-07-26 /catchup. Part B (§6.1 report consumption fix — `battery_mode="mean"` filtering on both `query_probe_results()` calls in `_section_61_learning_measures()`, new `_compute_sample_pass_rates()` wired in as `sample_pass_rates`, and a matching `markdown_renderer.py` section, 6 tests) built 2026-07-26. 791 tests passing (785 + 6 new), no regressions. Both parts pushed together on `fix/smoketest-2026-07-15`, updating the already-open PR #51. Branch: `fix/smoketest-2026-07-15`, PR #51 (awaiting Paul's review/merge).
 
 **Milestone 26:** Complete — `scripts/harness/queue.py` (`QueueFile`/`QueuePlanEntry` schema, `QueueManifest`/`QueueCheckpointState` atomic persistence, and the full 7-step `run_preflight()` protocol), `scripts/run_experiment_queue.py` CLI (`--dry-run`), `queues/example_queue.json`. 30 new tests (710 total), all 3 required preflight hard-stops verified live via the real CLI. Branch: `milestone-26-queue-preflight`, merged to main (PR #46).
 

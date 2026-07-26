@@ -1,0 +1,2901 @@
+{
+  "entries": [
+    {
+      "prompt_id": "cluster_a_0000",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe how many total rules govern structured file generation?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven rules total",
+        "notes rules are K-1 through K-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0001",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Field order requirements within Kestrel conventions - what happens if a single field is reordered?",
+      "hop_distance": 1,
+      "criteria": [
+        "states any reordering counts as an immediate violation",
+        "notes fixed sequence is mandatory for parsing"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0002",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe which rule handles the delimiter choice for output files?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the delimiter rule as K-2",
+        "notes it dictates the delimiter"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0003",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field arrangement conventions - what must every field maintain throughout an entire file?",
+      "hop_distance": 1,
+      "criteria": [
+        "states fields must appear in the declared fixed sequence",
+        "notes failure invalidates the dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0004",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel format conventions describe which rule specifically defines the header requirement?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the header rule as K-3",
+        "notes it defines the header"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0005",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field sequence - is reordering even one field tolerated under these conventions?",
+      "hop_distance": 1,
+      "criteria": [
+        "states no, reordering a single field is an immediate violation",
+        "notes the sequence is mandatory"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0006",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe which rule governs padding within data output?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the padding rule as K-4",
+        "notes it forbids interior padding"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0007",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field positioning conventions - what is the consequence of failing to maintain the declared order?",
+      "hop_distance": 1,
+      "criteria": [
+        "states the entire dataset submission is invalidated",
+        "notes fixed sequence is mandatory for parsing"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0008",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe which rule oversees the quoting mechanism for values?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the quoting rule as K-5",
+        "notes it governs quoting mechanism"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0009",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions on field placement - why is a fixed sequence considered mandatory?",
+      "hop_distance": 1,
+      "criteria": [
+        "states it is required for file parsing",
+        "notes any reordering constitutes an immediate violation"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0010",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel format conventions describe which rule manages the encoding requirement for files?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the encoding rule as K-6",
+        "notes it manages encoding"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0011",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field order enforcement - what happens to the whole dataset if positions are not preserved?",
+      "hop_distance": 1,
+      "criteria": [
+        "states the entire dataset submission is invalidated",
+        "notes maintaining declared order is required"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0012",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe which rule addresses missing values in the output?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the missing-value rule as K-7",
+        "notes it handles missing values"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0013",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field ordering: what must every field conform to, and what happens if a field gets reordered?",
+      "hop_distance": 1,
+      "criteria": [
+        "states fields must appear in declared spine order",
+        "states reordering a field constitutes a K-1 violation and invalidates the dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0014",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe which rule addresses the order fields must appear in?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the field order rule as K-1",
+        "notes it addresses field order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0015",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field sequence conventions - does the fixed order apply to only some rows or all rows?",
+      "hop_distance": 1,
+      "criteria": [
+        "states it applies throughout the entire dataset",
+        "notes fixed sequence is mandatory for parsing"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0016",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions cover which seven aspects of structured file generation, from field order through missing values?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists all seven aspects: field order, delimiter, header, padding, quoting mechanism, encoding, and missing values",
+        "notes that specific values for each aspect are defined in the individual rules (K-1 through K-7), not in the index summary itself"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0017",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field order conventions - what invalidates an entire dataset submission according to this requirement?",
+      "hop_distance": 1,
+      "criteria": [
+        "states failure to maintain the defined fixed order invalidates the submission",
+        "notes even a single reordered field triggers this"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0018",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel Output Conventions cover seven rules for structured file output\u2014what specific aspect of formatting does each of the seven rules individually address?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists all seven aspects: field order, delimiter, header, padding, quoting mechanism, encoding, and missing values",
+        "mentions that the actual values for these aspects are defined within the individual rules, not the summary"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0019",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field positioning requirements - is any deviation from the declared order permitted?",
+      "hop_distance": 1,
+      "criteria": [
+        "states no deviation is permitted",
+        "notes even one reordered field is an immediate violation"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0020",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe how many distinct aspects of output the seven rules collectively cover.",
+      "hop_distance": 0,
+      "criteria": [
+        "lists field order, delimiter, header, padding, quoting, encoding, missing values",
+        "states seven rules total"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0021",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field arrangement conventions - what term is used for the required fixed sequence fields must follow?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions the declared spine order",
+        "notes it is mandatory for parsing"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0022",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe which rule number is responsible for the field order requirement.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies field order as rule K-1",
+        "notes it addresses field arrangement"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0023",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field ordering: what happens if a single field is reordered from its declared spine sequence?",
+      "hop_distance": 1,
+      "criteria": [
+        "identifies this as a K-1 violation",
+        "states that the fixed spine order is mandatory and reordering invalidates the entire dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0024",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe which rule specifically governs padding restrictions in generated files.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies padding rule as K-4",
+        "notes it forbids interior padding"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0025",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field sequence enforcement - what happens if only a single field's position changes?",
+      "hop_distance": 1,
+      "criteria": [
+        "states it constitutes an immediate violation",
+        "notes fixed sequence is mandatory"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0026",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel format conventions describe which rule dictates the delimiter token used between fields.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies delimiter rule as K-2",
+        "notes it dictates the delimiter"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0027",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field output requirements: what must every field maintain, and what happens if a single field gets reordered?",
+      "hop_distance": 1,
+      "criteria": [
+        "states fields must appear in the declared spine order",
+        "states reordering even a single field constitutes an immediate K-1 violation",
+        "mentions this invalidates the entire dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0028",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe which rule governs the encoding declaration for output files.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies encoding rule as K-6",
+        "notes it manages encoding"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0029",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field ordering: what happens if a single field gets reordered from its declared position?",
+      "hop_distance": 1,
+      "criteria": [
+        "identifies this as a K-1 violation",
+        "states that reordering even one field invalidates the entire dataset submission",
+        "mentions the fixed/spine order is mandatory for parsing"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0030",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe which rule mandates use of a placeholder for missing values.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies missing-value rule as K-7",
+        "notes it handles missing values"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0031",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field order conventions - what single action is enough to trigger an immediate violation?",
+      "hop_distance": 1,
+      "criteria": [
+        "states reordering even a single field triggers it",
+        "notes the sequence must remain fixed"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0032",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe which rule mandates the required quoting approach for values.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies quoting rule as K-5",
+        "notes it governs the quoting mechanism"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0033",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field positioning conventions - what is required for successful parsing of the file?",
+      "hop_distance": 1,
+      "criteria": [
+        "states fields must appear in the fixed declared order",
+        "notes deviation invalidates parsing"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0034",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel format conventions describe which rule defines the required header marker for files.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies header rule as K-3",
+        "notes it defines the header"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0035",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field order enforcement - what consequence follows failing to preserve the declared sequence?",
+      "hop_distance": 1,
+      "criteria": [
+        "states the entire dataset submission becomes invalid",
+        "notes fixed sequence is mandatory"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0036",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output structure conventions cover which seven aspects of file generation, from field order to missing values?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists all seven aspects: field order, delimiter, header, padding, quoting mechanism, encoding, and missing values",
+        "notes that the actual values for each aspect are defined within the individual rules (K-1 through K-7) rather than in the summary itself"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0037",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Under Kestrel output conventions, what field arrangement requirement must every row respect?",
+      "hop_distance": 1,
+      "criteria": [
+        "names rule K-1",
+        "states fields must appear in the declared spine order",
+        "notes reordering a field invalidates the dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0038",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe whether specific format values live in the index summary or the individual rules.",
+      "hop_distance": 0,
+      "criteria": [
+        "states they live in the individual rules K-1 through K-7",
+        "notes the summary does not define them"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0039",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field arrangement rules require what specific ordering for every field in a submission?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions rule K-1",
+        "states fields must appear in the declared spine order",
+        "notes reordering a field invalidates the dataset"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0040",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel format conventions describe which rule handles missing value placeholders in a dataset.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies missing-value rule as K-7",
+        "notes it requires a placeholder rather than omission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0041",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel field arrangement requirements - what happens to file parsing if the declared order is broken?",
+      "hop_distance": 1,
+      "criteria": [
+        "states parsing fails and the submission is invalidated",
+        "notes fixed sequence is mandatory"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0042",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output structure conventions cover seven numbered rules\u2014what aspect of the file does each of the seven address, from field order through missing values?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists the seven aspects: field order, delimiter, header, padding, quoting mechanism, encoding, missing values",
+        "associates them sequentially with K-1 through K-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0043",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field ordering: what must every field conform to, and what happens if that order is disrupted?",
+      "hop_distance": 1,
+      "criteria": [
+        "states fields must appear in the declared spine order",
+        "identifies this as rule K-1",
+        "notes reordering a single field invalidates the entire dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0044",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe which rule governs the header row's required starting marker.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies header rule as K-3",
+        "notes it defines the header requirement"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0045",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field ordering: what must every field conform to, and what happens if a field is reordered?",
+      "hop_distance": 1,
+      "criteria": [
+        "states fields must appear in the declared spine order",
+        "states reordering a field constitutes a K-1 violation",
+        "notes it invalidates the entire dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0046",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel format conventions describe which rule declares the required encoding tag for validation.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies encoding rule as K-6",
+        "notes it mandates the encoding declaration"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0047",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field ordering: what happens if a single field gets reordered away from its declared spine position?",
+      "hop_distance": 1,
+      "criteria": [
+        "identifies this as a K-1 violation",
+        "states the fixed/spine sequence order is mandatory",
+        "notes it invalidates the entire dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0048",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe which rule forbids interior padding in generated output.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies padding rule as K-4",
+        "notes interior padding is forbidden"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0049",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field arrangement: what must every field's position match, and what happens if a field is reordered?",
+      "hop_distance": 1,
+      "criteria": [
+        "states fields must appear in the declared spine order",
+        "states reordering a field constitutes a K-1 violation and invalidates the dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0050",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output conventions describe which rule dictates the token separating fields in a file.",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies delimiter rule as K-2",
+        "notes it dictates the delimiter token"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0051",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel output field ordering: what happens if a single field gets reordered from its declared sequence?",
+      "hop_distance": 1,
+      "criteria": [
+        "identifies this as a K-1 violation",
+        "states that the fixed spine order is mandatory",
+        "notes that it invalidates the entire dataset submission"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_a_0052",
+      "cluster_id": "cluster_a",
+      "prompt_text": "Kestrel structure conventions describe how the seven rules divide responsibility for output formatting overall.",
+      "hop_distance": 0,
+      "criteria": [
+        "lists all seven aspects: order, delimiter, header, padding, quoting, encoding, missing values",
+        "notes each aspect is governed by its own numbered rule"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0000",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape governance relies on how many total checkpoints?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven checkpoints",
+        "references M-1 through M-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0001",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema nesting depth for data shape is capped at what level?",
+      "hop_distance": 1,
+      "criteria": [
+        "states depth three",
+        "mentions must be flattened if exceeded"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0002",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints under Marrow cover which seven governance areas in order?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists type, column count, nesting, versioning, naming, range, validation order",
+        "mentions M-1 through M-7 sequence"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0003",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting rule requires what action for overly deep architectures?",
+      "hop_distance": 1,
+      "criteria": [
+        "states flattening required",
+        "mentions depth three limit"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0004",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape index: does it define exact type options or just name the checkpoint?",
+      "hop_distance": 0,
+      "criteria": [
+        "states index names checkpoints only",
+        "notes specifics are in individual M-N documents"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0005",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema nesting depth cap of three levels applies to what kind of data shape element?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions document nesting",
+        "gives depth three as the hard cap"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0006",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape governance under Marrow assigns which checkpoint number to naming conventions?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-5",
+        "notes it controls naming conventions"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0007",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Under the Marrow schema rules, what is the maximum nesting depth allowed for document structure, and what must happen if it's exceeded?",
+      "hop_distance": 1,
+      "criteria": [
+        "states maximum nesting depth is three",
+        "states exceeding architectures must be flattened for compliance"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0008",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape checkpoints in the Marrow schema range across which topics, from basic types to what?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions basic data types to range checks",
+        "notes seven checkpoints overall"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0009",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting limit is described as a cap on what kind of complexity?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions structural complexity",
+        "states hard cap at depth three"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0010",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoint numbering under Marrow: which number governs column counts?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-2",
+        "notes it manages column counts"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0011",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting cap: is exceeding depth three allowed under any circumstance?",
+      "hop_distance": 1,
+      "criteria": [
+        "states no, must be flattened",
+        "confirms depth three as fixed limit"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0012",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape index explains that specific parameters live where, not in the index itself?",
+      "hop_distance": 0,
+      "criteria": [
+        "states parameters are in individual M-N documents",
+        "confirms index only lists checkpoints"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0013",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape nesting rules within the Marrow schema set a hard limit at what numeric depth?",
+      "hop_distance": 1,
+      "criteria": [
+        "states depth three",
+        "mentions flattening requirement"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0014",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape governance in Marrow assigns validation order to which numbered checkpoint?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-7",
+        "notes it establishes validation order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0015",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting restriction: what must architects do with excessively nested designs?",
+      "hop_distance": 1,
+      "criteria": [
+        "states must be flattened",
+        "confirms depth three limit"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0016",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape checkpoints of the Marrow schema span limitations from basic types to what complex checks?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions range checks",
+        "notes seven total checkpoints"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0017",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting cap applies to documents nested how many levels deep before violation?",
+      "hop_distance": 1,
+      "criteria": [
+        "states three levels",
+        "mentions must be flattened beyond that"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0018",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints under Marrow: which one governs numeric ranges specifically?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-6",
+        "notes it specifies numeric ranges"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0019",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth restriction is known by what kind of hard limit?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions hard cap at depth three",
+        "notes flattening requirement for compliance"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0020",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape governance under the Marrow schema uses how many indexed rules total?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven",
+        "notes rules span types through validation order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0021",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting compliance requires flattening once what depth is surpassed?",
+      "hop_distance": 1,
+      "criteria": [
+        "states depth three",
+        "confirms flattening is mandatory"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0022",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoint list in Marrow: which item addresses versioning requirements?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-4",
+        "notes it handles versioning requirements"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0023",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting limitation caps document depth at what specific number?",
+      "hop_distance": 1,
+      "criteria": [
+        "states three",
+        "mentions this is a hard cap requiring flattening"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0024",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape checkpoints defined by the Marrow schema inform what about the data overall?",
+      "hop_distance": 0,
+      "criteria": [
+        "states they inform necessary architecture",
+        "notes seven checkpoints total"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0025",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth cap: what must be done to architectures exceeding it?",
+      "hop_distance": 1,
+      "criteria": [
+        "states flattening is required",
+        "confirms depth three cap"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0026",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints under Marrow: which one covers core type declarations?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-1",
+        "notes it dictates core type declarations"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0027",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting rule sets a ceiling on depth described as what kind of restriction?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions hard cap",
+        "states depth three as the limit"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0028",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape rules in the Marrow schema index cover limitations ranging from basic types to what?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions complex range checks",
+        "notes seven checkpoints total"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0029",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth cap forces what remedy for over-deep structures?",
+      "hop_distance": 1,
+      "criteria": [
+        "states must be flattened",
+        "confirms depth three limit"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0030",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints of Marrow: which one governs nesting itself, as opposed to types or ranges?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-3",
+        "notes it governs nesting structure"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0031",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting cap is set at exactly how many levels of depth?",
+      "hop_distance": 1,
+      "criteria": [
+        "states three",
+        "mentions flattening requirement beyond that depth"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0032",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape governance checkpoints under the Marrow schema total what count, spanning types to validation order?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven",
+        "lists progression from type to validation order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0033",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Under the Marrow schema rules, what is the maximum nesting depth allowed for document structures, and what must be done if that depth is exceeded?",
+      "hop_distance": 1,
+      "criteria": [
+        "states maximum nesting depth is three",
+        "identifies this as rule M-3",
+        "states architectures exceeding the limit must be flattened"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0034",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints in Marrow: does the index define naming style details, or defer them?",
+      "hop_distance": 0,
+      "criteria": [
+        "states index defers details to individual M-N documents",
+        "notes naming is governed by M-5"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0035",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting rule mandates flattening once nesting exceeds what threshold?",
+      "hop_distance": 1,
+      "criteria": [
+        "states depth three",
+        "confirms flattening is required"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0036",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape checkpoint sequence under Marrow: which numbered rule comes right after column counts?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-3 as following M-2",
+        "notes M-3 governs nesting structure"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0037",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth restriction: how severe is the cap, hard or negotiable?",
+      "hop_distance": 1,
+      "criteria": [
+        "states it is a hard cap",
+        "mentions depth three limit"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0038",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints under Marrow: what is the final checkpoint concerned with, in terms of order?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-7",
+        "notes it establishes validation order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0039",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth cap requires flattening architectures deeper than what number?",
+      "hop_distance": 1,
+      "criteria": [
+        "states three",
+        "confirms flattening requirement"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0040",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape checkpoints of the Marrow schema encompass limitations from basic types to what kind of checks?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions complex range checks",
+        "notes seven total checkpoints"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0041",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting cap: what compliance action follows exceeding depth three?",
+      "hop_distance": 1,
+      "criteria": [
+        "states must be flattened",
+        "confirms depth three as cap"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0042",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints under Marrow: where are detailed nesting depth values actually specified?",
+      "hop_distance": 0,
+      "criteria": [
+        "states within the individual M-N document, not the index",
+        "notes M-3 governs nesting"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0043",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth limit of three levels is described as what type of restriction?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions hard cap on structural complexity",
+        "states flattening required if exceeded"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0044",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape checkpoint list under Marrow: how many rules total inform the schema's necessary architecture?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven",
+        "notes they range from type declarations to validation order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0045",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting restriction sets its hard cap at which specific depth value?",
+      "hop_distance": 1,
+      "criteria": [
+        "states depth three",
+        "confirms flattening requirement"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0046",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints in Marrow: which rule number is dedicated purely to naming conventions?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-5",
+        "notes it controls naming conventions"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0047",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth cap: what must occur for any architecture surpassing three levels?",
+      "hop_distance": 1,
+      "criteria": [
+        "states must be flattened",
+        "confirms depth three as the cap"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0048",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape governance checkpoints under Marrow: what does the index say informs the necessary data architecture overall?",
+      "hop_distance": 0,
+      "criteria": [
+        "states the seven indexed rules inform architecture",
+        "notes specifics are defined elsewhere"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0049",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Marrow schema data shape nesting depth limit is enforced how, through rejection or flattening?",
+      "hop_distance": 1,
+      "criteria": [
+        "states flattening is required",
+        "confirms depth three limit"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0050",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Schema data shape checkpoints under Marrow: which numbered rule addresses numeric ranges among the seven?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies M-6",
+        "notes it specifies numeric ranges"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0051",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Under the Marrow schema rules, what is the maximum nesting depth allowed for document structures, and what must happen if it's exceeded?",
+      "hop_distance": 1,
+      "criteria": [
+        "states depth limit is three levels",
+        "mentions this is called the trident limit",
+        "states architecture must be flattened to comply"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_b_0052",
+      "cluster_id": "cluster_b",
+      "prompt_text": "Data shape checkpoints of the Marrow schema: how many indexed rules exist, and what is the last one about?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven total",
+        "identifies the last as validation order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0000",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how many operative rule sets are established to govern compliance?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven rule sets",
+        "mentions they are numbered V-1 through V-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0001",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what two categories does severity classification divide violations into?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach",
+        "notes no third class exists"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0002",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what topics do the seven numbered rule sets collectively cover?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions severity classes, logging, exemptions, escalation, deadlines, overrides, repeat violations"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0003",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, is a third severity class permitted for violations?",
+      "hop_distance": 1,
+      "criteria": [
+        "states no third class is allowed",
+        "confirms binary amber/crimson system"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0004",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, which rule set specifically addresses violation logging?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies the logging rule as V-2"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0005",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what kind of system is used to classify violation severity?",
+      "hop_distance": 1,
+      "criteria": [
+        "states it is a mandatory binary system"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0006",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what does the exemption rule set govern?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies exemptions as governed by V-3"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0007",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what are the two possible severity designations for a Vessel violation?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0008",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what does the escalation rule set regulate?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies escalation procedures as V-4"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0009",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how is disciplinary severity for violations determined?",
+      "hop_distance": 1,
+      "criteria": [
+        "states mandatory binary classification",
+        "excludes any middle tier"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0010",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what is the purpose of correction deadline provisions within the rule set?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies correction deadlines as V-5"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0011",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, comply with the severity rule by naming its two breach categories.",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0012",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, which rule set governs overrides of established constraints?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies overrides as V-6"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0013",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what does the mandatory severity system eliminate for disciplinary purposes?",
+      "hop_distance": 1,
+      "criteria": [
+        "states elimination of a third class designation"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0014",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what does the repeat-violation tracking rule set concern?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies repeat violations tracking as V-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0015",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, every operational violation must be sorted into which severity tier?",
+      "hop_distance": 1,
+      "criteria": [
+        "states amber breach or crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0016",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how does the system ensure compliance is enforced when a violation occurs?",
+      "hop_distance": 0,
+      "criteria": [
+        "states the mechanism strictly enforces compliance whenever a violation occurs"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0017",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what dichotomy is used to classify Vessel infractions?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach and crimson breach as the dichotomy"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0018",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what stages must agents comply with from initial classification to final remediation?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions severity classification through correction deadline as the span"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0019",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, does the severity rule allow any intermediate classification between the two breach types?",
+      "hop_distance": 1,
+      "criteria": [
+        "states no intermediate classification exists"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0020",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what is described as the primary operational constraint governing Vessels?",
+      "hop_distance": 0,
+      "criteria": [
+        "states the numbered rule sets constitute the primary operational constraint"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0021",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what two breach designations result from the severity classification rule?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0022",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how many distinct rule categories must a Vessel operator follow?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven rule categories/sets"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0023",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what severity classification system governs how a violation is categorized by degree?",
+      "hop_distance": 1,
+      "criteria": [
+        "states that violations are classified using a mandatory binary system",
+        "identifies the two categories as amber breach and crimson breach",
+        "notes that no third class designation exists"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0024",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what range of subject areas do the numbered rule sets span?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists severity, logging, exemptions, escalation, deadlines, overrides, repeat tracking"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0025",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what type of classification system is mandated for every operational violation's severity?",
+      "hop_distance": 1,
+      "criteria": [
+        "states mandatory binary system"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0026",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what triggers strict enforcement of compliance according to the overall framework?",
+      "hop_distance": 0,
+      "criteria": [
+        "states enforcement is triggered whenever any violation occurs"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0027",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Vessel severity classification under the constraint code: what are the two possible breach categories a violation can be assigned?",
+      "hop_distance": 1,
+      "criteria": [
+        "mentions amber breach",
+        "mentions crimson breach",
+        "states there is no third classification"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0028",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, which rule set is dedicated to defining severity classes for violations?",
+      "hop_distance": 0,
+      "criteria": [
+        "identifies severity classes as V-1"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0029",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what severity outcomes are possible for a single violation?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0030",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how does the code describe the relationship between its numbered rules and enforcement?",
+      "hop_distance": 0,
+      "criteria": [
+        "states the rules govern adherence and enforce compliance strictly"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0031",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, is there a middle-ground severity category between the two breach types?",
+      "hop_distance": 1,
+      "criteria": [
+        "states no middle-ground category exists"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0032",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what is the full numeric span of the rule sets, from first to last?",
+      "hop_distance": 0,
+      "criteria": [
+        "states rule sets run from V-1 through V-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0033",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, comply with the severity requirement by describing its mandatory classification system.",
+      "hop_distance": 1,
+      "criteria": [
+        "states mandatory binary system with amber/crimson categories"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0034",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what functional areas make up the entire compliance system for Vessels?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists severity, logging, exemptions, escalation, deadlines, overrides, repeat tracking"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0035",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what severity system applies specifically to operational violations?",
+      "hop_distance": 1,
+      "criteria": [
+        "states mandatory binary system of amber/crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0036",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what is the stated scope of systemic compliance the seven rule sets govern?",
+      "hop_distance": 0,
+      "criteria": [
+        "states they govern all systemic compliance"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0037",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, which two breach labels replace any need for a third severity tier?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0038",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what obligations must agents fulfill according to the overall rule structure?",
+      "hop_distance": 0,
+      "criteria": [
+        "states agents must comply with every set rule from classification to remediation"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0039",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how strict is the elimination of a third severity designation?",
+      "hop_distance": 1,
+      "criteria": [
+        "states the third class designation is entirely eliminated"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0040",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what document defines the specific standards for each of the seven rule sets?",
+      "hop_distance": 0,
+      "criteria": [
+        "states individual rule documentation defines the standards"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0041",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what mandatory system underlies severity determination for infractions?",
+      "hop_distance": 1,
+      "criteria": [
+        "states a mandatory binary system"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0042",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Vessel constraint rules under this code cover how many operative rule sets, and what compliance areas do they govern from start to finish?",
+      "hop_distance": 0,
+      "criteria": [
+        "states there are seven rule sets numbered V-1 through V-7",
+        "lists that they cover severity classification, violation logging, exemptions, escalation, correction deadlines, overrides, and repeat violations tracking"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0043",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what two disciplinary categories apply to every operational infraction?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0044",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, which numbered rule sets exist between severity classification and correction deadlines?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions logging, exemptions, escalation as the intervening rule sets"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0045",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what happens to the possibility of a third disciplinary class?",
+      "hop_distance": 1,
+      "criteria": [
+        "states it is eliminated"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0046",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how does the overall system ensure enforcement whenever any violation occurs?",
+      "hop_distance": 0,
+      "criteria": [
+        "states the mechanism strictly enforces compliance whenever a violation occurs"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0047",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what binary outcome must every operational violation's severity resolve to?",
+      "hop_distance": 1,
+      "criteria": [
+        "names amber breach",
+        "names crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0048",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what seven-part structure governs all systemic compliance for Vessels?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists the seven rule sets V-1 through V-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0049",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, comply with severity rules by identifying which classification the code mandates.",
+      "hop_distance": 1,
+      "criteria": [
+        "states mandatory binary system",
+        "names amber breach and crimson breach"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0050",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, what rule sets must be followed from initial severity classification to final remediation deadline?",
+      "hop_distance": 0,
+      "criteria": [
+        "states all seven rule sets V-1 through V-7 must be followed"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_c_0051",
+      "cluster_id": "cluster_c",
+      "prompt_text": "Under the Vessel Constraint Code, how does the severity classification rule categorize violations by degree of severity?",
+      "hop_distance": 1,
+      "criteria": [
+        "States violations are classified using a mandatory binary system",
+        "Names the two categories as an amber breach and a crimson breach",
+        "Notes there is no third class designation"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0000",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance categories span how many total, from citation through retraction?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven total categories",
+        "notes range covers citation through retraction"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0001",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp entries under Ledger provenance must be logged in which time standard?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: UTC (Universal Coordinated Time)"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0002",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance rules span seven areas\u2014can you list which specific topic each of the seven rules (citation markers through retractions) governs?",
+      "hop_distance": 0,
+      "criteria": [
+        "mentions L-1 citation markers, L-2 origin records, L-3 custody chains, L-4 unverified content, L-5 timestamps, L-6 attribution, L-7 retractions",
+        "notes that specific values are defined in individual guidelines, not the index"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0003",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger timestamps require a minimum precision of what unit of time?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: minute precision"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0004",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Origin records and custody chains under Ledger provenance both support establishing what?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: provenance/traceability of claims"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0005",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance timestamp rules exclude which kind of temporal reading from the system?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: local temporal readings/local time"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0006",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Custody history and origin tracking under Ledger provenance together establish what for every claim?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: provenance"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0007",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger timestamp entries must follow what time standard and precision level under the provenance protocol?",
+      "hop_distance": 1,
+      "criteria": [
+        "states UTC (Universal Coordinated Time)",
+        "states minute precision as minimum",
+        "notes local time readings are excluded"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0008",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Traceable source obligations under Ledger provenance apply to how many total categories?",
+      "hop_distance": 0,
+      "criteria": [
+        "states seven",
+        "categories run from citation (L-1) through retraction (L-7)"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0009",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance's timestamp requirement mandates use of which acronym for time logging?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: UTC"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0010",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Attribution alongside origin and custody tracking under Ledger provenance all serve which overarching goal?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: establishing provenance / traceability of claims"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0011",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Traceable timestamp entries in the Ledger must achieve at least what level of granularity?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: minute-level precision"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0012",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Retraction under the Ledger's provenance framework does not eliminate what requirement?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: claims must remain fully auditable / traceable sourcing still required"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0013",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Origin timestamps under Ledger provenance exclude readings based on what kind of clock?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: local time/local temporal readings"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0014",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Source citation, origin recording, and custody documentation under Ledger provenance together achieve what compliance goal?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: full auditability/traceable provenance of claims"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0015",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance rules for timestamps state that local time is excluded in favor of which standard?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: UTC"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0016",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance obligations survive retraction\u2014what must remain fully documented under the Ledger protocol?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: all claims must remain fully auditable"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0017",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger timestamps, as defined for provenance, always appear in what format and precision?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: UTC at minimum minute precision"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0018",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance's categories, from citation to retraction, total how many overall?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: seven (L-1 through L-7)"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0019",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp precision requirements under Ledger provenance specify a minimum unit of what?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: minute"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0020",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Origin recording under Ledger provenance corresponds to which numbered category in the index?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: L-2"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0021",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp entries under the Ledger provenance rules must follow what time standard and precision level?",
+      "hop_distance": 1,
+      "criteria": [
+        "states Universal Coordinated Time (UTC) is required",
+        "states minimum precision of minute-level",
+        "notes local time readings are excluded"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0022",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Custody chains under Ledger provenance correspond to which numbered category in the index?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: L-3"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0023",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance timestamp logging forbids what kind of local reading from appearing in entries?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: local temporal readings"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0024",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance and traceable sourcing are governed by seven rules in the Ledger's index\u2014what area of sourcing does each of the seven rules individually cover, from citation through retraction?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists all seven rule topics: citation markers, origin records, custody chains, unverified content, timestamps, attribution, retractions",
+        "correctly maps each topic to its L-1 through L-7 position in order"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0025",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger timestamps exclude which non-standard time-zone reading from every entry?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: local time readings"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0026",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance categories, from citation to retraction, total how many overall\u2014what are their focus areas?",
+      "hop_distance": 0,
+      "criteria": [
+        "lists seven areas: citation, origin, custody, unverified content, timestamps, attribution, retractions"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0027",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Traceable source entries include a raw timestamp reflecting which standard exclusively?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: UTC"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0028",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Attribution recording under Ledger provenance corresponds to which numbered category?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: L-6"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0029",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger timestamp entries must follow what time standard and precision level according to the provenance protocol?",
+      "hop_distance": 1,
+      "criteria": [
+        "states Universal Coordinated Time (UTC)",
+        "mentions minute precision as the minimum",
+        "notes local time readings are excluded"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0030",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Retraction processing under Ledger provenance corresponds to which numbered category?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: L-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0031",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp requirements within Ledger provenance set what minimum precision level?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: minute precision"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0032",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp logging under Ledger provenance corresponds to which numbered category?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: L-5"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0033",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance's timestamp standard is defined using which full name and its abbreviation?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: Universal Coordinated Time (UTC)"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0034",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance flags unverified content under which numbered category?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: L-4"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0035",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger's raw timestamp entry will always reflect which kind of measurement?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: standardized UTC measurements"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0036",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance and traceable source citation are required for every claim under the Ledger\u2014true or false, and why?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: true",
+        "explains claims must cite a traceable source to establish provenance"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0037",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp logging under Ledger provenance strictly excludes what kind of local data?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: local temporal readings"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0038",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Origin, custody, and attribution details under Ledger provenance combine to support what kind of records?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: fully auditable/traceable provenance records"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0039",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance timestamp entries must never fall below what precision threshold?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: minute precision"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0040",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger's provenance index states that specific values for each numbered category are defined where?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: within the individual guidelines, not the index itself"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0041",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance's timestamp requirement corresponds to which specific numbered category?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: L-5"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0042",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Traceable sourcing under Ledger provenance requires documenting which initial piece of data for compliance?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: initial timestamp data"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0043",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp requirements under the Ledger Provenance Protocol: what time standard and precision must every logged entry use?",
+      "hop_distance": 1,
+      "criteria": [
+        "states UTC (Universal Coordinated Time) is required",
+        "states minute-level precision at minimum",
+        "notes local time readings are excluded"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0044",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance compliance under the Ledger mandates explicit documentation of which data, alongside source details for all seven categories?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: initial timestamp data",
+        "mentions source details spanning L-1 through L-7"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0045",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Origin timestamp logging on the Ledger uses which minimum unit of time measurement?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: minute"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0046",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Custody and provenance tracking under the Ledger ensure what about claims even after a retraction occurs?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: claims remain fully auditable"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0047",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Provenance timestamps recorded in the Ledger never include what kind of reading?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: local temporal readings"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0048",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance obligations require every claim to feature which three tracked elements: origin, custody, and what else?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: attribution (precise attribution)"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0049",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Ledger provenance's timestamp requirement requires readings in UTC at what minimum precision level?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: minute precision"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0050",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Source-based provenance under the Ledger protocol is governed by how many distinct numbered categories in total?",
+      "hop_distance": 0,
+      "criteria": [
+        "answer: seven"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    },
+    {
+      "prompt_id": "cluster_d_0051",
+      "cluster_id": "cluster_d",
+      "prompt_text": "Timestamp entries under Ledger provenance are exclusively expressed using which time system?",
+      "hop_distance": 1,
+      "criteria": [
+        "answer: UTC"
+      ],
+      "seed_fixture_version": "v3",
+      "generated_by": "claude-sonnet-5@2026-07-26",
+      "validated": true,
+      "exclusion_reason": null
+    }
+  ],
+  "generation_params": {
+    "total_prompts": 350,
+    "probe_ratio": 0.4,
+    "hop_distance_levels": [
+      0,
+      1
+    ],
+    "subjects": "auto",
+    "model": "claude-sonnet-5",
+    "trained_spokes": {
+      "cluster_a": "a_spoke1",
+      "cluster_b": "b_spoke3",
+      "cluster_c": "c_spoke1",
+      "cluster_d": "d_spoke5"
+    }
+  },
+  "content_hash": "e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403"
+}

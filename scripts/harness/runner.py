@@ -209,6 +209,40 @@ def _prompt_until_valid(
         print_fn(f"  Unrecognized answer {answer!r} — expected one of {'/'.join(valid)}.")
 
 
+def _prompt_for_failed_criterion(
+    resume_input_fn: Callable[[str], str],
+    print_fn: Callable[[str], None],
+    criteria: list,
+) -> str:
+    """
+    Ask which criterion the response failed, returning its exact text.
+
+    Only reached when the operator overrides a verdict to "down" in
+    calibration mode. The backend requires a non-empty criterion_triggered
+    for "down" (422 otherwise), and matching the exact criterion string is
+    what lets §6 tie a failure back to a specific criterion rather than a
+    bare count.
+
+    A prompt with no criteria can't happen with a validated bank (every
+    entry carries 1-3), but the fallback keeps a malformed entry from
+    turning an override into a 422 mid-calibration.
+    """
+    if not criteria:
+        return "operator override (prompt carried no criteria)"
+    if len(criteria) == 1:
+        return criteria[0]
+
+    print_fn("  Which criterion did the response fail?")
+    for i, criterion in enumerate(criteria, 1):
+        print_fn(f"    {i}. {criterion}")
+    choice = _prompt_until_valid(
+        resume_input_fn, print_fn,
+        f"Criterion number [1-{len(criteria)}]: ",
+        tuple(str(i) for i in range(1, len(criteria) + 1)),
+    )
+    return criteria[int(choice) - 1]
+
+
 def _judge_and_post_verdict(
     client: BackendClient,
     judge_client: Any,
@@ -226,9 +260,13 @@ def _judge_and_post_verdict(
     """
     Judge one bulk turn's response and post the verdict to the backend.
 
-    Returns (verdict, feedback_event_id, judge_error) — verdict and
-    feedback_event_id are None when judging soft-continues (judge_error
-    holds the reason instead). Raises HardStopError only for the
+    Returns (verdict, feedback_event_id, judge_error, judge_model_verdict) —
+    verdict and feedback_event_id are None when judging soft-continues
+    (judge_error holds the reason instead). judge_model_verdict is what the judge
+    model itself returned, before any --interactive override, so an
+    override's direction stays recoverable from the checkpoint; it is None
+    only when the judge never produced a parseable verdict at all. Raises
+    HardStopError only for the
     judge_unparseable hard_stop policy case. BackendConnectivityError /
     BackendTurnError raised by client.post_verdict() propagate to the
     caller, which applies the standard connectivity/turn_ambiguous policy —
@@ -245,9 +283,11 @@ def _judge_and_post_verdict(
             raise HardStopError(f"judge_unparseable: {exc}") from exc
         print_fn(f"  judge verdict unparseable — soft-continuing, no verdict recorded: {exc}")
         logger.warning("runner: judge_unparseable (soft_continue): %s", exc)
-        return None, None, f"judge_unparseable: {exc}"
+        return None, None, f"judge_unparseable: {exc}", None
 
-    verdict = verdict_obj.verdict
+    judge_model_verdict = verdict_obj.verdict
+    verdict = judge_model_verdict
+    criterion_triggered = verdict_obj.criterion_triggered
     judge_source = f"model:{plan.judge.model}"
 
     if interactive:
@@ -262,7 +302,7 @@ def _judge_and_post_verdict(
             ("a", "o", "skip"),
         )
         if answer == "skip":
-            return None, None, "verdict skipped by operator (--interactive)"
+            return None, None, "verdict skipped by operator (--interactive)", judge_model_verdict
         if answer == "o":
             verdict = _prompt_until_valid(
                 resume_input_fn, print_fn,
@@ -270,6 +310,17 @@ def _judge_and_post_verdict(
                 VALID_VERDICTS,
             )
             judge_source = "human"
+            # POST /feedback/verdict returns 422 for verdict="down" with an
+            # empty criterion_triggered. The model nulls that field on every
+            # non-"down" verdict, so overriding a model "up" to "down" — the
+            # single most valuable correction to make on an up-skewed judge —
+            # posted None and was rejected, then soft-continued into a lost
+            # verdict. The operator now names the failed criterion themselves,
+            # which is also the right authority once they've taken the call.
+            criterion_triggered = (
+                _prompt_for_failed_criterion(resume_input_fn, print_fn, prompt_entry.criteria)
+                if verdict == "down" else None
+            )
 
     apply_weight_update = condition == "learned" and verdict in ("up", "down")
     verdict_response = client.post_verdict(
@@ -279,13 +330,13 @@ def _judge_and_post_verdict(
         judge_source=judge_source,
         apply_weight_update=apply_weight_update,
         rationale=verdict_obj.rationale,
-        criterion_triggered=verdict_obj.criterion_triggered,
+        criterion_triggered=criterion_triggered,
         judge_model_name=plan.judge.model,
         judge_temperature=plan.judge.temperature,
         judge_pinned_snapshot=plan.judge.pinned_snapshot,
         prompt_id=prompt_entry.prompt_id,
     )
-    return verdict, verdict_response.get("feedback_event_id"), None
+    return verdict, verdict_response.get("feedback_event_id"), None, judge_model_verdict
 
 
 def _generate_series_report(
@@ -918,6 +969,7 @@ def execute_run(
                 verdict_str: Optional[str] = None
                 feedback_event_id: Optional[str] = None
                 judge_error: Optional[str] = None
+                judge_model_verdict: Optional[str] = None
                 if (
                     status == STATUS_OK
                     and turn["turn_type"] != TURN_TYPE_PROBE
@@ -927,7 +979,7 @@ def execute_run(
                     prompt_entry = entry_by_prompt_id.get(turn.get("prompt_id"))
                     if prompt_entry is not None:
                         try:
-                            verdict_str, feedback_event_id, judge_error = _judge_and_post_verdict(
+                            verdict_str, feedback_event_id, judge_error, judge_model_verdict = _judge_and_post_verdict(
                                 client, judge_client, plan, condition, detail, prompt_entry,
                                 (response or {}).get("response", ""), turn["turn_type"],
                                 error_policy, interactive, resume_input_fn, print_fn,
@@ -971,6 +1023,7 @@ def execute_run(
                     verdict=verdict_str,
                     feedback_event_id=feedback_event_id,
                     judge_error=judge_error,
+                    judge_model_verdict=judge_model_verdict,
                     probe_id=turn.get("probe_id"),
                     measurement_session_index=turn.get("measurement_session_index"),
                     probe_sample_result_ids=probe_sample_result_ids,

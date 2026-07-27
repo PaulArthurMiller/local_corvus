@@ -1020,6 +1020,117 @@ def test_interactive_reprompts_on_unrecognized_answer(tmp_path):
     assert client.verdict_calls[0]["judge_source"] == "human"
 
 
+def test_interactive_override_to_down_supplies_criterion_triggered(tmp_path):
+    """
+    Regression: POST /feedback/verdict returns 422 for verdict="down" with an
+    empty criterion_triggered, and the judge nulls that field on every
+    non-"down" verdict. Overriding a model "up" to "down" therefore posted
+    None, was rejected, and soft-continued into a lost verdict — silently
+    dropping the most valuable correction in a calibration pass.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+    )
+    scripted = iter(["o", "down"])  # single-criterion bank needs no criterion pick
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True,
+        resume_input_fn=lambda _p: next(scripted),
+    )
+
+    posted = client.verdict_calls[0]
+    assert posted["verdict"] == "down"
+    # The exact rule the backend enforces at chat.py: non-empty for "down".
+    assert (posted["criterion_triggered"] or "").strip() == "mentions X"
+    assert outcome.checkpoint.turns[0].judge_error is None
+
+
+def test_interactive_override_records_judge_model_verdict_for_calibration(tmp_path):
+    """The judge's own verdict survives an override, so a calibration pass can
+    report the direction of disagreement, not just its frequency."""
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+    )
+    scripted = iter(["o", "down"])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True,
+        resume_input_fn=lambda _p: next(scripted),
+    )
+
+    turn = outcome.checkpoint.turns[0]
+    assert turn.judge_model_verdict == "up"  # what the judge said
+    assert turn.verdict == "down"      # what the operator recorded
+
+
+def test_multi_criteria_down_override_asks_which_criterion_failed(tmp_path):
+    """With more than one criterion the operator picks by number, and the
+    exact criterion text is what gets posted."""
+    entries = [
+        PromptBankEntry(
+            prompt_id="cluster_a_0000", cluster_id="cluster_a",
+            prompt_text="real bank prompt 0", hop_distance=0,
+            criteria=["names rule K-1", "states the fixed order is mandatory"],
+            seed_fixture_version="v3", generated_by="claude-sonnet-5@2026-07-04",
+            validated=True,
+        )
+    ]
+    bank_path = save_bank(
+        PromptBank(entries=entries, generation_params={}, content_hash="multicrit"),
+        tmp_path / "banks",
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+    )
+    scripted = iter(["o", "down", "2"])
+
+    execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True,
+        resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert client.verdict_calls[0]["criterion_triggered"] == "states the fixed order is mandatory"
+
+
+def test_non_interactive_model_down_verdict_keeps_its_own_criterion(tmp_path):
+    """Behavior-preserving guard: outside interactive mode the model's own
+    criterion_triggered is still what gets posted."""
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "down", "rationale": "missed it", "criterion_triggered": "mentions X"}]
+    )
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert client.verdict_calls[0]["criterion_triggered"] == "mentions X"
+    assert outcome.checkpoint.turns[0].judge_model_verdict == "down"
+
+
 def test_interactive_accept_keeps_model_judge_source(tmp_path):
     bank_path = _write_bank_with_criteria(tmp_path / "banks")
     plan = _plan(

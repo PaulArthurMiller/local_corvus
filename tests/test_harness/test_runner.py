@@ -1262,6 +1262,28 @@ def test_series_report_failure_soft_continues_and_checkpoint_records_error(tmp_p
     assert "bogus series_id" in record.error
 
 
+def test_report_failure_message_is_printable_on_a_cp1252_console(tmp_path):
+    """
+    Regression: the soft-continue message carried U+26A0 (WARNING SIGN), which
+    the default Windows console encoding (cp1252) cannot encode. print() raised
+    UnicodeEncodeError from inside the soft-continue handler, escaping it — so
+    a report timeout that error_policy said to continue past instead crashed
+    the whole run with a traceback. Verified live on 2026-07-27.
+    """
+    plan = _plan(dry_run=True, dry_run_n=5)
+    client = FakeBackendClient(series_report_error=ReportGenerationError("timed out"))
+    printed = []
+
+    outcome = execute_run(plan, client, tmp_path, probes=_BATTERY, print_fn=printed.append)
+
+    assert outcome.status == "complete"
+    warnings = [line for line in printed if "REPORT GENERATION FAILED" in line]
+    assert warnings, "the soft-continue path must still announce itself"
+    for line in printed:
+        # .encode() is what print() does to a console stream; it must not raise.
+        line.encode("cp1252")
+
+
 def test_series_report_failure_hard_stops_when_policy_overridden(tmp_path):
     plan = _plan(dry_run=True, dry_run_n=5, error_policy={"report_generation": "hard_stop"})
     client = FakeBackendClient(series_report_error=ReportGenerationError("boom"))

@@ -368,7 +368,7 @@ def _generate_series_report(
         if policy == "hard_stop":
             raise HardStopError(f"report_generation: {message}") from exc
         logger.error("runner: %s (soft_continue per error_policy)", message)
-        print_fn(f"  ⚠ SERIES REPORT GENERATION FAILED (soft-continue): {message}")
+        print_fn(f"  WARNING: SERIES REPORT GENERATION FAILED (soft-continue): {message}")
         return SeriesReportRecord(
             condition=condition, series_index=series_index, experiment_id=experiment_id,
             series_id=series_id, status=STATUS_SOFT_CONTINUE, error=str(exc),
@@ -402,7 +402,7 @@ def _generate_experiment_report(
         if policy == "hard_stop":
             raise HardStopError(f"report_generation: {message}") from exc
         logger.error("runner: %s (soft_continue per error_policy)", message)
-        print_fn(f"  ⚠ EXPERIMENT REPORT GENERATION FAILED (soft-continue): {message}")
+        print_fn(f"  WARNING: EXPERIMENT REPORT GENERATION FAILED (soft-continue): {message}")
         return ExperimentReportRecord(
             experiment_id=experiment_id, status=STATUS_SOFT_CONTINUE, error=str(exc),
         )

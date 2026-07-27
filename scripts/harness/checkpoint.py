@@ -37,6 +37,15 @@ class TurnCheckpoint(BaseModel):
     verdict: Optional[str] = None
     feedback_event_id: Optional[str] = None
     judge_error: Optional[str] = None
+    # --interactive calibration only: the verdict the judge model returned,
+    # recorded alongside `verdict` (which holds the FINAL value — the
+    # operator's, if they overrode). Without both, an override is
+    # unrecoverable after the fact: nothing else on disk retains what the
+    # model said, so a calibration pass could report how often the operator
+    # intervened but never the judge's error direction, which is the whole
+    # measurement. None outside interactive mode, and on every pre-existing
+    # checkpoint.
+    judge_model_verdict: Optional[str] = None
     # M21 — probe turns only: which probe ran and which measurement session
     # it belonged to. `detail` holds the probe result_id (the probe-turn
     # analogue of a chat turn's run_id).

@@ -43,9 +43,41 @@ class BackendClient:
     # more generous budget (matches TIMEOUT_CHAT in tests/integration).
     DEFAULT_CHAT_TIMEOUT = 120.0
 
-    def __init__(self, base_url: str, timeout: float = 60.0, chat_timeout: float = DEFAULT_CHAT_TIMEOUT):
+    # Report generation is a long aggregation, not a request/response call.
+    # §6.1 alone issues one query per probe definition, twice over (mean and
+    # sample rows since M30), each with a condition_label fallback pass — on
+    # a 43-probe battery that is ~172 round-trips against the connection-per-
+    # operation store. Measured at 55.7s on a near-empty database, i.e.
+    # already past the 60s generic timeout before any real run's data exists.
+    # Same reasoning as DEFAULT_CHAT_TIMEOUT: a call class whose honest
+    # duration exceeds the generic budget gets its own, rather than having
+    # every run soft-continue into a missing report.
+    DEFAULT_REPORT_TIMEOUT = 600.0
+
+    # Bulk graph writes (wipe, seed, randomize-edges) go one row at a time
+    # through the connection-per-operation store, each insert paying a fresh
+    # connection plus an fsync — on a Docker bind-mounted volume that is
+    # ~0.3-1.0s per edge. Seeding seed_v3's 34 MUs + 64 edges was measured at
+    # 63.8s on 2026-07-27: past the 60s generic timeout, while the write
+    # itself completed successfully server-side. Since wipe/seed failures are
+    # classified as connectivity, and connectivity defaults to hard_stop,
+    # that combination aborts an entire multi-hour run over a graph that was
+    # in fact seeded correctly. These calls get a budget matched to what they
+    # actually cost.
+    DEFAULT_GRAPH_OP_TIMEOUT = 600.0
+
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 60.0,
+        chat_timeout: float = DEFAULT_CHAT_TIMEOUT,
+        report_timeout: float = DEFAULT_REPORT_TIMEOUT,
+        graph_op_timeout: float = DEFAULT_GRAPH_OP_TIMEOUT,
+    ):
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._chat_timeout = chat_timeout
+        self._report_timeout = report_timeout
+        self._graph_op_timeout = graph_op_timeout
 
     def close(self) -> None:
         self._client.close()
@@ -70,7 +102,11 @@ class BackendClient:
     def wipe_graph(self, experiment_id: Optional[str] = None) -> dict:
         """Archive the current graph (keyed by experiment_id), then delete all MUs/edges."""
         try:
-            resp = self._client.post("/admin/graph/wipe", json={"experiment_id": experiment_id})
+            resp = self._client.post(
+                "/admin/graph/wipe",
+                json={"experiment_id": experiment_id},
+                timeout=self._graph_op_timeout,
+            )
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
@@ -78,7 +114,11 @@ class BackendClient:
 
     def seed_graph(self, version: str = "v2") -> dict:
         try:
-            resp = self._client.post("/admin/seed-graph", json={"version": version})
+            resp = self._client.post(
+                "/admin/seed-graph",
+                json={"version": version},
+                timeout=self._graph_op_timeout,
+            )
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
@@ -244,6 +284,7 @@ class BackendClient:
             resp = self._client.post(
                 "/admin/reports/generate-series",
                 json={"experiment_id": experiment_id, "series_id": series_id},
+                timeout=self._report_timeout,
             )
             resp.raise_for_status()
             return resp.json()
@@ -265,6 +306,7 @@ class BackendClient:
                     "experiment_id": experiment_id,
                     "control_experiment_ids": control_experiment_ids,
                 },
+                timeout=self._report_timeout,
             )
             resp.raise_for_status()
             return resp.json()
@@ -278,7 +320,7 @@ class BackendClient:
         random [0, 1]. Called at the start of each series in the
         random_weight control condition."""
         try:
-            resp = self._client.post("/admin/edges/randomize")
+            resp = self._client.post("/admin/edges/randomize", timeout=self._graph_op_timeout)
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:

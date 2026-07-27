@@ -45,7 +45,7 @@ from harness.docker_lifecycle import (
     restart_backend,
     wait_for_health,
 )
-from harness.judge import JudgeUnparseableError, judge_turn
+from harness.judge import VALID_VERDICTS, JudgeUnparseableError, judge_turn
 from harness.manifest import (
     RunManifest,
     compute_config_hash,
@@ -154,6 +154,61 @@ def build_turn_message(turn: dict, condition: str, prompt_lookup: Optional[dict]
     return _placeholder_bulk_message(condition, turn)
 
 
+def _print_calibration_context(
+    print_fn: Callable[[str], None],
+    prompt_entry: PromptBankEntry,
+    response_text: str,
+) -> None:
+    """
+    Show the operator everything the judge saw, before asking them to accept
+    or override its verdict (--interactive only).
+
+    Without this, calibration mode is unanswerable: the operator is shown the
+    verdict and the judge's own rationale, which is the thing under audit —
+    agreeing with a rationale you can't check against the prompt, the criteria,
+    and the actual response is not calibration, it's rubber-stamping.
+
+    Nothing is truncated on purpose. A response clipped mid-sentence can flip
+    a genuine "up" into an apparent "down" (and vice versa), which would put
+    exactly the wrong labels into the calibration record this mode exists to
+    produce. Verbosity is the correct trade here — this path runs for a
+    ~20-turn calibration pass, never for a real run.
+    """
+    criteria_lines = "\n".join(f"    - {c}" for c in prompt_entry.criteria)
+    print_fn(
+        f"\n  {'-' * 68}\n"
+        f"  PROMPT [{prompt_entry.prompt_id}]:\n    {prompt_entry.prompt_text}\n\n"
+        f"  CRITERIA:\n{criteria_lines}\n\n"
+        f"  AGENT RESPONSE:\n    {response_text.strip() or '(empty)'}\n"
+        f"  {'-' * 68}"
+    )
+
+
+def _prompt_until_valid(
+    resume_input_fn: Callable[[str], str],
+    print_fn: Callable[[str], None],
+    prompt: str,
+    valid: tuple,
+) -> str:
+    """
+    Ask until the operator gives one of `valid`, re-prompting on anything else.
+
+    The previous behavior fell through to "accept the model's verdict" on any
+    unrecognized answer — so a typo, or answering the accept/override question
+    with "up", silently recorded a model verdict the operator was in the middle
+    of rejecting. Harmless noise in most CLIs; here it corrupts the calibration
+    record itself, which is the one artifact this mode produces.
+
+    EOFError from a closed stdin propagates, aborting the run — the checkpoint
+    is saved per turn, so nothing already graded is lost.
+    """
+    while True:
+        answer = resume_input_fn(prompt).strip().lower()
+        if answer in valid:
+            return answer
+        print_fn(f"  Unrecognized answer {answer!r} — expected one of {'/'.join(valid)}.")
+
+
 def _judge_and_post_verdict(
     client: BackendClient,
     judge_client: Any,
@@ -196,18 +251,25 @@ def _judge_and_post_verdict(
     judge_source = f"model:{plan.judge.model}"
 
     if interactive:
+        _print_calibration_context(print_fn, prompt_entry, response_text)
         print_fn(
             f"  Judge verdict: {verdict} rationale={verdict_obj.rationale!r} "
             f"criterion_triggered={verdict_obj.criterion_triggered!r}"
         )
-        answer = resume_input_fn("Accept judge verdict, or override? [a/o/skip]: ").strip().lower()
+        answer = _prompt_until_valid(
+            resume_input_fn, print_fn,
+            "Accept judge verdict, or override? [a/o/skip]: ",
+            ("a", "o", "skip"),
+        )
         if answer == "skip":
             return None, None, "verdict skipped by operator (--interactive)"
         if answer == "o":
-            override = resume_input_fn("Override verdict (up/down/none): ").strip().lower()
-            if override in ("up", "down", "none"):
-                verdict = override
-                judge_source = "human"
+            verdict = _prompt_until_valid(
+                resume_input_fn, print_fn,
+                "Override verdict (up/down/none): ",
+                VALID_VERDICTS,
+            )
+            judge_source = "human"
 
     apply_weight_update = condition == "learned" and verdict in ("up", "down")
     verdict_response = client.post_verdict(

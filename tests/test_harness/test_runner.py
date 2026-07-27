@@ -961,6 +961,65 @@ def test_interactive_override_sets_human_judge_source(tmp_path):
     assert client.verdict_calls[0]["judge_source"] == "human"
 
 
+def test_interactive_shows_prompt_criteria_and_response_before_asking(tmp_path):
+    """
+    Regression: calibration mode used to print only the verdict and the judge's
+    own rationale, so the operator had no independent basis to accept or
+    override it. All three inputs the judge saw must be shown, untruncated.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+    )
+    printed = []
+
+    execute_run(
+        plan, client, tmp_path, print_fn=printed.append,
+        judge_client=judge_client, interactive=True, resume_input_fn=lambda _p: "a",
+    )
+
+    output = "\n".join(printed)
+    # The bank fixture assigns prompts in reverse order, so read the prompt_id
+    # the turn actually used rather than assuming one.
+    used_prompt_id = client.chat_messages[0].split()[-1]
+    assert f"real bank prompt {used_prompt_id}" in output
+    assert "mentions X" in output  # the criteria the judge graded against
+    assert "placeholder response" in output  # the agent's actual response
+
+
+def test_interactive_reprompts_on_unrecognized_answer(tmp_path):
+    """
+    Regression: any answer outside a/o/skip used to fall through to "accept",
+    so a typo — or answering the accept/override question with "up" — silently
+    recorded a model verdict the operator was in the middle of rejecting.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+    )
+    # "down" is a valid verdict but NOT a valid answer to the accept/override
+    # question — the exact typo that previously auto-accepted "up".
+    scripted = iter(["down", "o", "hmm", "down"])
+
+    execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert client.verdict_calls[0]["verdict"] == "down"
+    assert client.verdict_calls[0]["judge_source"] == "human"
+
+
 def test_interactive_accept_keeps_model_judge_source(tmp_path):
     bank_path = _write_bank_with_criteria(tmp_path / "banks")
     plan = _plan(

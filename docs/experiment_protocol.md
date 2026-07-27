@@ -182,7 +182,7 @@ duplicate a key unless you're intentionally changing its action:
 |---|---|---|
 | `connectivity` | `hard_stop` | Backend unreachable / DB failure. |
 | `turn_ambiguous` | `soft_continue` | A single turn's result is malformed or missing. |
-| `judge_unparseable` | `soft_continue` | Judge response fails to parse even after one re-ask. |
+| `judge_unparseable` | `soft_continue` | Judge response yields no usable **verdict** even after one re-ask (malformed JSON, unknown verdict value, Ollama unreachable). |
 | `report_generation` | `soft_continue` | Series/experiment report call failed — regenerable later; must never abort an otherwise-successful run. |
 
 ### Worked example (single plan, matches `plans/pilot_125_2026-07-05.json`)

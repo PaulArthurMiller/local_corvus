@@ -15,6 +15,7 @@ from outside Docker.
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -39,9 +40,19 @@ class ProbeTurnJudgeError(Exception):
 
 
 class JudgeUnparseableError(Exception):
-    """Raised when the judge's response fails to parse into a valid verdict
-    even after one re-ask. Routes through error_policy["judge_unparseable"]
-    (default soft_continue) in the runner."""
+    """Raised when the judge's response fails to parse into a valid VERDICT
+    even after one re-ask — malformed JSON, a verdict outside VALID_VERDICTS,
+    or an HTTP failure talking to Ollama. Routes through
+    error_policy["judge_unparseable"] (default soft_continue) in the runner.
+
+    Deliberately NOT raised when the verdict itself is fine but the judge's
+    criterion citation can't be resolved: that failure mode can only occur on
+    "down" (an "up"/"none" citation is simply nulled), so raising on it made
+    the harness lose "down" verdicts at a rate it could never lose "up"
+    verdicts. In a calibration run measuring judge up-skew, an error that
+    silently deletes only downs biases the very quantity being measured. See
+    JudgeVerdict.criterion_unresolved for how that case is carried instead.
+    """
 
 
 @dataclass
@@ -49,6 +60,16 @@ class JudgeVerdict:
     verdict: str  # "up" | "down" | "none"
     rationale: Optional[str]
     criterion_triggered: Optional[str]
+    # True only when verdict == "down" and the judge's cited criterion could
+    # not be resolved to one of the prompt's criteria even after normalization
+    # and the re-ask. The verdict is still trustworthy and is carried through;
+    # the runner decides how to source the missing criterion (operator prompt
+    # in --interactive, otherwise soft-continue on the verdict POST alone).
+    criterion_unresolved: bool = False
+    # The judge's raw, unresolvable citation — kept for the audit trail so a
+    # calibration pass can see what the judge actually said rather than just
+    # that it said something unusable.
+    raw_criterion_citation: Optional[str] = None
 
 
 class OllamaJudgeClient:
@@ -125,6 +146,87 @@ def _build_judge_prompt(prompt_text: str, criteria: list[str], response_text: st
     )
 
 
+# Leading "label:" prefixes a judge routinely drops when quoting a criterion
+# back — the observed exp0 failure was a criterion written as
+# "answer: local temporal readings/local time" cited as
+# "local temporal readings/local time". The colon is required for a match, so
+# criteria that legitimately open with one of these words ("states three",
+# "notes fixed sequence is mandatory") are never touched.
+_LABEL_PREFIXES = (
+    "answer",
+    "criterion",
+    "criteria",
+    "expected",
+    "expected answer",
+    "required",
+    "response",
+)
+_LABEL_PREFIX_RE = re.compile(
+    r"^\s*(?:" + "|".join(re.escape(p) for p in _LABEL_PREFIXES) + r")\s*:\s*",
+    re.IGNORECASE,
+)
+# Markdown emphasis and quote characters the judge wraps citations in.
+_WRAPPER_CHARS = "*_`\"'“”‘’ \t"
+
+
+def _normalize_criterion(text: str) -> str:
+    """
+    Reduce a criterion string to a comparison key, so a judge citation that
+    differs only cosmetically still resolves to the bank's criterion.
+
+    Exact string equality was the original rule and it is too brittle for a
+    small local judge: it treats "answer: UTC", "**UTC**", and "UTC." as three
+    different criteria. Normalization is deliberately conservative — it only
+    removes formatting and label noise, never content words — because the
+    resolved value is what §6's criterion-level analysis keys on, so a
+    too-eager match would attribute a failure to the wrong criterion.
+    """
+    normalized = text.strip().strip(_WRAPPER_CHARS)
+    # Repeat: a judge may emit "criterion: answer: X" when quoting back.
+    while True:
+        stripped = _LABEL_PREFIX_RE.sub("", normalized)
+        if stripped == normalized:
+            break
+        normalized = stripped
+    normalized = normalized.strip().strip(_WRAPPER_CHARS)
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = normalized.rstrip(".,;:!")
+    return normalized.casefold()
+
+
+def _resolve_criterion(citation: Optional[str], criteria: list[str]) -> Optional[str]:
+    """
+    Map the judge's cited criterion onto the exact criterion text from the
+    prompt bank, or return None if it can't be resolved.
+
+    Always returns a string from `criteria` (never the judge's own wording) —
+    downstream analysis groups failures by criterion text, so letting the
+    judge's paraphrase through would fragment those groups.
+
+    Resolution order, most to least certain:
+      1. Exact match — unchanged from the original behavior.
+      2. Normalized match (see _normalize_criterion).
+      3. Single-criterion prompts: if the prompt carries exactly one
+         criterion, a "down" can only mean that one. This is deduction, not
+         guessing, and it covers the cluster_c/cluster_d "answer: X" prompts
+         where the observed failure occurred.
+    Anything else is left unresolved rather than fuzzy-matched — attributing
+    a failure to a guessed criterion would corrupt the record this run exists
+    to produce.
+    """
+    if citation:
+        if citation in criteria:
+            return citation
+        normalized_citation = _normalize_criterion(citation)
+        if normalized_citation:
+            for criterion in criteria:
+                if _normalize_criterion(criterion) == normalized_citation:
+                    return criterion
+    if len(criteria) == 1:
+        return criteria[0]
+    return None
+
+
 def _parse_verdict(raw_text: str, criteria: list[str]) -> JudgeVerdict:
     try:
         data = json.loads(raw_text)
@@ -138,20 +240,27 @@ def _parse_verdict(raw_text: str, criteria: list[str]) -> JudgeVerdict:
     if verdict not in VALID_VERDICTS:
         raise ValueError(f"judge verdict {verdict!r} not in {VALID_VERDICTS}")
 
-    criterion_triggered = data.get("criterion_triggered")
-    if verdict == "down":
-        if not criterion_triggered or criterion_triggered not in criteria:
-            raise ValueError(
-                f"verdict is 'down' but criterion_triggered {criterion_triggered!r} "
-                f"is not one of the prompt's criteria {criteria}"
-            )
-    else:
-        criterion_triggered = None
+    raw_citation = data.get("criterion_triggered")
+    if not isinstance(raw_citation, str):
+        raw_citation = None
 
+    if verdict == "down":
+        resolved = _resolve_criterion(raw_citation, criteria)
+        return JudgeVerdict(
+            verdict=verdict,
+            rationale=data.get("rationale"),
+            criterion_triggered=resolved,
+            criterion_unresolved=resolved is None,
+            raw_criterion_citation=None if resolved else raw_citation,
+        )
+
+    # "up"/"none" carry no criterion by definition; any citation the judge
+    # attached is dropped without complaint. The "down" branch above is now
+    # equally non-fatal, which is the point — see JudgeUnparseableError.
     return JudgeVerdict(
         verdict=verdict,
         rationale=data.get("rationale"),
-        criterion_triggered=criterion_triggered,
+        criterion_triggered=None,
     )
 
 
@@ -170,10 +279,16 @@ def judge_turn(
     a precondition guard; the runner must never route probes here either
     (both layers, deliberately, per BUILD-PLAN.md).
 
-    Raises JudgeUnparseableError if the judge's response fails to parse into
-    a valid verdict even after one re-ask (covers both malformed JSON and
-    HTTP/connectivity failures talking to Ollama — both are contained by the
-    same retry-then-soft-continue path).
+    Raises JudgeUnparseableError only if the judge's response fails to parse
+    into a valid VERDICT even after one re-ask (covers malformed JSON, an
+    unknown verdict value, and HTTP/connectivity failures talking to Ollama —
+    all contained by the same retry-then-soft-continue path).
+
+    A "down" whose criterion citation can't be resolved is NOT an unparseable
+    response: it is returned with criterion_unresolved=True. The re-ask still
+    happens (a second sample sometimes cites cleanly), but exhausting it now
+    degrades the result instead of discarding it, so "down" verdicts survive
+    citation trouble exactly as "up" verdicts always have.
     """
     if turn_type == TURN_TYPE_PROBE:
         raise ProbeTurnJudgeError("judge_turn must never be called for a probe turn")
@@ -181,13 +296,28 @@ def judge_turn(
     prompt = _build_judge_prompt(prompt_text, criteria, response_text)
 
     last_exc: Optional[Exception] = None
+    unresolved: Optional[JudgeVerdict] = None
     for attempt in range(MAX_JUDGE_ATTEMPTS):
         try:
             raw_text = client.chat_json(judge_config.model, judge_config.temperature, prompt)
-            return _parse_verdict(raw_text, criteria)
+            verdict = _parse_verdict(raw_text, criteria)
         except (ValueError, KeyError, httpx.HTTPError) as exc:
             last_exc = exc
             logger.warning("judge: parse/call failure (attempt %d/%d): %s", attempt + 1, MAX_JUDGE_ATTEMPTS, exc)
+            continue
+        if not verdict.criterion_unresolved:
+            return verdict
+        # Keep the first unresolved "down" as the fallback and re-ask; the
+        # judge runs at temperature <= 0.1, so a re-ask rarely changes a
+        # citation, but when it does the resolved answer is strictly better.
+        unresolved = unresolved or verdict
+        logger.warning(
+            "judge: unresolvable criterion citation %r (attempt %d/%d); verdict 'down' retained",
+            verdict.raw_criterion_citation, attempt + 1, MAX_JUDGE_ATTEMPTS,
+        )
+
+    if unresolved is not None:
+        return unresolved
 
     raise JudgeUnparseableError(
         f"judge response unparseable after {MAX_JUDGE_ATTEMPTS} attempt(s) "

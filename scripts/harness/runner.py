@@ -265,8 +265,9 @@ def _judge_and_post_verdict(
     (judge_error holds the reason instead). judge_model_verdict is what the judge
     model itself returned, before any --interactive override, so an
     override's direction stays recoverable from the checkpoint; it is None
-    only when the judge never produced a parseable verdict at all. Raises
-    HardStopError only for the
+    only when the judge never produced a parseable verdict at all — including
+    when the operator hand-grades an unparseable turn in --interactive, where
+    there is no model verdict to record. Raises HardStopError only for the
     judge_unparseable hard_stop policy case. BackendConnectivityError /
     BackendTurnError raised by client.post_verdict() propagate to the
     caller, which applies the standard connectivity/turn_ambiguous policy —
@@ -281,6 +282,24 @@ def _judge_and_post_verdict(
         policy = error_policy.get("judge_unparseable", "soft_continue")
         if policy == "hard_stop":
             raise HardStopError(f"judge_unparseable: {exc}") from exc
+        # In --interactive the operator is sitting right here with the prompt,
+        # criteria and response on screen — everything needed to grade the turn
+        # by hand. Scrolling past without asking threw away a verdict that was
+        # free to recover, in the one mode whose entire product is verdicts.
+        if interactive:
+            recovered = _prompt_for_manual_verdict(
+                print_fn, resume_input_fn, prompt_entry, response_text, exc,
+            )
+            if recovered is not None:
+                verdict, criterion_triggered = recovered
+                return _post_verdict(
+                    client, plan, condition, run_id, prompt_entry,
+                    verdict=verdict,
+                    judge_source="human",
+                    rationale=f"operator verdict after unparseable judge response: {exc}",
+                    criterion_triggered=criterion_triggered,
+                    judge_model_verdict=None,
+                )
         print_fn(f"  judge verdict unparseable — soft-continuing, no verdict recorded: {exc}")
         logger.warning("runner: judge_unparseable (soft_continue): %s", exc)
         return None, None, f"judge_unparseable: {exc}", None
@@ -296,6 +315,11 @@ def _judge_and_post_verdict(
             f"  Judge verdict: {verdict} rationale={verdict_obj.rationale!r} "
             f"criterion_triggered={verdict_obj.criterion_triggered!r}"
         )
+        if verdict_obj.criterion_unresolved:
+            print_fn(
+                f"  NOTE: the judge cited {verdict_obj.raw_criterion_citation!r}, which matches "
+                "none of the criteria above — you will be asked which criterion it failed."
+            )
         answer = _prompt_until_valid(
             resume_input_fn, print_fn,
             "Accept judge verdict, or override? [a/o/skip]: ",
@@ -303,6 +327,12 @@ def _judge_and_post_verdict(
         )
         if answer == "skip":
             return None, None, "verdict skipped by operator (--interactive)", judge_model_verdict
+        if answer == "a" and verdict == "down" and criterion_triggered is None:
+            # Accepting an unresolved "down": the direction is the judge's,
+            # the criterion is the operator's, and the POST needs both.
+            criterion_triggered = _prompt_for_failed_criterion(
+                resume_input_fn, print_fn, prompt_entry.criteria,
+            )
         if answer == "o":
             verdict = _prompt_until_valid(
                 resume_input_fn, print_fn,
@@ -322,6 +352,83 @@ def _judge_and_post_verdict(
                 if verdict == "down" else None
             )
 
+    if verdict == "down" and criterion_triggered is None:
+        # Non-interactive, multi-criterion prompt, and the judge's citation
+        # resolved to nothing. POST would 422, and inventing a criterion would
+        # corrupt the per-criterion analysis, so the verdict goes unposted —
+        # but judge_model_verdict below still carries the "down" into the
+        # checkpoint, so this turn stays visible to calibration analysis
+        # instead of vanishing the way it used to.
+        message = (
+            f"criterion_unresolved: judge returned 'down' citing "
+            f"{verdict_obj.raw_criterion_citation!r}, which matches none of "
+            f"{prompt_entry.criteria}; verdict not posted"
+        )
+        print_fn(f"  {message} — soft-continuing (re-run with --interactive to grade by hand)")
+        logger.warning("runner: %s (soft_continue)", message)
+        return None, None, message, judge_model_verdict
+
+    return _post_verdict(
+        client, plan, condition, run_id, prompt_entry,
+        verdict=verdict,
+        judge_source=judge_source,
+        rationale=verdict_obj.rationale,
+        criterion_triggered=criterion_triggered,
+        judge_model_verdict=judge_model_verdict,
+    )
+
+
+def _prompt_for_manual_verdict(
+    print_fn: Callable[[str], None],
+    resume_input_fn: Callable[[str], str],
+    prompt_entry: PromptBankEntry,
+    response_text: str,
+    exc: Exception,
+) -> Optional[tuple]:
+    """
+    Offer the operator a hand-graded verdict after the judge failed to produce
+    one (--interactive only). Returns (verdict, criterion_triggered), or None
+    if the operator declines and the turn should soft-continue as before.
+    """
+    _print_calibration_context(print_fn, prompt_entry, response_text)
+    print_fn(f"  JUDGE FAILED: {exc}")
+    answer = _prompt_until_valid(
+        resume_input_fn, print_fn,
+        "Grade this turn yourself, or skip it? [g/skip]: ",
+        ("g", "skip"),
+    )
+    if answer == "skip":
+        return None
+    verdict = _prompt_until_valid(
+        resume_input_fn, print_fn,
+        "Verdict (up/down/none): ",
+        VALID_VERDICTS,
+    )
+    criterion_triggered = (
+        _prompt_for_failed_criterion(resume_input_fn, print_fn, prompt_entry.criteria)
+        if verdict == "down" else None
+    )
+    return verdict, criterion_triggered
+
+
+def _post_verdict(
+    client: BackendClient,
+    plan: RunPlan,
+    condition: str,
+    run_id: Optional[str],
+    prompt_entry: PromptBankEntry,
+    verdict: str,
+    judge_source: str,
+    rationale: Optional[str],
+    criterion_triggered: Optional[str],
+    judge_model_verdict: Optional[str],
+) -> tuple:
+    """
+    POST one verdict and shape the caller's 4-tuple. Shared by the normal
+    judged path and the --interactive manual-recovery path so both record
+    identical metadata; connectivity/turn errors propagate to the caller's
+    existing policy handling.
+    """
     apply_weight_update = condition == "learned" and verdict in ("up", "down")
     verdict_response = client.post_verdict(
         run_id=run_id,
@@ -329,7 +436,7 @@ def _judge_and_post_verdict(
         condition_label=condition,
         judge_source=judge_source,
         apply_weight_update=apply_weight_update,
-        rationale=verdict_obj.rationale,
+        rationale=rationale,
         criterion_triggered=criterion_triggered,
         judge_model_name=plan.judge.model,
         judge_temperature=plan.judge.temperature,

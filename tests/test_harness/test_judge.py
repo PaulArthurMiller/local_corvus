@@ -102,17 +102,120 @@ def test_down_verdict_with_valid_criterion_parses():
 # ---------------------------------------------------------------------------
 
 
-def test_down_verdict_with_criterion_not_in_list_retries_then_raises():
+def test_down_verdict_with_unresolvable_criterion_retries_then_keeps_verdict():
+    """The asymmetry fix: an unresolvable citation degrades the result rather
+    than discarding it, so a 'down' survives what an 'up' always survived."""
+    criteria = ["mentions X", "mentions Y"]
     responses = [
         _verdict_json(verdict="down", criterion_triggered="not a real criterion"),
         _verdict_json(verdict="down", criterion_triggered="still not real"),
     ]
     client = FakeOllamaJudgeClient(responses)
 
-    with pytest.raises(JudgeUnparseableError):
-        judge_turn(client, "What is X?", ["mentions X"], "irrelevant.", _judge_config(), TURN_TYPE_BULK)
+    result = judge_turn(client, "What is X?", criteria, "irrelevant.", _judge_config(), TURN_TYPE_BULK)
 
+    assert result.verdict == "down"
+    assert result.criterion_triggered is None
+    assert result.criterion_unresolved is True
+    assert result.raw_criterion_citation == "not a real criterion"
     assert len(client.calls) == 2
+
+
+def test_reask_that_cites_a_real_criterion_wins_over_first_unresolved_attempt():
+    criteria = ["mentions X", "mentions Y"]
+    responses = [
+        _verdict_json(verdict="down", criterion_triggered="not a real criterion"),
+        _verdict_json(verdict="down", criterion_triggered="mentions Y"),
+    ]
+    client = FakeOllamaJudgeClient(responses)
+
+    result = judge_turn(client, "What is X?", criteria, "irrelevant.", _judge_config(), TURN_TYPE_BULK)
+
+    assert result.criterion_triggered == "mentions Y"
+    assert result.criterion_unresolved is False
+
+
+def test_single_criterion_prompt_resolves_unmatched_citation_by_deduction():
+    """A 'down' on a one-criterion prompt can only mean that criterion."""
+    client = FakeOllamaJudgeClient([_verdict_json(verdict="down", criterion_triggered="garbled")])
+
+    result = judge_turn(client, "What is X?", ["mentions X"], "irrelevant.", _judge_config(), TURN_TYPE_BULK)
+
+    assert result.criterion_triggered == "mentions X"
+    assert result.criterion_unresolved is False
+    assert len(client.calls) == 1
+
+
+def test_down_verdict_with_null_citation_on_multi_criterion_prompt_is_unresolved():
+    client = FakeOllamaJudgeClient([
+        _verdict_json(verdict="down", criterion_triggered=None),
+        _verdict_json(verdict="down", criterion_triggered=None),
+    ])
+
+    result = judge_turn(client, "What is X?", ["mentions X", "mentions Y"], "no.", _judge_config(), TURN_TYPE_BULK)
+
+    assert result.verdict == "down"
+    assert result.criterion_unresolved is True
+
+
+# ---------------------------------------------------------------------------
+# Criterion normalization — the exp0 "answer: " prefix failure and friends
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("citation", [
+    "local temporal readings/local time",           # the exact exp0 failure
+    "answer: local temporal readings/local time",   # verbatim
+    "**local temporal readings/local time**",       # markdown emphasis
+    "Local Temporal Readings/Local Time.",          # case + trailing period
+    '"local temporal readings/local time"',         # quoted
+    "  local temporal   readings/local time  ",     # whitespace noise
+    "criterion: answer: local temporal readings/local time",  # stacked labels
+])
+def test_normalized_citation_resolves_to_exact_bank_criterion(citation):
+    criteria = ["answer: local temporal readings/local time", "mentions UTC"]
+    client = FakeOllamaJudgeClient([_verdict_json(verdict="down", criterion_triggered=citation)])
+
+    result = judge_turn(client, "Which reading?", criteria, "wrong.", _judge_config(), TURN_TYPE_BULK)
+
+    # Always the bank's exact text, never the judge's wording — §6 groups by it.
+    assert result.criterion_triggered == "answer: local temporal readings/local time"
+    assert result.criterion_unresolved is False
+    assert len(client.calls) == 1
+
+
+def test_normalization_does_not_strip_leading_label_words_without_a_colon():
+    """'states three' must survive: only 'label:' prefixes are stripped."""
+    criteria = ["states three", "confirms flattening requirement"]
+    client = FakeOllamaJudgeClient([_verdict_json(verdict="down", criterion_triggered="States three")])
+
+    result = judge_turn(client, "How deep?", criteria, "wrong.", _judge_config(), TURN_TYPE_BULK)
+
+    assert result.criterion_triggered == "states three"
+
+
+def test_normalization_does_not_conflate_distinct_criteria():
+    criteria = ["states three", "states four"]
+    client = FakeOllamaJudgeClient([
+        _verdict_json(verdict="down", criterion_triggered="states five"),
+        _verdict_json(verdict="down", criterion_triggered="states five"),
+    ])
+
+    result = judge_turn(client, "How deep?", criteria, "wrong.", _judge_config(), TURN_TYPE_BULK)
+
+    assert result.criterion_unresolved is True
+
+
+def test_non_string_citation_type_does_not_crash_parsing():
+    client = FakeOllamaJudgeClient([
+        json.dumps({"verdict": "down", "rationale": "no", "criterion_triggered": ["mentions X"]}),
+        json.dumps({"verdict": "down", "rationale": "no", "criterion_triggered": 7}),
+    ])
+
+    result = judge_turn(client, "What is X?", ["mentions X", "mentions Y"], "no.", _judge_config(), TURN_TYPE_BULK)
+
+    assert result.verdict == "down"
+    assert result.criterion_unresolved is True
 
 
 def test_malformed_json_retries_once_then_raises():

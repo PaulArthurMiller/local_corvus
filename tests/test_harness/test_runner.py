@@ -827,12 +827,12 @@ class FakeOllamaJudgeClient:
         return self.available
 
 
-def _write_bank_with_criteria(tmp_path, n=5, cluster_id="cluster_a"):
+def _write_bank_with_criteria(tmp_path, n=5, cluster_id="cluster_a", criteria=None):
     entries = [
         PromptBankEntry(
             prompt_id=f"{cluster_id}_{i:04d}", cluster_id=cluster_id,
             prompt_text=f"real bank prompt {i}", hop_distance=0,
-            criteria=["mentions X"], seed_fixture_version="v2",
+            criteria=list(criteria) if criteria else ["mentions X"], seed_fixture_version="v2",
             generated_by="claude-sonnet-5@2026-07-04", validated=True,
         )
         for i in range(n)
@@ -936,6 +936,191 @@ def test_judge_unparseable_hard_stop_when_policy_overridden(tmp_path):
 
     assert outcome.status == "aborted"
     assert "judge_unparseable" in outcome.error_summary
+
+
+# ---------------------------------------------------------------------------
+# Unparseable-judge recovery in --interactive, and unresolved-criterion downs.
+# Both close the same hole found in the exp0 calibration run: a judge problem
+# silently destroying a verdict the harness had enough information to keep.
+# ---------------------------------------------------------------------------
+
+
+def test_interactive_offers_manual_verdict_when_judge_unparseable(tmp_path):
+    """
+    The operator is already looking at the prompt, criteria and response, so an
+    unparseable judge response is recoverable by hand rather than lost.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(chat_json_fn=lambda model, temperature, prompt: "not json")
+    scripted = iter(["g", "down"])  # grade it; single-criterion prompt needs no criterion pick
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert outcome.status == "complete"
+    assert len(client.verdict_calls) == 1
+    assert client.verdict_calls[0]["verdict"] == "down"
+    assert client.verdict_calls[0]["judge_source"] == "human"
+    assert client.verdict_calls[0]["criterion_triggered"] == "mentions X"
+    assert outcome.checkpoint.turns[0].verdict == "down"
+    # No model verdict exists — the judge never produced a parseable one.
+    assert outcome.checkpoint.turns[0].judge_model_verdict is None
+    assert outcome.checkpoint.turns[0].judge_error is None
+
+
+def test_interactive_manual_verdict_declined_falls_back_to_soft_continue(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(chat_json_fn=lambda model, temperature, prompt: "not json")
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: "skip",
+    )
+
+    assert outcome.status == "complete"
+    assert client.verdict_calls == []
+    assert "judge_unparseable" in outcome.checkpoint.turns[0].judge_error
+
+
+def test_judge_unparseable_hard_stop_is_not_softened_by_interactive(tmp_path):
+    """hard_stop policy is checked before the operator is offered a recovery."""
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"], error_policy={"judge_unparseable": "hard_stop"},
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(chat_json_fn=lambda model, temperature, prompt: "not json")
+
+    def _never_asked(_prompt):
+        raise AssertionError("operator must not be prompted under hard_stop")
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=_never_asked,
+    )
+
+    assert outcome.status == "aborted"
+
+
+def test_normalized_criterion_citation_posts_the_bank_criterion(tmp_path):
+    """
+    exp0 regression: the judge cited the criterion without its "answer: "
+    prefix and the whole 'down' was discarded. It must now post, carrying the
+    bank's exact criterion text.
+    """
+    criteria = ["answer: local temporal readings/local time", "mentions UTC"]
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", criteria=criteria)
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[{
+        "verdict": "down", "rationale": "wrong",
+        "criterion_triggered": "local temporal readings/local time",
+    }])
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert len(client.verdict_calls) == 1
+    assert client.verdict_calls[0]["verdict"] == "down"
+    assert client.verdict_calls[0]["criterion_triggered"] == criteria[0]
+    assert outcome.checkpoint.turns[0].verdict == "down"
+
+
+def test_unresolved_down_keeps_the_verdict_direction_in_the_checkpoint(tmp_path):
+    """
+    Non-interactive fallback: the verdict can't be posted (the backend 422s on
+    a 'down' with no criterion, and guessing one would corrupt the per-criterion
+    analysis), but the judge's direction is still recorded so the turn stays
+    visible to calibration analysis instead of vanishing.
+    """
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", criteria=["mentions X", "mentions Y"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[
+        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
+        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
+    ])
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    turn = outcome.checkpoint.turns[0]
+    assert outcome.status == "complete"
+    assert client.verdict_calls == []
+    assert turn.verdict is None  # nothing was posted
+    assert turn.judge_model_verdict == "down"  # but the direction survives
+    assert "criterion_unresolved" in turn.judge_error
+
+
+def test_interactive_accepting_an_unresolved_down_asks_for_the_criterion(tmp_path):
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", criteria=["mentions X", "mentions Y"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[
+        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
+        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
+    ])
+    scripted = iter(["a", "2"])  # accept the judge's "down", name criterion #2
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert len(client.verdict_calls) == 1
+    assert client.verdict_calls[0]["verdict"] == "down"
+    assert client.verdict_calls[0]["criterion_triggered"] == "mentions Y"
+    # The direction was the judge's, so the source stays the model.
+    assert client.verdict_calls[0]["judge_source"] == "model:gemma4:e4b"
+    assert outcome.checkpoint.turns[0].judge_model_verdict == "down"
+
+
+def test_interactive_warns_when_the_judges_citation_matched_nothing(tmp_path):
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", criteria=["mentions X", "mentions Y"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(verdicts=[
+        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
+        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
+    ])
+    printed = []
+    scripted = iter(["a", "1"])
+
+    execute_run(
+        plan, client, tmp_path, print_fn=printed.append, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert "invented criterion" in "\n".join(printed)
 
 
 def test_interactive_override_sets_human_judge_source(tmp_path):

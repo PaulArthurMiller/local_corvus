@@ -308,12 +308,52 @@ mixes trials.
 |---|---|---|
 | `connectivity` | `hard_stop` | Backend unreachable / DB failure |
 | `turn_ambiguous` | `soft_continue` | One turn's result malformed/missing |
-| `judge_unparseable` | `soft_continue` | Judge verdict unparseable after one re-ask (turn completes, no verdict recorded) |
+| `judge_unparseable` | `soft_continue` | No usable **verdict** after one re-ask (turn completes, no verdict recorded) |
 | `report_generation` | `soft_continue` | A report call failing — reports are re-generatable later; a nearly-finished run is not |
 
 Override per-category in the plan's `error_policy`. Some stops are
 **unconditional** and cannot be overridden: budget exceeded, missing probe
 battery, missing judge model, and Docker restart failure.
+
+#### Judge verdicts vs. criterion citations
+
+`judge_unparseable` covers only failures that leave **no verdict at all**.
+A judge that returns a perfectly good `down` but cites a criterion that
+matches none of the prompt's is handled separately, because that failure mode
+is *directional*: only a `down` carries a citation, so treating it as
+unparseable discarded `down` verdicts at a rate `up` verdicts could never
+suffer — which biases exactly the up-skew a calibration run measures.
+
+The citation is resolved in three steps, most to least certain:
+
+1. Exact match against the prompt's criteria.
+2. Normalized match — case, surrounding whitespace, markdown emphasis
+   (`**X**`), quotes, trailing punctuation, and leading label prefixes
+   (`answer:`, `criterion:`, `expected:`, …) are ignored. The colon is
+   required, so a criterion like `states three` is never truncated.
+3. Single-criterion prompts: a `down` can only mean that one criterion.
+
+Only if all three fail is the citation unresolved, and even then the verdict
+survives:
+
+- **`--interactive`**: you are shown the judge's raw citation and asked which
+  criterion the response failed; the verdict posts normally.
+- **Otherwise**: the verdict is not posted (the backend rejects a `down` with
+  no criterion, and guessing one would corrupt per-criterion analysis), but the
+  turn's `judge_model_verdict` still records `down` in the checkpoint, so the
+  turn stays countable. Never fuzzy-matched.
+
+The resolved value is always the **bank's exact criterion text**, never the
+judge's paraphrase — §6 groups failures by that string.
+
+#### Unparseable judge verdicts in `--interactive`
+
+When the judge produces no verdict at all during a calibration run, you are
+shown the full prompt/criteria/response context and offered
+`Grade this turn yourself, or skip it? [g/skip]`. Grading it posts with
+`judge_source="human"` and leaves `judge_model_verdict` null (there was no
+model verdict). Skipping soft-continues as before. Under
+`judge_unparseable: hard_stop` the run aborts without prompting.
 
 ---
 
@@ -409,6 +449,7 @@ Lessons from the 2026-07-06 real-model pilot that affect how you set up the
 | `docker restart failed for condition ...` | Docker Desktop down, or compose project broken. Fix and relaunch; resume the checkpoint |
 | Hard stop mid-run on `connectivity` | Backend container died — `docker compose logs backend`. Relaunch and resume |
 | Judge verdicts all `judge_unparseable` | Judge model responding off-format — verify the model tag; check with a dry run `--interactive` |
+| `criterion_unresolved` on several turns | The judge is citing criteria it can't match. Re-run `--interactive` to grade those turns by hand, and check whether the bank's criteria are phrased in a way the judge paraphrases (long criteria, embedded punctuation) |
 | Report `§6.x` numbers look contaminated across attempts/dry runs | Should be impossible post-M21 (`experiment_id` scoping + `_dryrun` suffix). If seen, check for pre-M21 legacy rows in the DB and report it as a bug |
 | All conditions share one `experiment_id` | You ran multi-condition with `--no-docker-restart`. The run is not salvageable — re-run without the flag |
 

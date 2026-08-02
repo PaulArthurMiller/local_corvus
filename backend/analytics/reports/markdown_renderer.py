@@ -452,6 +452,40 @@ def _render_s61(section: dict) -> str:
     return "\n".join(lines)
 
 
+# (delta_key, learned_key, control_key, display_label) — the raw learned/
+# control values ride alongside each delta in `comparative_deltas` (see
+# `_compute_comparative_deltas`) so the table can show all three columns
+# instead of hiding the baseline behind a bare "—" (the M34 rendering bug).
+_S62_MEASURES = [
+    ("probe_pass_rate_delta", "probe_pass_rate_learned",
+     "probe_pass_rate_control", "probe_pass_rate_delta (mean-mode)"),
+    ("bridge_mu_rank_delta", "bridge_mu_rank_learned",
+     "bridge_mu_rank_control", "bridge_mu_rank_delta"),
+    ("edge_weight_delta_magnitude", "edge_weight_delta_magnitude_learned",
+     "edge_weight_delta_magnitude_control", "edge_weight_delta_magnitude"),
+    ("mean_gold_mu_rank_delta", "mean_gold_mu_rank_learned",
+     "mean_gold_mu_rank_control", "mean_gold_mu_rank_delta"),
+]
+
+
+def _s62_value_str(val: Optional[float]) -> str:
+    return f"{val:.4f}" if val is not None else "—"
+
+
+def _s62_control_display(measure_key: str, control_val: Optional[float]) -> str:
+    """
+    `edge_weight_delta_magnitude`'s control value is 0 by construction — the
+    static/random controls never receive weight_updates (M24: feedback only
+    ever writes through `process_verdict_for_learning()`, which refuses
+    writes outside `condition_label == "learned"`), not because of any
+    empirical result. Labeling it plainly avoids reading a true-by-design
+    zero as a finding.
+    """
+    if measure_key == "edge_weight_delta_magnitude" and control_val is not None and abs(control_val) < 1e-9:
+        return "0 by design"
+    return _s62_value_str(control_val)
+
+
 def _render_s62(control_shadow: Optional[dict]) -> str:
     """Render §6.2 Control Shadow as Markdown."""
     if not control_shadow:
@@ -479,33 +513,82 @@ def _render_s62(control_shadow: Optional[dict]) -> str:
                 lines.append(f"  - Violations: {violations}")
         lines.append("")
 
-        # Comparative deltas table
+        # Comparative deltas table (mean-mode probe results)
         deltas = cs.get("comparative_deltas") or {}
         lines += [
-            "#### Comparative Deltas (learned − control)\n",
-            "| Measure | Learned | Delta |",
-            "|---|---|---|",
+            "#### Comparative Deltas — mean-mode (learned − control)\n",
+            "| Measure | Learned | Control | Delta |",
+            "|---|---|---|---|",
         ]
-        for measure_name, delta_val in deltas.items():
+        for delta_key, learned_key, control_key, label in _S62_MEASURES:
+            learned_val = deltas.get(learned_key)
+            control_val = deltas.get(control_key)
+            delta_val = deltas.get(delta_key)
             delta_str = f"{delta_val:+.4f}" if delta_val is not None else "—"
-            lines.append(f"| {measure_name} | — | {delta_str} |")
+            lines.append(
+                f"| {label} | {_s62_value_str(learned_val)} "
+                f"| {_s62_control_display(delta_key, control_val)} | {delta_str} |"
+            )
         lines.append("")
+
+        # Sample-mode pass-rate comparison (M34) — additive to the mean-mode
+        # table above; blind spot it exists to close is a flat mean-mode
+        # comparison next to a real sample-mode trajectory (e.g. exp0's
+        # vs_d4, 4%→60% under weight_mode=sample).
+        sample_cmp = cs.get("sample_pass_rate_comparison") or {}
+        by_phenomenon = sample_cmp.get("by_phenomenon") or {}
+        if by_phenomenon:
+            lines += [
+                "#### Sample-Mode Pass-Rate Comparison — `weight_mode=sample` (learned − control)\n",
+                "| Phenomenon | Probes | Mean Δ (all sessions) | Mean Δ (final session) |",
+                "|---|---|---|---|",
+            ]
+            for phenomenon, stats in by_phenomenon.items():
+                lines.append(
+                    f"| {phenomenon} | {stats.get('probe_count', 0)} "
+                    f"| {_s62_value_str(stats.get('mean_delta'))} "
+                    f"| {_s62_value_str(stats.get('final_session_mean_delta'))} |"
+                )
+            lines.append("")
+
+            per_probe = sample_cmp.get("per_probe") or []
+            if per_probe:
+                lines += [
+                    "<details><summary>Per-probe sample-mode sessions</summary>\n",
+                    "| Probe | Session | Learned | Control | Δ |",
+                    "|---|---|---|---|---|",
+                ]
+                for p in per_probe:
+                    for s in p.get("sessions") or []:
+                        lines.append(
+                            f"| {p.get('probe_id', '—')} | {s.get('session_index', '—')} "
+                            f"| {_s62_value_str(s.get('learned_pass_rate'))} "
+                            f"| {_s62_value_str(s.get('control_pass_rate'))} "
+                            f"| {_s62_value_str(s.get('delta'))} |"
+                        )
+                lines.append("\n</details>\n")
+        else:
+            lines.append(
+                "_Sample-mode comparison unavailable — no `sample_pass_rates` "
+                "data for this experiment (pre-M30) or no matching probes "
+                "between conditions._\n"
+            )
 
     # Comparison table (cross-condition, if multiple controls)
     if len(control_shadow) >= 1:
+        first_deltas = next(iter(control_shadow.values())).get("comparative_deltas") or {}
         lines += [
             "### Condition Comparison Summary\n",
             "| Measure | Learned | " + " | ".join(cs.get("condition_label") or n for n, cs in control_shadow.items()) + " |",
             "|---|---|" + "---|" * len(control_shadow),
         ]
-        measure_names = ["probe_pass_rate_delta", "bridge_mu_rank_delta",
-                         "edge_weight_delta_magnitude", "mean_gold_mu_rank_delta"]
-        for m in measure_names:
+        for delta_key, learned_key, control_key, label in _S62_MEASURES:
+            learned_val = _s62_value_str(first_deltas.get(learned_key))
             control_vals = []
             for cs in control_shadow.values():
-                d = (cs.get("comparative_deltas") or {}).get(m)
+                d = (cs.get("comparative_deltas") or {}).get(delta_key)
                 control_vals.append(f"{d:+.4f}" if d is not None else "—")
-            lines.append(f"| {m} | (baseline) | " + " | ".join(control_vals) + " |")
+            lines.append(f"| {label} | {learned_val} | " + " | ".join(control_vals) + " |")
 
     return "\n".join(lines)
 

@@ -24,6 +24,7 @@ from analytics.reports.markdown_renderer import (
     _render_s57,
     _render_s58,
     _render_s61,
+    _render_s62,
 )
 
 SECTION_HEADERS = [
@@ -412,3 +413,145 @@ def test_s61_edge_classification_absent_renders_without_crash():
     print(f"§6.1 pre-M33 ledger shape:\n{md}")
     assert "Edge Weight Delta Ledger" in md
     assert "Edge Classification" not in md
+
+
+# ---------------------------------------------------------------------------
+# §6.2 Control Shadow — M34 rendering fixes
+# ---------------------------------------------------------------------------
+
+
+def _make_control_shadow_entry(
+    control_name: str,
+    condition_label: str,
+    edge_weight_control: float = 0.0,
+    sample_by_phenomenon: dict = None,
+    sample_per_probe: list = None,
+) -> dict:
+    return {
+        "experiment_id": f"exp-{control_name}",
+        "condition_label": condition_label,
+        "learning_measures": {},
+        "sanity_checks": {
+            "zero_weight_changes": {"status": "PASS", "violation_count": 0, "violating_run_ids": []},
+        },
+        "comparative_deltas": {
+            "probe_pass_rate_delta": 0.5,
+            "probe_pass_rate_learned": 0.8,
+            "probe_pass_rate_control": 0.3,
+            "bridge_mu_rank_delta": -1.2,
+            "bridge_mu_rank_learned": 2.0,
+            "bridge_mu_rank_control": 3.2,
+            "edge_weight_delta_magnitude": 0.1109,
+            "edge_weight_delta_magnitude_learned": 0.1109,
+            "edge_weight_delta_magnitude_control": edge_weight_control,
+            "mean_gold_mu_rank_delta": -0.5,
+            "mean_gold_mu_rank_learned": 1.5,
+            "mean_gold_mu_rank_control": 2.0,
+        },
+        "sample_pass_rate_comparison": {
+            "per_probe": sample_per_probe or [],
+            "by_phenomenon": sample_by_phenomenon or {},
+        },
+    }
+
+
+def test_s62_comparative_deltas_shows_learned_value_not_dash():
+    """M34 bug: the Learned column previously hardcoded '—' on every row.
+    It must now show the actual learned value."""
+    control_shadow = {
+        "static_weight": _make_control_shadow_entry("static_weight", "static-weight"),
+    }
+    md = _render_s62(control_shadow)
+    print(f"§6.2 comparative deltas:\n{md}")
+    assert "0.8000" in md  # probe_pass_rate_learned
+    assert "2.0000" in md  # bridge_mu_rank_learned
+
+
+def test_s62_edge_weight_delta_control_labeled_zero_by_design():
+    """M34: a structurally-zero control value (static/random never receive
+    weight_updates) is labeled '0 by design', not a bare 0.0000 that reads
+    as an empirical near-zero result."""
+    control_shadow = {
+        "static_weight": _make_control_shadow_entry("static_weight", "static-weight", edge_weight_control=0.0),
+    }
+    md = _render_s62(control_shadow)
+    print(f"§6.2 edge weight labeling:\n{md}")
+    assert "0 by design" in md
+
+
+def test_s62_edge_weight_delta_nonzero_control_shows_actual_value():
+    """If the control's edge_weight value were ever genuinely nonzero (a
+    bug), the renderer must show the real number, not silently relabel it."""
+    control_shadow = {
+        "random_weight": _make_control_shadow_entry("random_weight", "random-weight", edge_weight_control=0.042),
+    }
+    md = _render_s62(control_shadow)
+    print(f"§6.2 nonzero control edge weight:\n{md}")
+    assert "0.0420" in md
+    assert "0 by design" not in md
+
+
+def test_s62_condition_comparison_summary_shows_learned_value():
+    """M34: the cross-condition summary table previously hardcoded
+    '(baseline)' for Learned. It must show the actual learned value."""
+    control_shadow = {
+        "static_weight": _make_control_shadow_entry("static_weight", "static-weight"),
+        "random_weight": _make_control_shadow_entry("random_weight", "random-weight"),
+    }
+    md = _render_s62(control_shadow)
+    print(f"§6.2 condition comparison summary:\n{md}")
+    assert "(baseline)" not in md
+    assert "Condition Comparison Summary" in md
+
+
+def test_s62_sample_pass_rate_comparison_renders_by_phenomenon():
+    """M34: the new sample-mode comparison section renders its by-phenomenon
+    table, labeled distinctly from the mean-mode comparison."""
+    control_shadow = {
+        "static_weight": _make_control_shadow_entry(
+            "static_weight", "static-weight",
+            sample_by_phenomenon={
+                "spoke_retrieval": {
+                    "probe_count": 2,
+                    "mean_delta": 0.13,
+                    "final_session_mean_delta": 0.26,
+                },
+            },
+            sample_per_probe=[
+                {
+                    "probe_id": "vs_d4",
+                    "phenomenon_type": "spoke_retrieval",
+                    "sessions": [
+                        {"session_index": 1, "learned_pass_rate": 0.04,
+                         "control_pass_rate": 0.04, "delta": 0.0},
+                        {"session_index": 5, "learned_pass_rate": 0.60,
+                         "control_pass_rate": 0.08, "delta": 0.52},
+                    ],
+                },
+            ],
+        ),
+    }
+    md = _render_s62(control_shadow)
+    print(f"§6.2 sample-mode comparison:\n{md}")
+    assert "Sample-Mode Pass-Rate Comparison" in md
+    assert "weight_mode=sample" in md
+    assert "spoke_retrieval" in md
+    assert "0.13" in md
+    assert "vs_d4" in md
+    assert "0.52" in md
+
+
+def test_s62_sample_pass_rate_comparison_absent_renders_message_not_crash():
+    """Pre-M30 experiments (or a mismatched probe set) have no sample-mode
+    data — must render an explanatory message, not crash."""
+    control_shadow = {
+        "static_weight": _make_control_shadow_entry("static_weight", "static-weight"),
+    }
+    md = _render_s62(control_shadow)
+    print(f"§6.2 no sample data:\n{md}")
+    assert "unavailable" in md.lower()
+
+
+def test_s62_no_control_shadow_renders_not_computed():
+    md = _render_s62(None)
+    assert "Not computed" in md

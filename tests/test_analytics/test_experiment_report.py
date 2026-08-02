@@ -1530,6 +1530,10 @@ def test_experiment_report_prefers_stored_series_reports_over_wiped_graph():
         with tempfile.TemporaryDirectory() as reports_dir:
             json_path = Path(reports_dir) / f"series_report_{series_id}.json"
             json_path.write_text(json.dumps(stored), encoding="utf-8")
+            # The stored path can be anything (M33: resolve_report_path()
+            # only trusts the basename, reconstructing the directory from
+            # the current _REPORTS_DIR) — patch _REPORTS_DIR to this test's
+            # temp dir rather than needing the stored path itself to match.
             run(store.insert_generated_report({
                 "report_id": stored["report_id"], "report_type": "series",
                 "experiment_id": experiment_id, "series_id": series_id,
@@ -1539,6 +1543,8 @@ def test_experiment_report_prefers_stored_series_reports_over_wiped_graph():
 
             with mock.patch(
                 "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+            ), mock.patch(
+                "analytics.reports.series_report._REPORTS_DIR", Path(reports_dir)
             ):
                 report = run(generate_experiment_report(experiment_id, store))
 
@@ -1551,6 +1557,53 @@ def test_experiment_report_prefers_stored_series_reports_over_wiped_graph():
     assert per[series_id]["intra_series_count"] == 1
     assert per[series_id]["unknown_count"] == 0
     assert agg["mean_intra_series_rate"] == 0.3333
+
+
+def test_experiment_report_reads_stored_series_report_despite_stale_path_prefix():
+    """The stored json_path may carry a directory prefix from a different
+    environment than the one reading it now (e.g. the in-container
+    /app/data/reports/... path, read back from a host-side script pointed
+    at the bind-mounted directory directly). resolve_report_path() must
+    still find the file by reconstructing against the current _REPORTS_DIR
+    and trusting only the stored filename."""
+    with TempDB() as store:
+        experiment_id = "exp-stale-prefix"
+        series_id = "series-P"
+        run(store.insert_run(_make_minimal_run(
+            series_id=series_id, experiment_id=experiment_id,
+            activated_mu_ids=[_mu_id(), _mu_id(), _mu_id()],
+        )))
+
+        stored = _make_stored_series_report(experiment_id, series_id, s5_3={
+            "total_retrieved": 3, "intra_series_count": 1, "seed_fixture_count": 2,
+            "cross_series_count": 0, "unknown_count": 0,
+            "intra_series_rate": 0.3333, "per_turn": [],
+        })
+
+        with tempfile.TemporaryDirectory() as reports_dir:
+            filename = f"series_report_{series_id}.json"
+            (Path(reports_dir) / filename).write_text(json.dumps(stored), encoding="utf-8")
+            # A stored path that points nowhere real on this machine — only
+            # its basename should ever be used.
+            stale_path = f"/app/data/reports/{filename}"
+            run(store.insert_generated_report({
+                "report_id": stored["report_id"], "report_type": "series",
+                "experiment_id": experiment_id, "series_id": series_id,
+                "generated_at": stored["generated_at"],
+                "json_path": stale_path, "md_path": stale_path,
+            }))
+
+            with mock.patch(
+                "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+            ), mock.patch(
+                "analytics.reports.series_report._REPORTS_DIR", Path(reports_dir)
+            ):
+                report = run(generate_experiment_report(experiment_id, store))
+
+    agg = report["series_summary"]["s5_3_retrieval_rate_aggregation"]
+    per = {p["series_id"]: p for p in agg["per_series"]}
+    print(f"stale-prefix aggregation: {per[series_id]}")
+    assert per[series_id]["intra_series_rate"] == 0.3333
 
 
 def test_experiment_report_recomputes_when_stored_report_unreadable():

@@ -315,28 +315,85 @@ def _render_s61(section: dict) -> str:
         f"**Decreased:** {ledger.get('decreased_count', 0)} | "
         f"**Unchanged:** {ledger.get('unchanged_count', 0)}  ",
         f"**Mean |delta|:** {ledger.get('mean_abs_delta', 0.0):.6f}  ",
-        f"**Orphan updates (no feedback_event_id):** {orphan_count}{orphan_flag}  ",
-        f"**Within-cluster:** {ledger.get('within_cluster_count', 0)} | "
-        f"**Cross-cluster:** {ledger.get('cross_cluster_count', 0)} | "
-        f"**Unknown cluster:** {ledger.get('unknown_cluster_count', 0)}\n",
+        f"**Orphan updates (no feedback_event_id):** {orphan_count}{orphan_flag}\n",
     ]
 
-    cross_deltas = ledger.get("cross_cluster_deltas") or []
-    if cross_deltas:
+    # Edge classification (M33) — edge class x cluster relation, replacing
+    # the earlier flat within/cross/unknown counts. A pre-M33 stored report
+    # JSON has no "edge_classification" key, so this whole block simply
+    # renders nothing rather than crashing (see test_s61_edge_classification
+    # backward-compat coverage).
+    classification = ledger.get("edge_classification")
+    if classification:
+
+        def _fmt_cell(cell: dict) -> str:
+            count = cell.get("count", 0)
+            if count == 0:
+                return "0"
+            return f"{count} (Δ̄{cell.get('mean_abs_delta', 0.0):.4f})"
+
+        by_class_relation = classification.get("by_class_relation") or {}
+        class_labels = {
+            "seed_seed": "seed↔seed",
+            "conv_seed": "conv→seed",
+            "conv_conv": "conv↔conv",
+        }
+        relations = ["same_cluster", "cross_cluster", "mixed", "unresolvable"]
         lines += [
-            "#### Cross-Cluster Edge Deltas\n",
-            "| edge_id | delta | source_cluster | target_cluster |",
-            "|---|---|---|---|",
+            "#### Edge Classification\n",
+            "| edge class | same-cluster | cross-cluster | mixed | unresolvable |",
+            "|---|---|---|---|---|",
         ]
-        for cd in cross_deltas[:20]:
-            lines.append(
-                f"| {str(cd.get('edge_id', ''))[:8]}… "
-                f"| {cd.get('delta', 0.0):+.4f} "
-                f"| {cd.get('source_cluster', '—')} "
-                f"| {cd.get('target_cluster', '—')} |"
-            )
-        if len(cross_deltas) > 20:
-            lines.append(f"\n_…and {len(cross_deltas) - 20} more (see JSON)_")
+        for cls, label in class_labels.items():
+            cells = by_class_relation.get(cls) or {}
+            row = " | ".join(_fmt_cell(cells.get(rel) or {}) for rel in relations)
+            lines.append(f"| {label} | {row} |")
+
+        totals = classification.get("totals_by_relation") or {}
+        lines.append(
+            "\n**Totals by relation:** "
+            f"same-cluster: {totals.get('same_cluster', 0)} | "
+            f"cross-cluster: {totals.get('cross_cluster', 0)} | "
+            f"mixed: {totals.get('mixed', 0)} | "
+            f"unresolvable: {totals.get('unresolvable', 0)}\n"
+        )
+
+        watch = classification.get("cross_domain_watch") or []
+        if watch:
+            lines += [
+                "#### Cross-Domain Linkage Watch List\n",
+                "_conv→seed/mixed and conv↔conv/cross-cluster edges — the "
+                "operational definition of emergent cross-domain learning._\n",
+                "| edge_id | class | relation | delta | source | target |",
+                "|---|---|---|---|---|---|",
+            ]
+            for w in watch[:20]:
+                lines.append(
+                    f"| {str(w.get('edge_id', ''))[:8]}… "
+                    f"| {class_labels.get(w.get('edge_class'), w.get('edge_class'))} "
+                    f"| {w.get('cluster_relation', '—')} "
+                    f"| {w.get('delta', 0.0):+.4f} "
+                    f"| {w.get('source_cluster', '—')} "
+                    f"| {w.get('target_cluster', '—')} |"
+                )
+            if len(watch) > 20:
+                lines.append(f"\n_…and {len(watch) - 20} more (see JSON)_")
+
+        by_series = classification.get("by_series") or []
+        if by_series:
+            lines += [
+                "\n#### Edge Classification by Series (longitudinal)\n",
+                "| series | seed↔seed | conv→seed | conv↔conv |",
+                "|---|---|---|---|",
+            ]
+            for s in by_series:
+                by_class = s.get("by_class") or {}
+                lines.append(
+                    f"| {s.get('series_id', '—')} "
+                    f"| {_fmt_cell(by_class.get('seed_seed') or {})} "
+                    f"| {_fmt_cell(by_class.get('conv_seed') or {})} "
+                    f"| {_fmt_cell(by_class.get('conv_conv') or {})} |"
+                )
 
     # Bridge-MU analysis
     bridge = section.get("bridge_mu_analysis") or {}

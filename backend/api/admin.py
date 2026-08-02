@@ -39,7 +39,7 @@ from analytics.probes import (
     record_probe_result,
 )
 from analytics.reports.experiment_report import generate_experiment_report, write_experiment_report
-from analytics.reports.series_report import generate_series_report, write_series_report
+from analytics.reports.series_report import generate_series_report, resolve_report_path, write_series_report
 from analytics.run_log import query_runs
 from analytics.seed_fixture import register_fixture
 from core.orchestrator import EXPERIMENT_ID, RUN_CONDITION
@@ -605,7 +605,7 @@ async def get_report_json(report_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' not found")
 
-    json_path = Path(record["json_path"])
+    json_path = resolve_report_path(record["json_path"])
     if not json_path.exists():
         raise HTTPException(
             status_code=404,
@@ -632,7 +632,7 @@ async def get_report_markdown(report_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' not found")
 
-    md_path = Path(record["md_path"])
+    md_path = resolve_report_path(record["md_path"])
     if not md_path.exists():
         raise HTTPException(
             status_code=404,

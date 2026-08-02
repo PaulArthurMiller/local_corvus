@@ -5414,6 +5414,9 @@ creation — this milestone is measurement only, by explicit decision.
 
 ## Conversation-Edge Classification — Milestone 33
 
+**Status: COMPLETE (2026-08-02).** See the Milestone 33 trailer entry near
+the end of this file for what was built and the resolved exp0 distribution.
+
 **Goal:** in exp0, 176 of 225 weight updates (78%) hit edges the §6.1
 ledger classifies "unknown cluster" — edges touching harness-created
 conversation MUs rather than seed MUs. The probes are blind to them, so
@@ -5658,6 +5661,67 @@ statement), verdict-mix scoping (a contaminating `experiment_id` does not
 leak, mirroring the existing §6.1 scoping-test pattern), and zero-feedback
 series (all-probe/dry-run) rendering cleanly with `up_rate=None` rather
 than a fabricated `0.0`. Branch: `milestone-32-seed-share-verdict-mix`.
+
+**Milestone 33 (Conversation-Edge Classification) is COMPLETE.** §6.1's
+edge delta ledger replaces the flat within/cross/`unknown_cluster_count`
+counts (176/225 = 78% "unknown" in exp0) with a typed breakdown: edge class
+(`seed_seed`/`conv_seed`/`conv_conv`) x cluster relation
+(`same_cluster`/`cross_cluster`/`mixed`/`unresolvable`), derived entirely at
+report time from already-stored data — no schema change, no backend
+behavior change. Two independent signals: **seed adjacency** (unchanged —
+`mu_info.cluster_id`, non-null only for seed MUs) and **prompt lineage**
+(new — `store.get_prompt_ids_by_run()` joins `feedback_events.prompt_id` to
+`analytics.run_id` in one query per experiment; `_cluster_from_prompt_id()`
+reads the target cluster straight off the ID string, since
+`prompt_gen.py` names every bulk prompt `f"{cluster_id}_{i:04d}"` —
+`_build_mu_lineage_clusters()` then credits every MU a bulk turn created
+(`input_mu_id`/`prompt_mu_id`/`output_mu_id`/`tool_calls`) with that
+prompt's cluster). `_classify_edge_update()` combines both signals per
+edge: `conv_seed` when the two signals disagree is `mixed` (kept distinct
+from `cross_cluster`, which is same-signal-type disagreement) — a
+disagreement here is a real cross-domain link, not an artifact of one
+segmentation scheme. New `edge_classification` dict (`by_class_relation`
+grid, `totals_by_relation`, `cross_domain_watch` list of
+`conv_seed`/`mixed` + `conv_conv`/`cross_cluster` edges, and `by_series`
+longitudinal counts) replaces the old flat keys entirely;
+`markdown_renderer.py`'s §6.1 renders the grid, watch list, and per-series
+table, and degrades to nothing (no crash) when `edge_classification` is
+absent from a pre-M33 stored report JSON.
+**Verified live against the real exp0 "learned" data** (`memory/graph.db`,
+read-only — `_section_61_learning_measures()` called directly rather than
+the full report regeneration path, which hits an unrelated pre-existing
+bug where `generated_reports` stores container-absolute paths
+`/app/data/reports/...` that don't resolve on the host): the `seed_seed`
+same/cross counts reproduced exactly (42/7, matching the stored report's
+old `within_cluster_count`/`cross_cluster_count` byte-for-byte — the new
+code is a strict refinement, not a divergent recomputation), and **all 176
+formerly-"unknown" updates resolved with zero residual**: `conv_seed` 59
+same-cluster + 8 mixed, `conv_conv` 109 same-cluster + 0 cross-cluster + 0
+unresolvable. The 8 `mixed` edges are the full cross-domain-linkage watch
+list for this run (`conv_conv`/`cross_cluster` contributed none) — see
+PROGRESS.md for the per-series breakdown and reading. This was possible
+despite the graph being wiped between exp0's three conditions because
+seed_v3's MU ids are fixture-fixed (not random per reseed), so seed
+adjacency still resolves correctly against whichever condition's reseed is
+currently live; prompt lineage never touched `memory_units` at all. 30 new
+tests (870 baseline -> 900, all passing, no regressions): classification truth table
+(all class x relation combinations), prompt-lineage derivation and its
+run-scoping, cross-domain watch-list membership, per-series ordering,
+backward-compat rendering, and end-to-end store round-trips (including an
+experiment-scoping contamination guard, mirroring the M32/§6.1 pattern).
+**Also fixed in this PR (out of M33's original scope, folded in at Paul's
+request):** the container-absolute stored-report-path bug the live
+verification above surfaced (`_load_stored_series_data()` couldn't read
+exp0's stored series reports from the host because `generated_reports`
+stores the in-container `/app/data/reports/...` path literally). New
+`resolve_report_path()` in `series_report.py` reconstructs the file
+location from the current `_REPORTS_DIR` plus only the stored path's
+basename; used by `_load_stored_series_data()` and by `admin.py`'s two
+report-fetch-by-id endpoints (same bug pattern). 4 more new tests (904
+total). Confirmed live: the full `generate_experiment_report()` now reads
+all 5 of exp0's stored series reports cleanly from the host with no
+"unreadable" warnings.
+Branch: `milestone-33-conversation-edge-classification`.
 Last updated: 2026-08-02
 ```
 

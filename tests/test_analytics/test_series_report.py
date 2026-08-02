@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"
 
 import memory.store as store_module
 from memory.store import GraphStore
+import analytics.reports.series_report as series_report_module
 from analytics.reports.series_report import (
     _section_51_failure_summary,
     _section_52_retrieval_trace_digest,
@@ -36,6 +37,7 @@ from analytics.reports.series_report import (
     _section_56_probe_integrity,
     _section_57_mode3_trigger_count,
     _section_58_num_ctx_pressure,
+    resolve_report_path,
 )
 
 
@@ -471,3 +473,33 @@ def test_s58_no_pressure_when_all_turns_below_threshold():
     result = _section_58_num_ctx_pressure(runs, _CONFIG)
     print(f"no pressure: {result}")
     assert result["pressure_turn_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# resolve_report_path — reconstructs from the current _REPORTS_DIR rather
+# than trusting a stored path verbatim (fixes host-side reads of a
+# container-absolute path stored in generated_reports)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveReportPath:
+    def test_reconstructs_container_path_against_current_reports_dir(self):
+        """A path stored as the in-container absolute path (the normal case
+        — write and read happen in the same container) resolves against
+        whatever _REPORTS_DIR currently is, using only the filename."""
+        with mock.patch.object(series_report_module, "_REPORTS_DIR", Path("/host/memory/reports")):
+            resolved = resolve_report_path("/app/data/reports/series_report_x.json")
+        assert resolved == Path("/host/memory/reports/series_report_x.json")
+
+    def test_ignores_stored_directory_entirely(self):
+        """Only the basename of the stored path is trusted — any directory
+        component (container or otherwise) is discarded."""
+        with mock.patch.object(series_report_module, "_REPORTS_DIR", Path("/current/reports")):
+            resolved = resolve_report_path("/completely/different/place/report.md")
+        assert resolved == Path("/current/reports/report.md")
+
+    def test_bare_filename_resolves_the_same_as_a_full_path(self):
+        with mock.patch.object(series_report_module, "_REPORTS_DIR", Path("/current/reports")):
+            assert resolve_report_path("report.json") == resolve_report_path(
+                "/app/data/reports/report.json"
+            )

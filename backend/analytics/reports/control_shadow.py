@@ -308,11 +308,129 @@ def _compute_comparative_deltas(
         probe_pass_rate_delta, bridge_mu_rank_delta,
         edge_weight_delta_magnitude, mean_gold_mu_rank_delta,
     )
+    # Raw learned/control values are returned alongside each delta (not just
+    # the delta itself) so the rendered table can show "learned's own value,
+    # the control's, and the delta" instead of hiding the baseline behind a
+    # bare "—" (the M34 rendering bug).
     return {
         "probe_pass_rate_delta": probe_pass_rate_delta,
+        "probe_pass_rate_learned": l_pass,
+        "probe_pass_rate_control": c_pass,
         "bridge_mu_rank_delta": bridge_mu_rank_delta,
+        "bridge_mu_rank_learned": l_bridge,
+        "bridge_mu_rank_control": c_bridge,
         "edge_weight_delta_magnitude": edge_weight_delta_magnitude,
+        "edge_weight_delta_magnitude_learned": l_edge,
+        "edge_weight_delta_magnitude_control": c_edge,
         "mean_gold_mu_rank_delta": mean_gold_mu_rank_delta,
+        "mean_gold_mu_rank_learned": l_rank,
+        "mean_gold_mu_rank_control": c_rank,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sample-mode (weight_mode=sample) pass-rate comparison
+# ---------------------------------------------------------------------------
+
+
+def _compute_sample_pass_rate_comparison(
+    learned_measures: dict,
+    control_measures: dict,
+) -> dict:
+    """
+    Sample-mode pass-rate comparison — per-probe, per-session
+    learned-minus-control deltas, aggregated by phenomenon.
+
+    The existing `_compute_comparative_deltas` only compares
+    `battery_mode="mean"` probe results, which are flat nearly everywhere —
+    it is blind precisely where the signal lives (`sample_pass_rates`, M30
+    Part B). This is a separate, additive comparison over each condition's
+    own `sample_pass_rates` (already computed by `_section_61_learning_measures`
+    for both the learned and control experiments); it does not replace or
+    redefine the mean-mode comparison above.
+
+    Degrades to an empty comparison (not a crash) when either condition has
+    no sample-mode data — true for every pre-M30 experiment, since
+    `sample_pass_rates["per_probe"]` is simply empty for those.
+    """
+    learned_per_probe = {
+        p["probe_id"]: p
+        for p in (learned_measures.get("sample_pass_rates") or {}).get("per_probe") or []
+    }
+    control_per_probe = {
+        p["probe_id"]: p
+        for p in (control_measures.get("sample_pass_rates") or {}).get("per_probe") or []
+    }
+
+    per_probe: list[dict] = []
+    phenomenon_deltas: dict[str, list[float]] = {}
+    phenomenon_final_deltas: dict[str, list[float]] = {}
+    phenomenon_probe_counts: dict[str, int] = {}
+
+    for probe_id, l_probe in learned_per_probe.items():
+        c_probe = control_per_probe.get(probe_id)
+        if c_probe is None:
+            continue
+
+        phenomenon = l_probe.get("phenomenon_type", "unknown")
+        c_sessions_by_idx = {
+            s.get("session_index"): s for s in c_probe.get("sessions") or []
+        }
+
+        sessions: list[dict] = []
+        probe_deltas: list[float] = []
+        for l_session in l_probe.get("sessions") or []:
+            idx = l_session.get("session_index")
+            c_session = c_sessions_by_idx.get(idx)
+            l_rate = l_session.get("pass_rate")
+            c_rate = c_session.get("pass_rate") if c_session else None
+            delta = (
+                round(l_rate - c_rate, 4)
+                if (l_rate is not None and c_rate is not None) else None
+            )
+            sessions.append({
+                "session_index": idx,
+                "learned_pass_rate": l_rate,
+                "control_pass_rate": c_rate,
+                "delta": delta,
+            })
+            if delta is not None:
+                probe_deltas.append(delta)
+
+        if not sessions:
+            continue
+
+        per_probe.append({
+            "probe_id": probe_id,
+            "phenomenon_type": phenomenon,
+            "sessions": sessions,
+        })
+
+        phenomenon_probe_counts[phenomenon] = phenomenon_probe_counts.get(phenomenon, 0) + 1
+        phenomenon_deltas.setdefault(phenomenon, []).extend(probe_deltas)
+        final_delta = sessions[-1]["delta"]
+        if final_delta is not None:
+            phenomenon_final_deltas.setdefault(phenomenon, []).append(final_delta)
+
+    by_phenomenon: dict[str, dict] = {}
+    for phenomenon, count in phenomenon_probe_counts.items():
+        deltas = phenomenon_deltas.get(phenomenon, [])
+        finals = phenomenon_final_deltas.get(phenomenon, [])
+        by_phenomenon[phenomenon] = {
+            "probe_count": count,
+            "mean_delta": round(sum(deltas) / len(deltas), 4) if deltas else None,
+            "final_session_mean_delta": (
+                round(sum(finals) / len(finals), 4) if finals else None
+            ),
+        }
+
+    logger.info(
+        "control_shadow sample_pass_rate_comparison: probes=%d phenomena=%s",
+        len(per_probe), list(by_phenomenon.keys()),
+    )
+    return {
+        "per_probe": per_probe,
+        "by_phenomenon": by_phenomenon,
     }
 
 
@@ -438,7 +556,7 @@ async def generate_control_shadow(
             await _check_zero_feedback_edge_correlation(store, control_eid)
         )
 
-        # Comparative deltas
+        # Comparative deltas (mean-mode probe results)
         comparative_deltas = _compute_comparative_deltas(
             learned_measures=learned_measures,
             control_measures=control_measures,
@@ -447,12 +565,20 @@ async def generate_control_shadow(
             control_condition=control_condition or control_name,
         )
 
+        # Sample-mode (weight_mode=sample) pass-rate comparison — additive,
+        # does not replace the mean-mode comparison above (M34).
+        sample_pass_rate_comparison = _compute_sample_pass_rate_comparison(
+            learned_measures=learned_measures,
+            control_measures=control_measures,
+        )
+
         control_shadow[control_name] = {
             "experiment_id": control_eid,
             "condition_label": control_condition,
             "learning_measures": control_measures,
             "sanity_checks": sanity_checks,
             "comparative_deltas": comparative_deltas,
+            "sample_pass_rate_comparison": sample_pass_rate_comparison,
         }
 
         logger.info(

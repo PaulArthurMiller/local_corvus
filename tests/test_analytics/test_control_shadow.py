@@ -9,6 +9,8 @@ Covers:
   zero_feedback_edge_correlation: FAIL when a feedback event for a control
     run has non-empty weight_updates; PASS on clean data.
   Comparative delta computation: correct values for synthetic learned/control pairs.
+  Sample-mode pass-rate comparison (M34): per-probe/per-session deltas,
+    by-phenomenon aggregation, graceful degradation on missing sample data.
 """
 
 import asyncio
@@ -30,6 +32,7 @@ from analytics.reports.control_shadow import (
     _check_zero_feedback_edge_correlation,
     _collect_probe_results_for_experiment,
     _compute_comparative_deltas,
+    _compute_sample_pass_rate_comparison,
 )
 
 
@@ -438,6 +441,142 @@ class TestComputeComparativeDeltas:
         assert "bridge_mu_rank_delta" in deltas
         assert "edge_weight_delta_magnitude" in deltas
         assert "mean_gold_mu_rank_delta" in deltas
+
+    def test_raw_learned_and_control_values_present(self):
+        """M34: the raw learned/control values ride alongside each delta so
+        the rendered table can show all three columns instead of hiding the
+        baseline behind a bare '—'."""
+        learned_measures = self._make_measures(mean_abs_delta=0.18)
+        control_measures = self._make_measures(mean_abs_delta=0.0)
+
+        deltas = _compute_comparative_deltas(
+            learned_measures=learned_measures,
+            control_measures=control_measures,
+            probe_results_by_condition={
+                "learning": [self._make_probe_result("p1", 1, gold_rank=1)],
+                "static-weight": [self._make_probe_result("p1", 1, gold_rank=None)],
+            },
+            learned_condition="learning",
+            control_condition="static-weight",
+        )
+
+        assert deltas["probe_pass_rate_learned"] == 1.0
+        assert deltas["probe_pass_rate_control"] == 0.0
+        assert deltas["edge_weight_delta_magnitude_learned"] == 0.18
+        assert deltas["edge_weight_delta_magnitude_control"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _compute_sample_pass_rate_comparison — M34 sample-mode comparison
+# ---------------------------------------------------------------------------
+
+
+def _make_sample_pass_rates(probe_sessions: dict[str, list[tuple]]) -> dict:
+    """
+    probe_sessions: {probe_id: [(session_index, phenomenon_type, pass_rate), ...]}
+    Builds a `sample_pass_rates` dict matching
+    `_compute_sample_pass_rates()`'s real output shape.
+    """
+    per_probe = []
+    for probe_id, sessions in probe_sessions.items():
+        phenomenon = sessions[0][1] if sessions else "unknown"
+        per_probe.append({
+            "probe_id": probe_id,
+            "phenomenon_type": phenomenon,
+            "sessions": [
+                {
+                    "session_index": idx,
+                    "pass_count": 0,
+                    "fail_count": 0,
+                    "repeats_completed": 25,
+                    "pass_rate": rate,
+                    "partial_battery": False,
+                }
+                for idx, _, rate in sessions
+            ],
+        })
+    return {"per_probe": per_probe, "by_phenomenon": {}}
+
+
+class TestComputeSamplePassRateComparison:
+    def test_per_session_delta_matches_expected(self):
+        """learned - control at each matching session_index."""
+        learned = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_d4": [(1, "spoke_retrieval", 0.04), (5, "spoke_retrieval", 0.60)],
+        })}
+        control = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_d4": [(1, "spoke_retrieval", 0.04), (5, "spoke_retrieval", 0.08)],
+        })}
+
+        result = _compute_sample_pass_rate_comparison(learned, control)
+
+        probe = result["per_probe"][0]
+        assert probe["probe_id"] == "vs_d4"
+        sessions = {s["session_index"]: s for s in probe["sessions"]}
+        assert sessions[1]["delta"] == 0.0
+        assert sessions[5]["delta"] == 0.52
+
+    def test_aggregated_by_phenomenon(self):
+        """Mean and final-session deltas aggregate correctly across probes
+        sharing a phenomenon_type."""
+        learned = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_c1": [(1, "spoke_retrieval", 1.0), (2, "spoke_retrieval", 1.0)],
+            "vs_d4": [(1, "spoke_retrieval", 0.04), (2, "spoke_retrieval", 0.60)],
+        })}
+        control = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_c1": [(1, "spoke_retrieval", 1.0), (2, "spoke_retrieval", 1.0)],
+            "vs_d4": [(1, "spoke_retrieval", 0.04), (2, "spoke_retrieval", 0.08)],
+        })}
+
+        result = _compute_sample_pass_rate_comparison(learned, control)
+
+        by_phenom = result["by_phenomenon"]["spoke_retrieval"]
+        assert by_phenom["probe_count"] == 2
+        # deltas: vs_c1 [0.0, 0.0], vs_d4 [0.0, 0.52] -> mean = 0.13
+        assert by_phenom["mean_delta"] == 0.13
+        # final-session deltas: vs_c1 0.0, vs_d4 0.52 -> mean = 0.26
+        assert by_phenom["final_session_mean_delta"] == 0.26
+
+    def test_missing_sample_data_degrades_without_crashing(self):
+        """Pre-M30 experiments have no sample_pass_rates at all — the
+        comparison must degrade to empty, not crash."""
+        learned = {"sample_pass_rates": {"per_probe": [], "by_phenomenon": {}}}
+        control = {}  # no sample_pass_rates key whatsoever
+
+        result = _compute_sample_pass_rate_comparison(learned, control)
+
+        assert result == {"per_probe": [], "by_phenomenon": {}}
+
+    def test_probe_only_in_one_condition_is_excluded(self):
+        """A probe present in learned but absent from control (or vice
+        versa) can't be compared — it must not appear in the output."""
+        learned = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_d4": [(1, "spoke_retrieval", 0.04)],
+        })}
+        control = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_c1": [(1, "spoke_retrieval", 1.0)],
+        })}
+
+        result = _compute_sample_pass_rate_comparison(learned, control)
+
+        assert result["per_probe"] == []
+        assert result["by_phenomenon"] == {}
+
+    def test_none_pass_rate_produces_none_delta(self):
+        """A session with no non-flagged repeats (pass_rate=None) yields a
+        None delta rather than a crash, and is excluded from aggregation."""
+        learned = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_x1": [(1, "phenom", None)],
+        })}
+        control = {"sample_pass_rates": _make_sample_pass_rates({
+            "vs_x1": [(1, "phenom", 0.5)],
+        })}
+
+        result = _compute_sample_pass_rate_comparison(learned, control)
+
+        sessions = result["per_probe"][0]["sessions"]
+        assert sessions[0]["delta"] is None
+        assert result["by_phenomenon"]["phenom"]["mean_delta"] is None
 
 
 # ---------------------------------------------------------------------------

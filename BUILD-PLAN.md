@@ -5248,6 +5248,284 @@ runtime behavior, no backend/harness changes.
 
 ---
 
+## Experiment-0 Follow-Ups — Milestones 31–35
+
+**Source:** the experiment-0 baseline run (2026-08-02,
+`exp0-2026-07-26_learned` + control shadows; report at
+`memory/reports/experiment_report_exp0-2026-07-26_learned.md`) and the
+post-run analysis session of the same date. The run was an infrastructure
+success (0 failed turns, 0 ghost MUs, all §6.3 integrity checks PASS) and a
+science null against controls, but the analysis surfaced findings the
+report layer either computed by hand or couldn't see at all:
+
+1. **Environment drift (MU accumulation).** Seed-fixture MUs' share of the 4
+   retrieved slots fell across series in every condition — learned 42% (s0)
+   → 14% (s4), random_weight → 4% — because the graph is wiped between
+   conditions but accumulates conversation MUs between series, and those
+   MUs out-compete the seed knowledge in BM25. Judge up-rate declined in
+   lock-step across all three conditions (learned 52%→26%, static
+   62%→38%, random 60%→14% by series), so this drift, not learning, is the
+   dominant time trend. **Paul's decision (2026-08-02): accumulation is a
+   real-world feature — measure it, don't control it.** → M32.
+2. **78% of weight updates landed on "unknown cluster" edges** (176 of 225
+   in the §6.1 ledger) — conversation-MU edges the probes don't measure.
+   **Paul's direction: this is likely where cross-domain real-world
+   learning shows up long-term; build classification/quantification now.**
+   → M33.
+3. **Punishment-dominated regime.** 34% up-rate overall (70 up / 138 down /
+   2 none in the learned condition) against a reinforcement-shaped
+   hypothesis. The judge rule ("down whenever any criterion is unmet") is
+   too harsh for the v3 criteria. **Paul's decision: up = ALL criteria
+   met, down = NO criteria met, partial answers get no feedback.** → M31.
+4. **§6.2 compares only mean-mode probe results**, which are flat nearly
+   everywhere — it is blind to the one learning-shaped trajectory in the
+   run (vs_d4's sample pass rate climbing 4%→60%). Its "Learned" column
+   also renders `—` instead of the baseline values. → M34.
+5. **Two instrumentation defects:** §5.5 shows `traversals: 0` on edges
+   with `updates ≥ 1` (impossible — updates only happen on traversed
+   edges), and all 13 "runaway-reinforcement" flags are actually normal
+   Beta-mean convergence streaks (1/2→1/3→1/4→1/5, shrinking steps —
+   the opposite of runaway). → M35.
+
+**Sequencing:** M32–M35 are report-layer only, independently reviewable,
+and retroactively valid against exp0's already-stored data — build in any
+order, one branch/PR each. **M31 changes the learning signal itself: build
+it last**, recalibrate the judge on the new rule before any real run, and
+note that once M31 lands, exp0 stops being a comparable baseline for
+verdict-driven measures — a re-baseline run (exp0b) under the new scheme
+is expected before the config-change experiment series (Paul's call on
+timing). TODO-1 (§6.1 N+1 query, tracked in PROGRESS.md) remains separate:
+fix before the 10–15-run screening series, not blocked on any of these.
+
+---
+
+## Judge Verdict Scheme: Partial Answers Abstain — Milestone 31
+
+**Decision being implemented (Paul, 2026-08-02):** `up` only when **all**
+of a prompt's criteria are satisfied; `down` only when **none** are;
+anything in between (partial answers) gets `none` — recorded, but no
+weight update. Rationale: the current any-criterion-unmet-→-down rule
+produced a 34% up-rate and 144-down/81-up update ledger on exp0's fairly
+demanding criteria — a punishment-dominated regime under a
+reinforcement-shaped hypothesis — and partial-credit-means-silence is
+also the more realistic model of real-world human feedback.
+
+**What already works (verified 2026-08-02, do not rebuild):**
+`POST /feedback/verdict` already accepts `verdict="none"`, always inserts
+the feedback_events row, and only calls `process_verdict_for_learning()`
+for `up`/`down` (`backend/api/chat.py:311`) — the M8 "absence of signal is
+an explicit observation" contract. The runner already posts `none`
+verdicts (exp0 recorded 3). **No backend change is required.**
+
+1. **Judge protocol — `scripts/harness/judge.py`.** Two design options;
+   the recommendation is (b), with calibration as the arbiter:
+   - (a) Minimal: rewrite `_build_judge_prompt()`'s grading rule in place
+     ("up" = every criterion satisfied; "down" = no criterion satisfied;
+     "none" = some but not all, or genuinely unassessable). Smallest diff,
+     but relies on `gemma4:e4b` applying an all-vs-none rule correctly in
+     one shot.
+   - (b) **Recommended — per-criterion checklist protocol:** ask the judge
+     to return a per-criterion judgment (e.g. `criteria_met` as a list of
+     booleans in listed order, plus `rationale`), and have
+     `_parse_verdict()` **derive** the verdict host-side: all true → `up`,
+     all false → `down`, mixed → `none`. The rule is then applied exactly,
+     per-criterion judgments are easier for a small judge model than a
+     global rule, and the per-criterion data is recorded for free
+     (feeds M33-style analysis). `criterion_triggered` on a derived
+     `down`: cite the first listed criterion (all failed, so the specific
+     choice is uninformative by construction; the rationale carries the
+     rest) — keeps the backend's down-requires-criterion 422 contract
+     untouched. The `_resolve_criterion()` normalization machinery stays
+     for citation resolution wherever the judge names criteria in prose.
+2. **Interactive mode (`scripts/harness/runner.py`):** the override path
+   must offer `none` as an operator choice (partial answers are now an
+   expected, common verdict, not an edge case), and the calibration
+   context printout should show the per-criterion judgments when protocol
+   (b) is used.
+3. **Recalibration before any real run:** new calibration plan (clone of
+   `plans/exp0_calibration_2026-07-27.json` with a new `plan_id`; same
+   20-turn slice) and a 20-turn `--interactive` pass. The criteria are
+   unchanged but the rule is new — `gemma4:e4b` has never been graded
+   under it. Record the up/down/none mix; expectation from exp0's ledger
+   is a large `none` share.
+4. **Tests:** derivation truth table (all met → up, none met → down, each
+   mixed combination → none, single-criterion prompt where partial is
+   impossible), malformed per-criterion payloads (wrong length, non-bool)
+   → `JudgeUnparseableError` (direction-neutral, per the M-19/07-27
+   asymmetry lesson), citation on derived downs, prompt-text regression.
+5. **Expected side effects — verify, don't be surprised by:** total weight
+   updates per run drop (partial turns now update nothing), so per-turn
+   learning slows and future runs may need more turns for equivalent
+   signal; the runaway-flag noise should largely vanish (fewer long
+   down-streaks) — though M35 fixes the detector itself regardless.
+
+**Out of scope:** any change to the bank's criteria text (content_hash
+must survive — same reasoning as the 07-27 normalization fix), any
+backend change, the exp0b re-baseline run itself.
+
+**Estimate:** 1 session including the live recalibration pass.
+
+---
+
+## Environment-Drift Metrics: Seed-Share + Verdict Mix — Milestone 32
+
+**Goal:** promote the two measures that had to be computed by hand in the
+2026-08-02 analysis into first-class report sections, because
+MU-accumulation drift is a permanent feature of the system (Paul's call:
+measure, don't control) and every future config comparison sits on top of
+it.
+
+1. **`backend/analytics/reports/series_report.py` —
+   `_section_53_retrieval_rate_classification()`:** the per-turn
+   seed/intra/cross counts already exist here. Add `seed_fixture_rate` and
+   `cross_series_rate` to the returned dict alongside the existing
+   `intra_series_rate` (same denominator: total retrieved). Markdown: two
+   new summary lines in the §5.3 block.
+2. **`backend/analytics/reports/experiment_report.py` — §5.3
+   aggregation:** the experiment report reads stored series-close reports
+   (per the M21/PR-41 rule — never recompute from a graph later conditions
+   wiped). Extend the §5.3 table with `seed_share` and `cross_share`
+   columns, rows in series order, and add a one-line drift statement
+   (first-series vs last-series seed_share delta) so the trend is visible
+   without reading five series reports. Older stored series JSONs won't
+   have the new fields — render `—`, never fail (backward-compat with
+   every pre-M32 report on disk).
+3. **New verdict-mix subsection (experiment report):** per series: `up`,
+   `down`, `none` counts and up-rate = up/(up+down), from
+   `feedback_events` scoped by `experiment_id` (bulk turns only —
+   `is_probe_turn=False` is already guaranteed on this path), series
+   attribution via the run join. This is exactly the table hand-built from
+   the console log on 2026-08-02; the report should own it. Place near
+   §5.1 (it describes the run environment, not learning).
+4. **Tests:** rate arithmetic, aggregation carry-through, missing-field
+   backward compat, verdict-mix scoping (a contaminating experiment_id
+   must not leak — same pattern as the existing §6.1 scoping tests),
+   zero-feedback series (all-probe or dry-run) renders cleanly.
+
+**Out of scope:** any change to retrieval behavior, wiping policy, or MU
+creation — this milestone is measurement only, by explicit decision.
+
+**Estimate:** under 1 session — two report-layer files plus tests.
+
+---
+
+## Conversation-Edge Classification — Milestone 33
+
+**Goal:** in exp0, 176 of 225 weight updates (78%) hit edges the §6.1
+ledger classifies "unknown cluster" — edges touching harness-created
+conversation MUs rather than seed MUs. The probes are blind to them, so
+most of what the mechanism learned was invisible. Paul's direction:
+this territory is where cross-domain real-world learning is expected to
+appear over time, so the controlled experiments must classify and
+quantify it now.
+
+1. **Attribution, derived at report time — no schema change.** Two
+   independent signals, both from already-stored data:
+   - **Prompt lineage:** `feedback_events.prompt_id` → bank entry →
+     `target cluster`. Every conversation MU created by a bulk turn
+     inherits that turn's prompt's target cluster.
+   - **Seed adjacency:** an edge with a seed-MU endpoint inherits that
+     endpoint's cluster (seed clusters are already known to the report).
+   Where both signals exist and disagree, classify the edge `mixed` and
+   count it separately — a disagreement **is** a cross-domain link, which
+   is precisely the phenomenon worth watching, not an error to hide.
+   Derivation (not stamping at creation) is deliberate: it works
+   retroactively on exp0's stored data and keeps the backend
+   condition-agnostic.
+2. **`backend/analytics/reports/experiment_report.py` — §6.1 delta
+   ledger:** replace the flat within/cross/unknown counts with a typed
+   breakdown: edge class (`seed↔seed`, `conv→seed`, `conv↔conv`) ×
+   cluster relation (`same-cluster`, `cross-cluster`, `mixed`,
+   `unresolvable`). "Unknown" should become a small residual (edges whose
+   turn has no prompt_id and no seed endpoint), not 78%.
+3. **New markdown subsection:** update counts and mean |delta| per class
+   per series — the longitudinal view. The specific quantity to watch over
+   future experiments: cross-cluster `conv↔conv` and `conv→seed` updates,
+   as the operational definition of emergent cross-domain linkage.
+4. **Verification against real data:** regenerate exp0's experiment report
+   and record the resolved distribution of the 176 formerly-unknown
+   updates in PROGRESS.md. This is the milestone's done-criterion — a
+   classification scheme that can't classify the run that motivated it
+   isn't done.
+5. **Tests:** both attribution signals, disagreement → `mixed`, missing
+   prompt_id → seed-adjacency fallback, fully unresolvable → residual,
+   pre-M33 report JSONs still render.
+
+**Estimate:** 1 session.
+
+---
+
+## §6.2 Control Shadow: Sample-Mode Comparison + Rendering — Milestone 34
+
+**Goal:** §6.2's comparative deltas read exactly 0.0000 on exp0 because
+they compare only `battery_mode="mean"` probe results, which are flat
+nearly everywhere in all conditions — the comparison is insensitive
+precisely where the signal lives (`sample_pass_rates`, M30 Part B). The
+one learning-shaped trajectory in exp0 (vs_d4 sample pass rate 4%→60%)
+was never compared against controls at all.
+
+1. **`backend/analytics/reports/control_shadow.py`:** add a sample-mode
+   pass-rate comparison — per-probe, per-session learned-minus-control
+   pass-rate deltas computed from each condition's `sample_pass_rates`,
+   aggregated by phenomenon. Keep the existing mean-mode comparison
+   alongside (labeled as such); do not silently redefine the old measure.
+2. **Fix the "Learned" column rendering** — it shows `—` for the learned
+   baseline values in every row of the exp0 report; the comparison table
+   should show learned's own value, the control's, and the delta.
+3. **Clarify `edge_weight_delta_magnitude` presentation:** controls are
+   structurally 0 (verified by their own sanity checks), so presenting
+   `+0.1109` as a "delta" implies a learning effect where the measure is
+   true by construction. Show both values and label the control column
+   `0 by design` for static/random.
+4. **Live verification doubles as the open science question:** regenerate
+   exp0's learned report with both control shadows attached and read
+   vs_d4 and vs_c1's learned-vs-control sample trajectories. If vs_d4
+   climbs in the controls too, its rise is environment drift; if it climbs
+   only under `learned`, it is the run's first real (if mistargeted —
+   d4 was not a trained spoke) learning signal. Record the answer in
+   PROGRESS.md either way.
+5. **Tests:** mirror the existing control_shadow test patterns —
+   sample-delta arithmetic, missing-sample-data controls (pre-M30
+   experiments) degrade to mean-only without crashing, experiment_id
+   scoping.
+
+**Estimate:** under 1 session.
+
+---
+
+## Instrumentation Fixes: Traversal Counter + Runaway Detector — Milestone 35
+
+1. **§5.5 `traversals: 0` on updated edges
+   (`backend/analytics/reports/series_report.py` —
+   `_section_55_edge_weight_deltas()`):** every edge in exp0's §5.5 tables
+   shows `traversals: 0` alongside `updates ≥ 1`, which is impossible —
+   `process_verdict_for_learning()` credits only edges on the traversal
+   path. Trace where the traversal count should come from (analytics
+   rows vs. weight_updates payloads) and either fix the join or remove
+   the column — a silently-zero metric is worse than no metric (the
+   project's own never-fail-silently rule, applied to reporting).
+2. **Runaway-reinforcement detector redefinition:** the current heuristic
+   (3+ consecutive same-direction updates) flagged 13 edges on exp0, all
+   of them ordinary Beta(1,1) posterior-mean convergence — e.g. weight
+   1/2→1/3→1/4→1/5, deltas -0.1667/-0.0833/-0.05, **shrinking** each
+   step, which is the update rule working exactly as designed. Redefine
+   the flag to fire only on genuinely anomalous streaks: consecutive
+   same-direction updates with **non-decreasing |delta|**, or a streak
+   that carries a weight past the saturation threshold. Keep the plain
+   same-direction streak count as a separate, informational statistic
+   (renamed so it stops crying wolf). Note: M31's abstain scheme will
+   independently shorten down-streaks, but the detector must be correct
+   on its own terms regardless.
+3. **Tests:** regression cases built from the exact exp0 sequences —
+   the decaying `[-0.1667, -0.0833, -0.05]` streak must NOT flag; a
+   constructed non-decreasing streak and a threshold-crossing streak
+   must; the informational streak count still reports both.
+
+**Estimate:** under 1 session; can share a branch with M32 if convenient
+(both touch series/experiment report internals), otherwise separate.
+
+---
+
 ## Status
 
 ```

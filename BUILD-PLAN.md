@@ -5463,6 +5463,9 @@ quantify it now.
 
 ## §6.2 Control Shadow: Sample-Mode Comparison + Rendering — Milestone 34
 
+**Status: COMPLETE (2026-08-02).** See the Milestone 34 trailer entry near
+the end of this file for what was built and the resolved vs_d4/vs_c1 read.
+
 **Goal:** §6.2's comparative deltas read exactly 0.0000 on exp0 because
 they compare only `battery_mode="mean"` probe results, which are flat
 nearly everywhere in all conditions — the comparison is insensitive
@@ -5722,6 +5725,56 @@ total). Confirmed live: the full `generate_experiment_report()` now reads
 all 5 of exp0's stored series reports cleanly from the host with no
 "unreadable" warnings.
 Branch: `milestone-33-conversation-edge-classification`.
+
+**Milestone 34 (§6.2 Control Shadow: Sample-Mode Comparison + Rendering) is
+COMPLETE.** `control_shadow.py`'s `_compute_comparative_deltas()` now returns
+the raw learned/control values alongside every delta (not just the delta
+itself), and a new `_compute_sample_pass_rate_comparison()` builds a
+per-probe, per-session learned-minus-control delta (matched on
+`session_index`) from each condition's own `sample_pass_rates` (already
+computed by `_section_61_learning_measures()` for both the learned and
+control experiments), aggregated by phenomenon (`mean_delta` across all
+sessions, `final_session_mean_delta` for the trajectory's endpoint) —
+additive to, not a replacement for, the existing mean-mode comparison.
+Degrades to an empty comparison (not a crash) when either side has no
+sample-mode data (every pre-M30 experiment). `markdown_renderer.py`'s
+`_render_s62()` fixed: the "Comparative Deltas" table's Learned column no
+longer hardcodes `—`; it and the cross-condition "Condition Comparison
+Summary" table (previously hardcoding `(baseline)`) now both show the real
+learned value alongside the control's and the delta.
+`edge_weight_delta_magnitude`'s control column shows `0 by design` instead
+of a bare `0.0000` when the control value is genuinely zero — true by
+construction (M24: `process_verdict_for_learning()` only ever writes when
+`condition_label == "learned"`, so static/random controls never accumulate
+weight_updates) rather than an empirical near-zero result, while still
+rendering the real number if that invariant were ever violated. 17 new
+tests (900 baseline -> 917, all passing, no regressions): per-session and
+by-phenomenon sample comparison arithmetic, missing-sample-data and
+probe-only-in-one-condition graceful degradation, the two rendering fixes,
+and the `0 by design` labeling (both the by-design and the
+would-be-a-bug-if-nonzero paths).
+**Live verification — the milestone's open science question — run against
+the real exp0 data** (`generate_experiment_report()` called directly
+against `memory/graph.db`, read-only, both control shadows attached; the
+M33 stored-report-path fix means this now exercises the full report path,
+not just `_section_61_learning_measures()` in isolation): **vs_d4's sample
+pass-rate climb (4%→24%→56%→60%→48%) does NOT replicate in either
+control** — under `static_weight` it stays flat at exactly 0.0000 every
+session (same environment/graph growth as `learned`, but no weight
+updates), and under `random_weight` it's uncorrelated noise (100%→0%→0%→
+100%→100%, tracking each session's independent re-randomization, not a
+trend). Read: the climb is real signal from the `learned` condition's own
+weight updates, not shared environment drift — Paul's framing of it as the
+run's first real (if mistargeted — d4 was never a trained spoke) learning
+signal is confirmed, not just plausible. A second, unplanned finding from
+the same run: `vs_c1` (a trained spoke) is near-ceiling under `learned`
+(0.92-1.00) and *also* near-ceiling under `static_weight` (flat 1.0000) but
+flat at 0.0000 under `random_weight` — c1's high pass rate is explained by
+the graph's default static weight structure already favoring it, not by
+the RL update mechanism specifically; `random_weight`'s reshuffling is what
+actually breaks it. Recorded in PROGRESS.md per the milestone's explicit
+requirement to answer the question either way.
+Branch: `milestone-34-control-shadow-sample-mode`.
 Last updated: 2026-08-02
 ```
 

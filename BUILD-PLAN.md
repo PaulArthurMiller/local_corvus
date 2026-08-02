@@ -5301,6 +5301,14 @@ fix before the 10–15-run screening series, not blocked on any of these.
 
 ## Judge Verdict Scheme: Partial Answers Abstain — Milestone 31
 
+**Status: CODE COMPLETE (2026-08-02).** Protocol (b), the per-criterion
+checklist, is built and tested (see the Milestone 31 trailer entry near the
+end of this file). **AWAITING PAUL:** the live 20-turn `--interactive`
+recalibration pass (`plans/exp0_calibration_2026-08-02.json`) — this
+requires a real local Ollama instance and live human judgment calls, so it
+was left as a manual follow-up rather than run autonomously. Do not run a
+real experiment under this scheme until that pass is done.
+
 **Decision being implemented (Paul, 2026-08-02):** `up` only when **all**
 of a prompt's criteria are satisfied; `down` only when **none** are;
 anything in between (partial answers) gets `none` — recorded, but no
@@ -5833,6 +5841,57 @@ correct reason recorded), a regression proving traversal count is derived
 from `activated_edge_ids` and not the dead DB column, and a
 markdown-rendering test for the two-statistic split.
 Branch: `milestone-35-instrumentation-fixes`.
+
+**Milestone 31 (Judge Verdict Scheme — Partial Answers Abstain):** CODE
+COMPLETE — the last of the M31-M35 Experiment-0 follow-ups, built per the
+"per-criterion checklist protocol" (option (b) in the milestone spec).
+`scripts/harness/judge.py`: the judge no longer asserts `up`/`down`/`none`
+itself — `_build_judge_prompt()` asks for `criteria_met` (a list of
+true/false booleans, one per criterion, in listed order) plus `rationale`;
+`_parse_verdict()` derives the verdict host-side (all met -> up, none met ->
+down citing the first-listed criterion since which one is uninformative once
+all have failed, mixed -> none/abstain, no weight update). Every parse
+failure (malformed JSON, missing/wrong-length/non-bool `criteria_met`, HTTP
+error) is now uniformly `JudgeUnparseableError` and direction-neutral by
+construction — the old "unresolved citation" failure mode that could only
+ever delete `down` verdicts (the 2026-07-27 fix's target) no longer exists,
+because there is no free-text citation left to fail to resolve.
+`_normalize_criterion()`/`_resolve_criterion()` are kept, per the milestone
+spec, for citation resolution wherever the judge names criteria in prose, but
+are no longer on the primary parse path — covered by direct unit tests now
+rather than through `judge_turn()`. `JudgeVerdict` gains `criteria_met`,
+drops `criterion_unresolved`/`raw_criterion_citation`. `checkpoint.py`:
+`TurnCheckpoint.criteria_met` records the checklist for free whenever the
+judge produced one (both interactive and non-interactive runs), feeding
+future M33-style analysis. `runner.py`: `_judge_and_post_verdict()`/
+`_post_verdict()` thread `criteria_met` through as a 5th tuple element and
+drop the now-impossible unresolved-citation branches (accepting a judge
+`down` no longer needs to ask the operator for a criterion — it's always
+already valid); `_print_calibration_context()` renders the per-criterion
+checklist with `[x]`/`[ ]` marks in `--interactive` so calibration is against
+the same checklist the judge graded, not just the derived verdict; `none` was
+already a valid override target (`VALID_VERDICTS`) and now has explicit
+regression coverage. New `plans/exp0_calibration_2026-08-02.json` clones the
+2026-07-27 calibration plan (same 20-turn slice — identical `random_seed`)
+under a new `plan_id` for recalibration under the new rule.
+`docs/harness_usage.md` rewritten: the citation-resolution section replaced
+with the checklist-protocol description; the `criterion_unresolved`
+troubleshooting row replaced with checklist-shaped failure modes.
+38 tests changed/added across `test_judge.py` (rewritten for the checklist
+protocol — derivation truth table, malformed-payload -> `JudgeUnparseableError`
+cases, direct `_normalize_criterion`/`_resolve_criterion` unit coverage) and
+`test_runner.py` (payload format updated throughout; the four
+unresolved-citation-specific tests removed as testing a now-impossible code
+path; new coverage for mixed-checklist -> none/no-weight-update, derived-down
+citing the first criterion, interactive override to `none`, and the
+checklist rendering in calibration context). 938 tests passing, no
+regressions. **AWAITING PAUL:** the live 20-turn `--interactive` recalibration
+pass against the new plan — requires a real local Ollama instance and live
+human judgment calls on real judge output, which is outside what an
+autonomous `/build` session can do. Record the up/down/none mix once run;
+exp0's ledger predicts a large `none` share. Only after that pass: decide on
+an exp0b re-baseline run under the new scheme. Branch:
+`milestone-31-judge-abstain-scheme`.
 Last updated: 2026-08-02
 ```
 

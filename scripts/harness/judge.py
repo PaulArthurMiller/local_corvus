@@ -41,35 +41,29 @@ class ProbeTurnJudgeError(Exception):
 
 class JudgeUnparseableError(Exception):
     """Raised when the judge's response fails to parse into a valid VERDICT
-    even after one re-ask — malformed JSON, a verdict outside VALID_VERDICTS,
-    or an HTTP failure talking to Ollama. Routes through
+    even after one re-ask — malformed JSON, a missing/wrong-length/non-bool
+    criteria_met list, or an HTTP failure talking to Ollama. Routes through
     error_policy["judge_unparseable"] (default soft_continue) in the runner.
 
-    Deliberately NOT raised when the verdict itself is fine but the judge's
-    criterion citation can't be resolved: that failure mode can only occur on
-    "down" (an "up"/"none" citation is simply nulled), so raising on it made
-    the harness lose "down" verdicts at a rate it could never lose "up"
-    verdicts. In a calibration run measuring judge up-skew, an error that
-    silently deletes only downs biases the very quantity being measured. See
-    JudgeVerdict.criterion_unresolved for how that case is carried instead.
+    Under the Milestone 31 per-criterion checklist protocol the verdict is
+    always derived host-side from criteria_met (never asserted by the judge
+    directly), so every parse failure is direction-neutral by construction —
+    there is no longer an "unresolved citation" failure mode that could only
+    ever destroy "down" verdicts (the asymmetry the 2026-07-27 fix addressed
+    under the old free-text criterion_triggered protocol).
     """
 
 
 @dataclass
 class JudgeVerdict:
-    verdict: str  # "up" | "down" | "none"
+    verdict: str  # "up" | "down" | "none" — derived host-side from criteria_met
     rationale: Optional[str]
     criterion_triggered: Optional[str]
-    # True only when verdict == "down" and the judge's cited criterion could
-    # not be resolved to one of the prompt's criteria even after normalization
-    # and the re-ask. The verdict is still trustworthy and is carried through;
-    # the runner decides how to source the missing criterion (operator prompt
-    # in --interactive, otherwise soft-continue on the verdict POST alone).
-    criterion_unresolved: bool = False
-    # The judge's raw, unresolvable citation — kept for the audit trail so a
-    # calibration pass can see what the judge actually said rather than just
-    # that it said something unusable.
-    raw_criterion_citation: Optional[str] = None
+    # Milestone 31 — the judge's per-criterion checklist, same order as the
+    # prompt's criteria list. Carried through to TurnCheckpoint so a
+    # calibration or M33-style analysis pass can see which specific criteria
+    # were met/failed, not just the derived up/down/none.
+    criteria_met: Optional[list[bool]] = None
 
 
 class OllamaJudgeClient:
@@ -128,24 +122,39 @@ class OllamaJudgeClient:
 
 
 def _build_judge_prompt(prompt_text: str, criteria: list[str], response_text: str) -> str:
-    criteria_lines = "\n".join(f"- {c}" for c in criteria)
+    """
+    Milestone 31 per-criterion checklist protocol (Paul, 2026-08-02): the
+    judge grades each criterion independently; the runner derives the overall
+    verdict from the checklist rather than asking the judge to apply an
+    up/down rule itself. The old any-criterion-unmet-means-down framing
+    produced a punishment-dominated 34% up-rate against exp0's demanding
+    criteria — grading one criterion at a time is also an easier task for a
+    small local judge model than applying a global rule in one shot.
+    """
+    criteria_lines = "\n".join(f"{i}. {c}" for i, c in enumerate(criteria, 1))
     return (
         "You are grading an AI assistant's response against a fixed checklist of criteria.\n\n"
         f"Original prompt given to the assistant:\n{prompt_text}\n\n"
-        f"Criteria the response should satisfy:\n{criteria_lines}\n\n"
+        f"Criteria to grade independently, in order:\n{criteria_lines}\n\n"
         f"Assistant's response:\n{response_text}\n\n"
-        'Decide whether the response satisfies the criteria ("up"), clearly fails to satisfy '
-        'them ("down"), or whether it is genuinely ambiguous ("none"). "none" is the honest '
-        "answer whenever up/down can't be cleanly determined — it is not a failure to answer.\n\n"
-        'If your verdict is "down", criterion_triggered must be the exact text of ONE of the '
-        'criteria listed above that the response failed. If your verdict is "up" or "none", '
-        "criterion_triggered must be null.\n\n"
-        'Return ONLY a JSON object with keys "verdict" (one of "up"/"down"/"none"), '
-        '"rationale" (a short string explaining the verdict), and "criterion_triggered" '
-        "(string or null). No prose, no markdown fences."
+        "For EACH criterion above, judge on its own whether the response satisfies it. Do "
+        "not apply any overall up/down/pass-fail judgment yourself — that is derived "
+        "separately from your per-criterion answers.\n\n"
+        'Return ONLY a JSON object with keys "criteria_met" (a list of exactly '
+        f"{len(criteria)} true/false booleans, in the SAME order as the criteria listed "
+        'above — one boolean per criterion, no more, no fewer) and "rationale" (a short '
+        "string explaining your per-criterion judgments). No prose, no markdown fences."
     )
 
 
+# Criterion-citation normalization, built for the pre-Milestone-31 protocol
+# where the judge cited a criterion's text directly. The Milestone 31
+# per-criterion checklist protocol (_parse_verdict below) identifies criteria
+# by list position instead, so citation resolution is no longer on the
+# primary parse path — kept for citation resolution wherever the judge names
+# criteria in prose (e.g. a future free-text fallback, or rationale parsing),
+# per BUILD-PLAN.md's Milestone 31 spec.
+#
 # Leading "label:" prefixes a judge routinely drops when quoting a criterion
 # back — the observed exp0 failure was a criterion written as
 # "answer: local temporal readings/local time" cited as
@@ -228,6 +237,24 @@ def _resolve_criterion(citation: Optional[str], criteria: list[str]) -> Optional
 
 
 def _parse_verdict(raw_text: str, criteria: list[str]) -> JudgeVerdict:
+    """
+    Parse the judge's per-criterion checklist and derive the verdict
+    host-side (Milestone 31, Paul's 2026-08-02 decision): all criteria met ->
+    "up", none met -> "down", anything mixed -> "none" (a partial answer gets
+    no feedback — no weight update — matching the backend's existing
+    "absence of signal is an explicit observation" contract, M8).
+
+    Deriving the verdict from a fixed-length list of booleans rather than
+    asking the judge to apply the all-vs-none rule itself is the point: the
+    old any-criterion-unmet-means-down framing produced a punishment-dominated
+    34% up-rate on exp0's fairly demanding criteria, and per-criterion grading
+    is an easier task for a small local judge model than a global rule.
+
+    Raises ValueError (caught by judge_turn's retry loop, direction-neutral
+    per JudgeUnparseableError) if criteria_met is missing, not a list, the
+    wrong length, or contains a non-bool element — the exact malformed shapes
+    the model can produce when it doesn't follow the schema.
+    """
     try:
         data = json.loads(raw_text)
     except (json.JSONDecodeError, TypeError) as exc:
@@ -236,31 +263,36 @@ def _parse_verdict(raw_text: str, criteria: list[str]) -> JudgeVerdict:
     if not isinstance(data, dict):
         raise ValueError(f"judge response JSON was not an object: {raw_text[:200]!r}")
 
-    verdict = data.get("verdict")
-    if verdict not in VALID_VERDICTS:
-        raise ValueError(f"judge verdict {verdict!r} not in {VALID_VERDICTS}")
-
-    raw_citation = data.get("criterion_triggered")
-    if not isinstance(raw_citation, str):
-        raw_citation = None
-
-    if verdict == "down":
-        resolved = _resolve_criterion(raw_citation, criteria)
-        return JudgeVerdict(
-            verdict=verdict,
-            rationale=data.get("rationale"),
-            criterion_triggered=resolved,
-            criterion_unresolved=resolved is None,
-            raw_criterion_citation=None if resolved else raw_citation,
+    criteria_met = data.get("criteria_met")
+    if (
+        not isinstance(criteria_met, list)
+        or len(criteria_met) != len(criteria)
+        or not all(isinstance(v, bool) for v in criteria_met)
+    ):
+        raise ValueError(
+            f"judge criteria_met {criteria_met!r} must be a list of exactly "
+            f"{len(criteria)} booleans (one per criterion, in order)"
         )
 
-    # "up"/"none" carry no criterion by definition; any citation the judge
-    # attached is dropped without complaint. The "down" branch above is now
-    # equally non-fatal, which is the point — see JudgeUnparseableError.
+    if all(criteria_met):
+        verdict = "up"
+        criterion_triggered = None
+    elif not any(criteria_met):
+        verdict = "down"
+        # All criteria failed, so which one is cited is uninformative by
+        # construction — the rationale carries the real detail. The first
+        # listed criterion satisfies the backend's down-requires-criterion
+        # contract without inventing or guessing anything.
+        criterion_triggered = criteria[0]
+    else:
+        verdict = "none"
+        criterion_triggered = None
+
     return JudgeVerdict(
         verdict=verdict,
         rationale=data.get("rationale"),
-        criterion_triggered=None,
+        criterion_triggered=criterion_triggered,
+        criteria_met=criteria_met,
     )
 
 
@@ -280,15 +312,12 @@ def judge_turn(
     (both layers, deliberately, per BUILD-PLAN.md).
 
     Raises JudgeUnparseableError only if the judge's response fails to parse
-    into a valid VERDICT even after one re-ask (covers malformed JSON, an
-    unknown verdict value, and HTTP/connectivity failures talking to Ollama —
-    all contained by the same retry-then-soft-continue path).
-
-    A "down" whose criterion citation can't be resolved is NOT an unparseable
-    response: it is returned with criterion_unresolved=True. The re-ask still
-    happens (a second sample sometimes cites cleanly), but exhausting it now
-    degrades the result instead of discarding it, so "down" verdicts survive
-    citation trouble exactly as "up" verdicts always have.
+    into a valid checklist even after one re-ask (covers malformed JSON, a
+    missing/wrong-length/non-bool criteria_met, and HTTP/connectivity
+    failures talking to Ollama — all contained by the same
+    retry-then-soft-continue path). Every failure here is direction-neutral:
+    unlike the pre-Milestone-31 free-text citation protocol, there is no verdict
+    to partially trust when criteria_met is malformed.
     """
     if turn_type == TURN_TYPE_PROBE:
         raise ProbeTurnJudgeError("judge_turn must never be called for a probe turn")
@@ -296,28 +325,13 @@ def judge_turn(
     prompt = _build_judge_prompt(prompt_text, criteria, response_text)
 
     last_exc: Optional[Exception] = None
-    unresolved: Optional[JudgeVerdict] = None
     for attempt in range(MAX_JUDGE_ATTEMPTS):
         try:
             raw_text = client.chat_json(judge_config.model, judge_config.temperature, prompt)
-            verdict = _parse_verdict(raw_text, criteria)
+            return _parse_verdict(raw_text, criteria)
         except (ValueError, KeyError, httpx.HTTPError) as exc:
             last_exc = exc
             logger.warning("judge: parse/call failure (attempt %d/%d): %s", attempt + 1, MAX_JUDGE_ATTEMPTS, exc)
-            continue
-        if not verdict.criterion_unresolved:
-            return verdict
-        # Keep the first unresolved "down" as the fallback and re-ask; the
-        # judge runs at temperature <= 0.1, so a re-ask rarely changes a
-        # citation, but when it does the resolved answer is strictly better.
-        unresolved = unresolved or verdict
-        logger.warning(
-            "judge: unresolvable criterion citation %r (attempt %d/%d); verdict 'down' retained",
-            verdict.raw_criterion_citation, attempt + 1, MAX_JUDGE_ATTEMPTS,
-        )
-
-    if unresolved is not None:
-        return unresolved
 
     raise JudgeUnparseableError(
         f"judge response unparseable after {MAX_JUDGE_ATTEMPTS} attempt(s) "

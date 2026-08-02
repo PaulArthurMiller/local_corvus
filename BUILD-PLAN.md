@@ -5504,6 +5504,10 @@ was never compared against controls at all.
 
 ## Instrumentation Fixes: Traversal Counter + Runaway Detector — Milestone 35
 
+**Status: COMPLETE (2026-08-02).** See the Milestone 35 trailer entry near
+the end of this file for what was built and the resolved live-verification
+read against real exp0 data.
+
 1. **§5.5 `traversals: 0` on updated edges
    (`backend/analytics/reports/series_report.py` —
    `_section_55_edge_weight_deltas()`):** every edge in exp0's §5.5 tables
@@ -5775,6 +5779,60 @@ the RL update mechanism specifically; `random_weight`'s reshuffling is what
 actually breaks it. Recorded in PROGRESS.md per the milestone's explicit
 requirement to answer the question either way.
 Branch: `milestone-34-control-shadow-sample-mode`.
+
+**Milestone 35 (Instrumentation Fixes: Traversal Counter + Runaway Detector)
+is COMPLETE**, the last of the report-layer "Experiment-0 Follow-Ups —
+Milestones 31–35" (M31, the judge-scheme change, is still last per the
+sequencing rule since it changes the learning signal itself). Two
+independent instrumentation defects fixed, report-layer only, no schema or
+backend behavior change:
+**(1) §5.5 `traversals: 0`:** `series_report.py`'s
+`_section_55_edge_weight_deltas()` previously read `traversal_count` from
+`edges.traversal_count` — a DB column that defaults to 0 and that nothing
+in the codebase ever increments (`update_edge_weight()`/
+`update_edge_counters()` only ever touch weight/alpha/beta). Every edge
+reported `traversals: 0` regardless of actual traversal count, including
+edges with `updates >= 1`, which is impossible since
+`process_verdict_for_learning()` only credits edges on the traversal path.
+Fixed by deriving the count from counting each edge_id's appearances across
+runs' `activated_edge_ids` (already stored per-turn on the analytics row) —
+`retrieval.py` confirms `activated_edge_ids` IS `traversed_edge_ids`, so
+this is the correct source, and it required no backend change since the
+data was already there.
+**(2) Runaway-reinforcement false positives:** the old heuristic (any 3
+consecutive algebraically-increasing deltas) flagged exp0's ordinary
+Beta(1,1) posterior-mean convergence streaks (e.g. -0.1667/-0.0833/-0.05 —
+shrinking magnitude, but numerically increasing since the values are
+negative) as "runaway." `_compute_saturation_analysis()` now separates two
+concepts: `same_direction_streaks` (informational only — any 3-consecutive
+same-sign-delta streak, renamed so it stops crying wolf) and `runaway_flags`
+(the actual anomaly, a subset of same-direction streaks — fires only on
+non-decreasing `|delta|`, i.e. genuinely accelerating reinforcement, or a
+streak that carries the edge's weight across `saturation_threshold` even if
+each step is individually shrinking, since that's dangerous regardless of
+trajectory shape). `markdown_renderer.py` renders both counts separately
+(never conflated) and shows each runaway flag's reason(s).
+**Live-verified against real exp0 data** (`memory/graph.db`, read-only,
+`MEMORY_PATH` pointed at the host-mounted `./memory` — same pattern as
+M33/M34): re-running `_section_61_learning_measures()` for
+`exp0-2026-07-26_learned` now returns `runaway_flag_count=0` (down from the
+stored report's 13) and `same_direction_streak_count=17` — confirming the
+exp0 analysis finding exactly: all 13 were false positives from ordinary
+convergence, not genuine runaway reinforcement. Re-running
+`_section_55_edge_weight_deltas()` for series s0 against its real analytics
+rows now shows nonzero `traversal_count_total` for every edge (e.g. an edge
+with `update_count_in_series=4` now correctly shows
+`traversal_count_total=7`, versus the stored report's `0`) — and surfaces
+15 `zero_delta_high_traversal` flags in that one series alone, a signal
+that could never fire before since the traversal count it depends on was
+always 0. 5 new tests (917 baseline -> 922, all passing, no regressions):
+the exact exp0 decaying-streak sequence (must NOT flag as runaway, must
+count as informational), a constructed non-decreasing-magnitude streak and
+a threshold-crossing-despite-shrinking streak (both must flag, with the
+correct reason recorded), a regression proving traversal count is derived
+from `activated_edge_ids` and not the dead DB column, and a
+markdown-rendering test for the two-statistic split.
+Branch: `milestone-35-instrumentation-fixes`.
 Last updated: 2026-08-02
 ```
 

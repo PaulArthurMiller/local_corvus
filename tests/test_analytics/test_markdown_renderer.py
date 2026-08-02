@@ -232,6 +232,28 @@ def test_failure_summary_with_ghost_mus():
     assert "empty_output" in md
 
 
+def test_s53_renders_seed_and_cross_rate():
+    """M32: §5.3's new seed_fixture_rate / cross_series_rate render as
+    percentage lines alongside the existing intra-series rate."""
+    section = {
+        "total_retrieved": 10,
+        "intra_series_count": 5,
+        "seed_fixture_count": 4,
+        "cross_series_count": 1,
+        "unknown_count": 0,
+        "intra_series_rate": 0.5,
+        "seed_fixture_rate": 0.4,
+        "cross_series_rate": 0.1,
+        "per_turn": [],
+    }
+    md = _render_s53(section)
+    print(f"§5.3 with seed/cross rates:\n{md}")
+    assert "Seed-fixture rate" in md
+    assert "40.0%" in md
+    assert "Cross-series rate" in md
+    assert "10.0%" in md
+
+
 def test_s61_renders_sample_pass_rate_section():
     """M30: §6.1's new Sample-Repeat Pass Rate block renders its header and
     flags a partial-battery session with the ⚠ PARTIAL BATTERY marker."""

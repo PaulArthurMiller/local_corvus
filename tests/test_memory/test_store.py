@@ -374,6 +374,93 @@ class TestFeedbackEvents:
 
 
 # ---------------------------------------------------------------------------
+# Milestone 32 — verdict-mix counts per series
+# ---------------------------------------------------------------------------
+
+
+class TestVerdictCountsBySeries:
+
+    def _make_run_and_insert(self, s, run_id, series_id, experiment_id):
+        """Insert a minimal analytics row with series_id + experiment_id."""
+        async def _insert():
+            import memory.store as sm
+            db = await sm._open_db()
+            try:
+                await db.execute(
+                    "INSERT INTO analytics (run_id, series_id, experiment_id, timestamp) "
+                    "VALUES (?, ?, ?, ?)",
+                    (run_id, series_id, experiment_id, "2026-01-01T00:00:00Z"),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+        run(_insert())
+
+    def _insert_feedback(self, s, run_id, verdict, is_probe_turn=False):
+        run(s.insert_feedback_event({
+            "feedback_event_id": str(uuid.uuid4()),
+            "run_id": run_id,
+            "verdict": verdict,
+            "verdict_basis": None,
+            "turn_index": None,
+            "is_probe_turn": is_probe_turn,
+        }))
+
+    def test_counts_up_down_none_per_series(self):
+        """Bulk-turn verdicts are tallied per series_id."""
+        with TempDBStore() as s:
+            exp_id = "exp-verdict-mix"
+            run_a1, run_a2, run_b1 = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+            self._make_run_and_insert(s, run_a1, "series-A", exp_id)
+            self._make_run_and_insert(s, run_a2, "series-A", exp_id)
+            self._make_run_and_insert(s, run_b1, "series-B", exp_id)
+            self._insert_feedback(s, run_a1, "up")
+            self._insert_feedback(s, run_a2, "down")
+            self._insert_feedback(s, run_b1, "none")
+
+            counts = run(s.get_verdict_counts_by_series(exp_id))
+            print(f"[test] verdict counts: {counts}")
+            assert counts["series-A"] == {"up": 1, "down": 1, "none": 0}
+            assert counts["series-B"] == {"up": 0, "down": 0, "none": 1}
+
+    def test_excludes_probe_turn_feedback(self):
+        """A feedback_events row with is_probe_turn=1 is not counted — probe
+        turns are never graded on this path (an accidental probe grading is
+        an integrity violation the §5.6 check flags separately)."""
+        with TempDBStore() as s:
+            exp_id = "exp-verdict-mix-probe"
+            run_id = str(uuid.uuid4())
+            self._make_run_and_insert(s, run_id, "series-A", exp_id)
+            self._insert_feedback(s, run_id, "up", is_probe_turn=True)
+
+            counts = run(s.get_verdict_counts_by_series(exp_id))
+            print(f"[test] counts with probe-turn feedback excluded: {counts}")
+            assert counts == {}
+
+    def test_scoped_to_experiment_id_no_contamination(self):
+        """A different experiment's feedback events must not leak into this
+        experiment's counts, even when both use the same series_id string."""
+        with TempDBStore() as s:
+            run_own, run_other = str(uuid.uuid4()), str(uuid.uuid4())
+            self._make_run_and_insert(s, run_own, "series-A", "exp-own")
+            self._make_run_and_insert(s, run_other, "series-A", "exp-other")
+            self._insert_feedback(s, run_own, "up")
+            self._insert_feedback(s, run_other, "down")
+
+            counts = run(s.get_verdict_counts_by_series("exp-own"))
+            print(f"[test] scoped counts: {counts}")
+            assert counts == {"series-A": {"up": 1, "down": 0, "none": 0}}
+
+    def test_no_feedback_events_returns_empty_dict(self):
+        """An experiment with no bulk-turn feedback (all-probe or dry-run
+        series) returns an empty dict rather than raising."""
+        with TempDBStore() as s:
+            counts = run(s.get_verdict_counts_by_series("exp-empty"))
+            print(f"[test] empty counts: {counts}")
+            assert counts == {}
+
+
+# ---------------------------------------------------------------------------
 # Milestone 10 — use_session_context round-trip
 # ---------------------------------------------------------------------------
 

@@ -1301,9 +1301,20 @@ def _compute_saturation_analysis(all_runs: list[dict], saturation_threshold: flo
     Saturation and runaway-reinforcement detection.
 
     Saturation: edge reaches weight > saturation_threshold.
-    Runaway: three consecutive deltas are each strictly larger than the previous
-    (accelerating reinforcement, not diminishing). Fires for [0.05, 0.07, 0.10];
-    does not fire for [0.10, 0.07, 0.05].
+
+    Same-direction streak (informational only, `same_direction_streaks`):
+    3 consecutive updates on one edge whose deltas share a sign. This fires
+    on ordinary Beta(1,1) posterior-mean convergence — e.g. exp0's
+    -0.1667/-0.0833/-0.05 down-streak, shrinking each step — which is the
+    update rule working as designed, not an anomaly. It exists purely as a
+    volume statistic and must never be conflated with `runaway_flags`.
+
+    Runaway (the actual anomaly flag, a subset of same-direction streaks):
+    fires only when the streak is genuinely accelerating — non-decreasing
+    |delta| across all three steps (fires for [0.05, 0.07, 0.10]; does NOT
+    fire for [0.10, 0.07, 0.05] or the decaying exp0 example above) — or the
+    streak carries the edge's weight across `saturation_threshold`, which is
+    dangerous even if each individual step is shrinking.
     """
     # Collect per-edge update sequences, ordered by turn_index
     edge_updates: dict[str, list[dict]] = {}
@@ -1331,6 +1342,7 @@ def _compute_saturation_analysis(all_runs: list[dict], saturation_threshold: flo
 
     saturation_flags: list[dict] = []
     runaway_flags: list[dict] = []
+    same_direction_streaks: list[dict] = []
 
     for edge_id, updates in edge_updates.items():
         final_weight = updates[-1]["new_weight"] if updates else None
@@ -1344,28 +1356,61 @@ def _compute_saturation_analysis(all_runs: list[dict], saturation_threshold: flo
                 "delta_sequence": [u["delta"] for u in updates],
             })
 
-        # Runaway: any 3 consecutive deltas are strictly increasing
+        # Find the first 3-consecutive-deltas same-direction streak for this
+        # edge (one detection window per edge is sufficient — matches the
+        # pre-M35 single-flag-per-edge convention). Every same-direction
+        # streak is recorded as informational; only the accelerating or
+        # threshold-crossing ones are also runaway.
         deltas = [u["delta"] for u in updates]
         for i in range(len(deltas) - 2):
             d0, d1, d2 = deltas[i], deltas[i + 1], deltas[i + 2]
-            if d1 > d0 and d2 > d1:
+            same_direction = (d0 > 0 and d1 > 0 and d2 > 0) or (d0 < 0 and d1 < 0 and d2 < 0)
+            if not same_direction:
+                continue
+
+            same_direction_streaks.append({
+                "edge_id": edge_id,
+                "consecutive_deltas": [d0, d1, d2],
+                "starting_at_turn": updates[i]["turn_index"],
+            })
+
+            # Small epsilon tolerance: Beta-posterior deltas that are meant to be
+            # exactly equal can differ by float rounding noise (e.g. 0.65-0.60
+            # vs 0.60-0.55 landing a few ULPs apart), which must not read as
+            # "diminishing" and mask a genuinely constant-magnitude streak.
+            _epsilon = 1e-9
+            non_decreasing_magnitude = (
+                abs(d1) >= abs(d0) - _epsilon and abs(d2) >= abs(d1) - _epsilon
+            )
+            streak_start_weight = updates[i]["old_weight"]
+            streak_end_weight = updates[i + 2]["new_weight"]
+            crosses_saturation = (
+                streak_start_weight <= saturation_threshold < streak_end_weight
+                or streak_start_weight >= saturation_threshold > streak_end_weight
+            )
+            if non_decreasing_magnitude or crosses_saturation:
                 runaway_flags.append({
                     "edge_id": edge_id,
                     "consecutive_deltas": [d0, d1, d2],
                     "starting_at_turn": updates[i]["turn_index"],
+                    "non_decreasing_magnitude": non_decreasing_magnitude,
+                    "crosses_saturation_threshold": crosses_saturation,
                 })
-                break  # one flag per edge is sufficient
+            break  # one detection window per edge is sufficient
 
     logger.info(
-        "experiment_report §6.1 saturation: unique_edges=%d saturation=%d runaway=%d",
-        len(edge_updates), len(saturation_flags), len(runaway_flags),
+        "experiment_report §6.1 saturation: unique_edges=%d saturation=%d "
+        "same_direction_streaks=%d runaway=%d",
+        len(edge_updates), len(saturation_flags), len(same_direction_streaks), len(runaway_flags),
     )
     return {
         "saturation_threshold": saturation_threshold,
         "total_unique_edges": len(edge_updates),
         "saturation_flag_count": len(saturation_flags),
-        "runaway_flag_count": len(runaway_flags),
         "saturation_flags": saturation_flags,
+        "same_direction_streak_count": len(same_direction_streaks),
+        "same_direction_streaks": same_direction_streaks,
+        "runaway_flag_count": len(runaway_flags),
         "runaway_flags": runaway_flags,
     }
 

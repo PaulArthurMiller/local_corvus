@@ -259,7 +259,7 @@ def test_s55_start_end_weight_from_weight_updates():
 
 
 def test_s55_zero_delta_high_traversal_flagged():
-    """An edge traversed > 5 times with zero delta is flagged."""
+    """An edge traversed > 5 times (per activated_edge_ids across runs) with zero delta is flagged."""
     with TempDB() as store:
         eid = _edge_id()
         mu_a = _mu_id()
@@ -267,35 +267,70 @@ def test_s55_zero_delta_high_traversal_flagged():
 
         run(store.create_mu(mu_id=mu_a, source_type="agent_output", raw_content="a"))
         run(store.create_mu(mu_id=mu_b, source_type="agent_output", raw_content="b"))
-        # Insert edge with traversal_count = 6 (above the threshold of 5)
-        db_path = store_module._DB_PATH
-        import aiosqlite
+        run(store.create_edge(source_mu_id=mu_a, target_mu_id=mu_b, weight=0.5, edge_id=eid))
 
-        async def _set_traversal():
-            db = await aiosqlite.connect(str(db_path))
-            now = "2026-01-01T00:00:00+00:00"
-            await db.execute(
-                "INSERT INTO edges (edge_id, source_mu_id, target_mu_id, created_at, weight, direction, traversal_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (eid, mu_a, mu_b, now, 0.5, "forward", 6),
-            )
-            await db.commit()
-            await db.close()
+        # Edge activated in 6 separate runs (turns), never updated in any of them.
+        runs = [
+            {
+                "run_id": _run_id(),
+                "turn_index": i,
+                "activated_edge_ids": [eid],
+                "weight_updates": [],  # no updates → zero delta
+            }
+            for i in range(1, 7)
+        ]
+        result = run(_section_55_edge_weight_deltas(runs, store))
+        print(f"zero_delta_flags: {result['zero_delta_high_traversal_flags']}")
+        assert len(result["zero_delta_high_traversal_flags"]) == 1
+        assert result["zero_delta_high_traversal_flags"][0]["edge_id"] == eid
+        assert result["zero_delta_high_traversal_flags"][0]["traversal_count"] == 6
 
-        run(_set_traversal())
+
+def test_s55_traversal_count_derived_from_activated_edge_ids_not_db_column():
+    """
+    Regression (M35): traversal_count must come from counting the edge's
+    appearances across runs' activated_edge_ids, not from edges.traversal_count.
+    That DB column defaults to 0 and nothing in the codebase ever increments
+    it, so every edge previously reported traversals: 0 regardless of actual
+    traversal count — including edges with updates >= 1, which is impossible
+    since weight updates only ever land on traversed edges.
+    """
+    with TempDB() as store:
+        eid = _edge_id()
+        mu_a = _mu_id()
+        mu_b = _mu_id()
+
+        run(store.create_mu(mu_id=mu_a, source_type="agent_output", raw_content="a"))
+        run(store.create_mu(mu_id=mu_b, source_type="agent_output", raw_content="b"))
+        # edges.traversal_count stays at its DB default (0) — create_edge never sets it.
+        run(store.create_edge(source_mu_id=mu_a, target_mu_id=mu_b, weight=0.5, edge_id=eid))
 
         runs = [
             {
                 "run_id": _run_id(),
                 "turn_index": 1,
                 "activated_edge_ids": [eid],
-                "weight_updates": [],  # no updates → zero delta
+                "weight_updates": [{"edge_id": eid, "old_weight": 0.5, "new_weight": 0.6}],
+            },
+            {
+                "run_id": _run_id(),
+                "turn_index": 2,
+                "activated_edge_ids": [eid],
+                "weight_updates": [],
+            },
+            {
+                "run_id": _run_id(),
+                "turn_index": 3,
+                "activated_edge_ids": [eid],
+                "weight_updates": [],
             },
         ]
         result = run(_section_55_edge_weight_deltas(runs, store))
-        print(f"zero_delta_flags: {result['zero_delta_high_traversal_flags']}")
-        assert len(result["zero_delta_high_traversal_flags"]) == 1
-        assert result["zero_delta_high_traversal_flags"][0]["edge_id"] == eid
+        d = result["deltas"][0]
+        assert d["edge_id"] == eid
+        assert d["update_count_in_series"] == 1
+        # Traversed in all 3 runs, even though only 1 carried a weight update.
+        assert d["traversal_count_total"] == 3
 
 
 # ---------------------------------------------------------------------------

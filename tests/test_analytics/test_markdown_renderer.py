@@ -415,6 +415,46 @@ def test_s61_edge_classification_absent_renders_without_crash():
     assert "Edge Classification" not in md
 
 
+def test_s61_renders_same_direction_streak_count_and_runaway_reasons():
+    """
+    M35: the informational same-direction streak count must render
+    separately from (and never be conflated with) the runaway flag count,
+    and each runaway entry must show WHY it flagged (accelerating |delta|
+    and/or a saturation-threshold crossing) rather than just the raw deltas.
+    """
+    section = _base_s61_section({})
+    section["saturation_analysis"] = {
+        "saturation_threshold": 0.9,
+        "total_unique_edges": 2,
+        "saturation_flag_count": 0,
+        "saturation_flags": [],
+        "same_direction_streak_count": 2,
+        "same_direction_streaks": [
+            {"edge_id": "edge-decay", "consecutive_deltas": [-0.1667, -0.0833, -0.05], "starting_at_turn": 1},
+            {"edge_id": "edge-accel", "consecutive_deltas": [0.05, 0.07, 0.10], "starting_at_turn": 1},
+        ],
+        "runaway_flag_count": 1,
+        "runaway_flags": [
+            {
+                "edge_id": "edge-accel",
+                "consecutive_deltas": [0.05, 0.07, 0.10],
+                "starting_at_turn": 1,
+                "non_decreasing_magnitude": True,
+                "crosses_saturation_threshold": False,
+            },
+        ],
+    }
+    md = _render_s61(section)
+    print(f"§6.1 saturation/runaway section:\n{md}")
+    assert "Same-direction streaks (informational" in md
+    assert "**Same-direction streaks (informational — not anomalies):** 2" in md
+    assert "**Runaway flags:** 1" in md
+    assert "accelerating |delta|" in md
+    # The decaying (non-runaway) edge must not appear in the runaway list.
+    runaway_section = md.split("Runaway-Reinforcement Edges")[-1]
+    assert "edge-decay" not in runaway_section
+
+
 # ---------------------------------------------------------------------------
 # §6.2 Control Shadow — M34 rendering fixes
 # ---------------------------------------------------------------------------

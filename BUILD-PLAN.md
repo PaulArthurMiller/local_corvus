@@ -5709,6 +5709,18 @@ tests (870 baseline -> 900, all passing, no regressions): classification truth t
 run-scoping, cross-domain watch-list membership, per-series ordering,
 backward-compat rendering, and end-to-end store round-trips (including an
 experiment-scoping contamination guard, mirroring the M32/§6.1 pattern).
+**Also fixed in this PR (out of M33's original scope, folded in at Paul's
+request):** the container-absolute stored-report-path bug the live
+verification above surfaced (`_load_stored_series_data()` couldn't read
+exp0's stored series reports from the host because `generated_reports`
+stores the in-container `/app/data/reports/...` path literally). New
+`resolve_report_path()` in `series_report.py` reconstructs the file
+location from the current `_REPORTS_DIR` plus only the stored path's
+basename; used by `_load_stored_series_data()` and by `admin.py`'s two
+report-fetch-by-id endpoints (same bug pattern). 4 more new tests (904
+total). Confirmed live: the full `generate_experiment_report()` now reads
+all 5 of exp0's stored series reports cleanly from the host with no
+"unreadable" warnings.
 Branch: `milestone-33-conversation-edge-classification`.
 Last updated: 2026-08-02
 ```

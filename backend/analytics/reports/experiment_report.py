@@ -14,6 +14,7 @@ All database access goes through memory.store — no direct SQLite here.
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -882,16 +883,72 @@ def _compute_mus_by_probe_outcome(
     return per_probe
 
 
+# M33: prompt_gen.py's generator names every bulk prompt
+# f"{cluster_id}_{i:04d}" (e.g. "cluster_a_0007") — the target cluster is
+# baked into the ID string itself. Reading it back with a regex means the
+# "prompt lineage" signal below works directly off feedback_events.prompt_id
+# (already-stored data) without needing the prompt bank JSON file to still
+# exist on disk at report time.
+_PROMPT_ID_CLUSTER_RE = re.compile(r"^(.+)_\d+$")
+
+
+def _cluster_from_prompt_id(prompt_id: Optional[str]) -> Optional[str]:
+    """Derive a bulk prompt's target cluster from its prompt_id, or None."""
+    if not prompt_id:
+        return None
+    match = _PROMPT_ID_CLUSTER_RE.match(prompt_id)
+    return match.group(1) if match else None
+
+
+def _build_mu_lineage_clusters(
+    all_runs: list[dict],
+    run_prompt_ids: dict[str, str],
+) -> dict[str, str]:
+    """
+    Map conversation MU id -> the cluster of the bulk prompt whose turn
+    created it (M33 "prompt lineage" signal).
+
+    Every MU a turn creates — input, prompt, output, and any tool_call/
+    tool_result MUs — inherits that turn's prompt's target cluster. Turns
+    with no prompt_id (probe turns, dry runs, turns predating M19 Phase 2)
+    contribute nothing here; their MUs stay unresolved unless a seed
+    endpoint classifies the edge instead.
+    """
+    lineage: dict[str, str] = {}
+    for run in all_runs:
+        run_id = run.get("run_id")
+        prompt_id = run_prompt_ids.get(run_id) if run_id else None
+        cluster = _cluster_from_prompt_id(prompt_id)
+        if cluster is None:
+            continue
+        mu_ids = [
+            run.get("input_mu_id"),
+            run.get("prompt_mu_id"),
+            run.get("output_mu_id"),
+            *(run.get("tool_calls") or []),
+        ]
+        for mu_id in mu_ids:
+            if mu_id:
+                lineage[mu_id] = cluster
+    return lineage
+
+
 def _collect_all_weight_updates(
     all_runs: list[dict],
     mu_cluster_info: dict[str, dict],
+    mu_lineage_clusters: Optional[dict[str, str]] = None,
 ) -> list[dict]:
     """
     Collect all weight_updates entries across all runs, enriched with cluster_id
     for source and target MUs.
 
+    `mu_lineage_clusters` (M33) supplies the prompt-lineage cluster for
+    conversation MUs — the seed-adjacency cluster (`mu_cluster_info`) is
+    None for those, so the two signals never collide on the same MU.
+
     Returns a flat list ordered by turn_index.
     """
+    mu_lineage_clusters = mu_lineage_clusters or {}
     collected: list[dict] = []
     for run in all_runs:
         wupdates = run.get("weight_updates") or []
@@ -917,18 +974,90 @@ def _collect_all_weight_updates(
                 "target_mu_id": tgt_id or None,
                 "source_cluster": src_info.get("cluster_id"),
                 "target_cluster": tgt_info.get("cluster_id"),
+                "source_lineage_cluster": mu_lineage_clusters.get(src_id),
+                "target_lineage_cluster": mu_lineage_clusters.get(tgt_id),
                 "turn_index": run.get("turn_index"),
                 "run_id": run.get("run_id"),
+                "series_id": run.get("series_id"),
             })
     return collected
+
+
+EDGE_CLASSES = ("seed_seed", "conv_seed", "conv_conv")
+CLUSTER_RELATIONS = ("same_cluster", "cross_cluster", "mixed", "unresolvable")
+
+# The cross-domain-linkage watch list (M33): a conv_seed edge whose two
+# independent signals (seed adjacency, prompt lineage) disagree, or a
+# conv_conv edge whose two prompt-lineage-derived clusters disagree, is the
+# operational definition of emergent cross-domain learning outside the seed
+# fixture — the phenomenon the classification exists to surface.
+_CROSS_DOMAIN_CELLS = frozenset({("conv_seed", "mixed"), ("conv_conv", "cross_cluster")})
+
+
+def _classify_edge_update(u: dict) -> tuple[str, str]:
+    """
+    Classify one weight update's edge by endpoint provenance (M33).
+
+    Edge class depends only on whether each endpoint is a seed MU (has a
+    cluster_id via seed adjacency) or a conversation MU:
+      - seed_seed: both endpoints are seed MUs
+      - conv_seed: one seed, one conversation
+      - conv_conv: both endpoints are conversation MUs
+
+    Cluster relation compares whichever cluster each endpoint resolves to:
+      - same_cluster:  both endpoints resolve to the same cluster
+      - cross_cluster: both endpoints resolved via the SAME signal type
+                       (seed_seed, or conv_conv with both lineages known)
+                       and disagree
+      - mixed:         conv_seed only — the seed-adjacency cluster and the
+                       conversation endpoint's prompt-lineage cluster are
+                       two independent signals about the same edge, and
+                       they disagree. Kept separate from cross_cluster
+                       because it is evidence the conversation content
+                       itself crossed a cluster boundary, not an artifact
+                       of a single segmentation scheme.
+      - unresolvable:  at least one endpoint has no cluster from either
+                       signal (e.g. a tool_call/tool_result MU whose turn
+                       had no prompt_id, or a probe/dry-run turn) — the
+                       "small residual" the flat unknown-cluster count
+                       should shrink to (was 78% of exp0's updates).
+    """
+    src_seed = u.get("source_cluster")
+    tgt_seed = u.get("target_cluster")
+    src_lineage = u.get("source_lineage_cluster")
+    tgt_lineage = u.get("target_lineage_cluster")
+
+    src_is_seed = src_seed is not None
+    tgt_is_seed = tgt_seed is not None
+
+    if src_is_seed and tgt_is_seed:
+        return "seed_seed", ("same_cluster" if src_seed == tgt_seed else "cross_cluster")
+
+    if src_is_seed or tgt_is_seed:
+        seed_cluster = src_seed if src_is_seed else tgt_seed
+        conv_lineage = tgt_lineage if src_is_seed else src_lineage
+        if conv_lineage is None:
+            return "conv_seed", "unresolvable"
+        return "conv_seed", ("same_cluster" if conv_lineage == seed_cluster else "mixed")
+
+    # Both endpoints are conversation MUs.
+    if src_lineage is None or tgt_lineage is None:
+        return "conv_conv", "unresolvable"
+    return "conv_conv", ("same_cluster" if src_lineage == tgt_lineage else "cross_cluster")
 
 
 def _compute_edge_delta_ledger(all_updates: list[dict]) -> dict:
     """
     Aggregate weight update statistics for the §6.1 edge delta ledger.
 
-    Includes orphan-update check (updates without a feedback_event_id) and
-    within-cluster vs. cross-cluster segmentation.
+    Includes an orphan-update check (updates without a feedback_event_id)
+    and the M33 edge classification — edge class (seed_seed / conv_seed /
+    conv_conv) x cluster relation (same_cluster / cross_cluster / mixed /
+    unresolvable) — which replaces the earlier flat within/cross/unknown
+    counts. Those counted every conv_seed and conv_conv edge alike as
+    "unknown cluster" — 78% of exp0's 225 updates — because they only ever
+    checked seed adjacency; M33 adds the prompt-lineage signal so most of
+    that 78% resolves to a real class instead of a residual.
     """
     increased = sum(1 for u in all_updates if u["delta"] > 0)
     decreased = sum(1 for u in all_updates if u["delta"] < 0)
@@ -938,21 +1067,71 @@ def _compute_edge_delta_ledger(all_updates: list[dict]) -> dict:
 
     orphan_count = sum(1 for u in all_updates if not u.get("feedback_event_id"))
 
-    within_cluster = [
-        u for u in all_updates
-        if u.get("source_cluster") is not None
-        and u.get("source_cluster") == u.get("target_cluster")
+    # Classify once per update; every downstream grouping reads from this.
+    classified = [(u, *_classify_edge_update(u)) for u in all_updates]
+
+    def _cell(updates: list[dict]) -> dict:
+        deltas = [abs(x["delta"]) for x in updates]
+        return {
+            "count": len(updates),
+            "mean_abs_delta": round(sum(deltas) / len(deltas), 6) if deltas else 0.0,
+        }
+
+    classification = {
+        cls: {
+            rel: _cell([u for u, c, r in classified if c == cls and r == rel])
+            for rel in CLUSTER_RELATIONS
+        }
+        for cls in EDGE_CLASSES
+    }
+    totals_by_relation = {
+        rel: sum(classification[cls][rel]["count"] for cls in EDGE_CLASSES)
+        for rel in CLUSTER_RELATIONS
+    }
+
+    cross_domain_watch = [
+        {
+            "edge_id": u["edge_id"],
+            "edge_class": edge_class,
+            "cluster_relation": relation,
+            "delta": u["delta"],
+            "source_cluster": u.get("source_cluster") or u.get("source_lineage_cluster"),
+            "target_cluster": u.get("target_cluster") or u.get("target_lineage_cluster"),
+            "feedback_event_id": u.get("feedback_event_id"),
+        }
+        for u, edge_class, relation in classified
+        if (edge_class, relation) in _CROSS_DOMAIN_CELLS
     ]
-    cross_cluster = [
-        u for u in all_updates
-        if u.get("source_cluster") is not None
-        and u.get("target_cluster") is not None
-        and u.get("source_cluster") != u.get("target_cluster")
+
+    # Per-series longitudinal view (§6.1 spec item 3) — series ordered by
+    # first appearance, matching all_runs' own turn_index ASC ordering.
+    series_order: list[str] = []
+    seen_series: set[str] = set()
+    for u, _c, _r in classified:
+        sid = u.get("series_id")
+        if sid and sid not in seen_series:
+            seen_series.add(sid)
+            series_order.append(sid)
+
+    by_series = [
+        {
+            "series_id": sid,
+            "by_class": {
+                cls: _cell([u for u, c, _r in classified if u.get("series_id") == sid and c == cls])
+                for cls in EDGE_CLASSES
+            },
+        }
+        for sid in series_order
     ]
 
     logger.info(
-        "experiment_report §6.1 edge_delta_ledger: total=%d orphans=%d cross_cluster=%d",
-        len(all_updates), orphan_count, len(cross_cluster),
+        "experiment_report §6.1 edge_delta_ledger: total=%d orphans=%d "
+        "seed_seed=%d conv_seed=%d conv_conv=%d unresolvable=%d",
+        len(all_updates), orphan_count,
+        sum(classification["seed_seed"][r]["count"] for r in CLUSTER_RELATIONS),
+        sum(classification["conv_seed"][r]["count"] for r in CLUSTER_RELATIONS),
+        sum(classification["conv_conv"][r]["count"] for r in CLUSTER_RELATIONS),
+        totals_by_relation["unresolvable"],
     )
     return {
         "total_updates": len(all_updates),
@@ -961,19 +1140,12 @@ def _compute_edge_delta_ledger(all_updates: list[dict]) -> dict:
         "unchanged_count": unchanged,
         "mean_abs_delta": round(mean_abs_delta, 6),
         "orphan_update_count": orphan_count,
-        "within_cluster_count": len(within_cluster),
-        "cross_cluster_count": len(cross_cluster),
-        "unknown_cluster_count": len(all_updates) - len(within_cluster) - len(cross_cluster),
-        "cross_cluster_deltas": [
-            {
-                "edge_id": u["edge_id"],
-                "delta": u["delta"],
-                "source_cluster": u["source_cluster"],
-                "target_cluster": u["target_cluster"],
-                "feedback_event_id": u.get("feedback_event_id"),
-            }
-            for u in cross_cluster
-        ],
+        "edge_classification": {
+            "by_class_relation": classification,
+            "totals_by_relation": totals_by_relation,
+            "cross_domain_watch": cross_domain_watch,
+            "by_series": by_series,
+        },
     }
 
 
@@ -1305,6 +1477,16 @@ async def _section_61_learning_measures(
     mu_info = await store.get_mu_info_batch(list(all_mu_ids))
     logger.info("experiment_report §6.1: %d unique MU IDs looked up", len(mu_info))
 
+    # M33 prompt-lineage signal: run_id -> bulk-turn prompt_id, then the
+    # conversation MUs that turn created inherit the prompt's cluster.
+    run_prompt_ids = await store.get_prompt_ids_by_run(experiment_id)
+    mu_lineage_clusters = _build_mu_lineage_clusters(all_runs, run_prompt_ids)
+    logger.info(
+        "experiment_report §6.1: %d run(s) with a bulk prompt_id, "
+        "%d conversation MU(s) resolved via prompt lineage",
+        len(run_prompt_ids), len(mu_lineage_clusters),
+    )
+
     # --- Sub-sections ---
     state_transitions = _compute_state_transitions(
         probes, results_by_probe, pass_rank_threshold, phenomenon_thresholds
@@ -1313,7 +1495,7 @@ async def _section_61_learning_measures(
         probes, results_by_probe, pass_rank_threshold, mu_info, phenomenon_thresholds
     )
 
-    all_updates = _collect_all_weight_updates(all_runs, mu_info)
+    all_updates = _collect_all_weight_updates(all_runs, mu_info, mu_lineage_clusters)
     edge_delta_ledger = _compute_edge_delta_ledger(all_updates)
 
     cross_series_probe_mus = _compute_cross_series_probe_mus(

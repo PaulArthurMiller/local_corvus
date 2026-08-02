@@ -1382,6 +1382,35 @@ class GraphStore:
                 bucket[verdict] += r["cnt"]
         return counts
 
+    async def get_prompt_ids_by_run(self, experiment_id: str) -> dict[str, str]:
+        """
+        Map run_id -> prompt_id for every feedback event in this experiment
+        that carries a prompt_id (bulk turns only — probe turns never set it).
+
+        Used by M33 conversation-edge classification: a conversation MU's
+        cluster is inherited from the prompt that produced the turn which
+        created it (the "prompt lineage" signal), and this is the run-level
+        join that makes that lookup possible without an N+1 query per run.
+        Scoped by experiment_id via the same analytics join as
+        get_verdict_counts_by_series, so a shared feedback_event_id
+        namespace across experiments can't leak.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT a.run_id AS run_id, fe.prompt_id AS prompt_id
+                FROM feedback_events fe
+                JOIN analytics a ON fe.run_id = a.run_id
+                WHERE a.experiment_id = ? AND fe.prompt_id IS NOT NULL
+                """,
+                (experiment_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+        return {r["run_id"]: r["prompt_id"] for r in rows}
+
     # -------------------------------------------------------------------------
     # M13: Generated reports CRUD
     # -------------------------------------------------------------------------

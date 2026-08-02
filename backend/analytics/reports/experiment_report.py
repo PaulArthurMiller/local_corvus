@@ -32,6 +32,7 @@ from analytics.reports.series_report import (
     _section_56_probe_integrity,
     _section_57_mode3_trigger_count,
     _section_58_num_ctx_pressure,
+    resolve_report_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,9 +99,10 @@ async def _load_stored_series_data(
     # is its newest report and wins.
     for row in rows:
         sid = row.get("series_id")
-        json_path = row.get("json_path")
-        if not sid or sid in stored or not json_path:
+        stored_json_path = row.get("json_path")
+        if not sid or sid in stored or not stored_json_path:
             continue
+        json_path = resolve_report_path(stored_json_path)
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 report = json.load(f)

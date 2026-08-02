@@ -31,6 +31,27 @@ _CONFIG_PATH = os.getenv(
 _REPORTS_DIR = Path(os.getenv("MEMORY_PATH", "/app/data")) / "reports"
 
 
+def resolve_report_path(stored_path: str) -> Path:
+    """
+    Resolve a report file's on-disk location from a `generated_reports.
+    json_path`/`md_path` value, using the *current* `_REPORTS_DIR` rather
+    than trusting the stored string verbatim.
+
+    `write_series_report()`/`write_experiment_report()` store an absolute
+    path built from `MEMORY_PATH` at write time (normally the in-container
+    `/app/data/reports/...`, since the backend always runs there). That
+    string is fine for display (the harness's queue summary shows it
+    as-is, which is correct for an operator looking at the container), but
+    it goes stale for any reader whose own `MEMORY_PATH` differs from what
+    it was at write time — e.g. a host-side script pointed at the bind-
+    mounted `./memory` directory directly, or a redeploy that relocates the
+    volume. Re-joining just the filename onto today's `_REPORTS_DIR` is
+    portable across both without changing what gets written or returned by
+    the generate endpoints.
+    """
+    return _REPORTS_DIR / Path(stored_path).name
+
+
 def _load_config() -> dict:
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)

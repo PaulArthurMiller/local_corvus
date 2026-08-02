@@ -195,10 +195,14 @@ async def _section_53_retrieval_rate_classification(
         total_retrieved += total
 
     intra_rate = total_intra / total_retrieved if total_retrieved > 0 else 0.0
+    seed_rate = total_seed / total_retrieved if total_retrieved > 0 else 0.0
+    cross_rate = total_cross / total_retrieved if total_retrieved > 0 else 0.0
 
     logger.info(
-        "series_report §5.3: total_retrieved=%d intra=%d seed=%d cross=%d unknown=%d rate=%.3f",
-        total_retrieved, total_intra, total_seed, total_cross, total_unknown, intra_rate,
+        "series_report §5.3: total_retrieved=%d intra=%d seed=%d cross=%d unknown=%d "
+        "intra_rate=%.3f seed_rate=%.3f cross_rate=%.3f",
+        total_retrieved, total_intra, total_seed, total_cross, total_unknown,
+        intra_rate, seed_rate, cross_rate,
     )
     return {
         "total_retrieved": total_retrieved,
@@ -207,6 +211,8 @@ async def _section_53_retrieval_rate_classification(
         "cross_series_count": total_cross,
         "unknown_count": total_unknown,
         "intra_series_rate": round(intra_rate, 4),
+        "seed_fixture_rate": round(seed_rate, 4),
+        "cross_series_rate": round(cross_rate, 4),
         "per_turn": per_turn,
     }
 

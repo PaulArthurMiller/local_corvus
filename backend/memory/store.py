@@ -1339,6 +1339,49 @@ class GraphStore:
         events = [dict(r) for r in rows]
         return len(events), events
 
+    async def get_verdict_counts_by_series(
+        self, experiment_id: str
+    ) -> dict[str, dict[str, int]]:
+        """
+        Count up/down/none feedback verdicts per series for an experiment.
+
+        Scoped by experiment_id via the analytics join (M12 experiment_id
+        stamping) and restricted to bulk turns (is_probe_turn=0) — probe
+        turns are never graded on this path (see
+        count_probe_feedback_events_for_series, which counts the reverse
+        case as an integrity violation). Used by M32's verdict-mix report
+        subsection. Returns {series_id: {"up": n, "down": n, "none": n}};
+        a series with no feedback_events rows is simply absent from the
+        returned dict — callers default it to zeros.
+        """
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT a.series_id AS series_id, fe.verdict AS verdict, COUNT(*) AS cnt
+                FROM feedback_events fe
+                JOIN analytics a ON fe.run_id = a.run_id
+                WHERE a.experiment_id = ? AND fe.is_probe_turn = 0
+                GROUP BY a.series_id, fe.verdict
+                """,
+                (experiment_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        counts: dict[str, dict[str, int]] = {}
+        for row in rows:
+            r = dict(row)
+            sid = r["series_id"]
+            verdict = r["verdict"]
+            if sid is None:
+                continue
+            bucket = counts.setdefault(sid, {"up": 0, "down": 0, "none": 0})
+            if verdict in bucket:
+                bucket[verdict] += r["cnt"]
+        return counts
+
     # -------------------------------------------------------------------------
     # M13: Generated reports CRUD
     # -------------------------------------------------------------------------

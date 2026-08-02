@@ -214,9 +214,12 @@ python scripts/run_experiment_harness.py --plan plans/my_plan.json --dry-run --i
 ```
 
 (Temporarily raise `dry_run_n` in the plan or via a copy of it to get enough
-judged bulk turns.) `--interactive` shows each verdict + rationale and lets you
-accept (`a`), override (`o` — recorded with `judge_source: "human"`), or `skip`.
-This is calibration mode, not routine use — never use it on the real run.
+judged bulk turns.) `--interactive` shows the full per-criterion checklist the
+judge graded (each criterion marked `[x]`/`[ ]`), the derived verdict, and its
+rationale, and lets you accept (`a`), override (`o` — recorded with
+`judge_source: "human"`, and `up`/`down`/`none` are all valid override
+targets), or `skip`. This is calibration mode, not routine use — never use it
+on the real run.
 
 ---
 
@@ -315,36 +318,38 @@ Override per-category in the plan's `error_policy`. Some stops are
 **unconditional** and cannot be overridden: budget exceeded, missing probe
 battery, missing judge model, and Docker restart failure.
 
-#### Judge verdicts vs. criterion citations
+#### Judge protocol: the per-criterion checklist (Milestone 31)
 
-`judge_unparseable` covers only failures that leave **no verdict at all**.
-A judge that returns a perfectly good `down` but cites a criterion that
-matches none of the prompt's is handled separately, because that failure mode
-is *directional*: only a `down` carries a citation, so treating it as
-unparseable discarded `down` verdicts at a rate `up` verdicts could never
-suffer — which biases exactly the up-skew a calibration run measures.
+The judge does not assert `up`/`down`/`none` itself. For each of the prompt's
+criteria it returns one `true`/`false` (`criteria_met`, same order as the
+criteria list) plus a `rationale`, and the harness **derives** the verdict
+host-side:
 
-The citation is resolved in three steps, most to least certain:
+- **All criteria met → `up`.**
+- **No criteria met → `down`.** `criterion_triggered` is set to the *first*
+  listed criterion — since every criterion failed, which one is cited is
+  uninformative by construction (the rationale carries the real detail); this
+  just satisfies the backend's non-empty-criterion contract for `down`
+  without inventing or guessing anything.
+- **Some but not all met → `none`.** A partial answer gets no feedback — no
+  weight update — matching the backend's existing "absence of signal is an
+  explicit observation" contract. This replaced an earlier any-criterion-
+  unmet-means-`down` rule that produced a punishment-dominated ~34% up-rate
+  against exp0's fairly demanding criteria; per-criterion grading is also an
+  easier task for a small local judge model than applying a global rule in
+  one shot.
 
-1. Exact match against the prompt's criteria.
-2. Normalized match — case, surrounding whitespace, markdown emphasis
-   (`**X**`), quotes, trailing punctuation, and leading label prefixes
-   (`answer:`, `criterion:`, `expected:`, …) are ignored. The colon is
-   required, so a criterion like `states three` is never truncated.
-3. Single-criterion prompts: a `down` can only mean that one criterion.
+Because the verdict is derived from a fixed-length list of booleans rather
+than a free-text citation, there is no "unresolved criterion" failure mode
+anymore: `judge_unparseable` covers every parse failure (malformed JSON, a
+missing/wrong-length/non-bool `criteria_met`, or an HTTP failure), and every
+one of them is direction-neutral — unlike the pre-Milestone-31 protocol, no
+failure mode can silently delete only `down` verdicts.
 
-Only if all three fail is the citation unresolved, and even then the verdict
-survives:
-
-- **`--interactive`**: you are shown the judge's raw citation and asked which
-  criterion the response failed; the verdict posts normally.
-- **Otherwise**: the verdict is not posted (the backend rejects a `down` with
-  no criterion, and guessing one would corrupt per-criterion analysis), but the
-  turn's `judge_model_verdict` still records `down` in the checkpoint, so the
-  turn stays countable. Never fuzzy-matched.
-
-The resolved value is always the **bank's exact criterion text**, never the
-judge's paraphrase — §6 groups failures by that string.
+The judge's checklist is recorded on the checkpoint (`criteria_met`) whenever
+a model verdict was parsed, whether or not the operator later overrides it —
+free per-criterion data for calibration or cross-domain analysis, not just
+the derived up/down/none.
 
 #### Unparseable judge verdicts in `--interactive`
 
@@ -449,7 +454,8 @@ Lessons from the 2026-07-06 real-model pilot that affect how you set up the
 | `docker restart failed for condition ...` | Docker Desktop down, or compose project broken. Fix and relaunch; resume the checkpoint |
 | Hard stop mid-run on `connectivity` | Backend container died — `docker compose logs backend`. Relaunch and resume |
 | Judge verdicts all `judge_unparseable` | Judge model responding off-format — verify the model tag; check with a dry run `--interactive` |
-| `criterion_unresolved` on several turns | The judge is citing criteria it can't match. Re-run `--interactive` to grade those turns by hand, and check whether the bank's criteria are phrased in a way the judge paraphrases (long criteria, embedded punctuation) |
+| Judge verdicts mostly `none` | Expected under the Milestone 31 checklist protocol whenever answers are frequently partial — check the `criteria_met` checklists on individual turns (`--interactive`) before assuming a bug; a large `none` share was the expected side effect of fixing exp0's punishment-dominated regime |
+| `judge_unparseable` citing a wrong-length or non-bool `criteria_met` | The judge model isn't following the checklist schema (wrong number of booleans, or returning strings/ints instead of `true`/`false`). Verify the model tag with a dry run `--interactive`; a smaller/older model may need a different prompt or model choice |
 | Report `§6.x` numbers look contaminated across attempts/dry runs | Should be impossible post-M21 (`experiment_id` scoping + `_dryrun` suffix). If seen, check for pre-M21 legacy rows in the DB and report it as a bug |
 | All conditions share one `experiment_id` | You ran multi-condition with `--no-docker-restart`. The run is not salvageable — re-run without the flag |
 

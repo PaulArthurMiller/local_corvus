@@ -60,6 +60,12 @@ class TurnCheckpoint(BaseModel):
     # rather than silently looking identical to a full K-repeat pass.
     probe_sample_result_ids: list[str] = Field(default_factory=list)
     probe_sample_repeats_completed: int = 0
+    # Milestone 31 — the judge's per-criterion checklist for this turn (same
+    # order as the prompt's criteria), recorded whenever the judge produced a
+    # parseable verdict. None when no judging happened, the judge was
+    # unparseable, or the verdict came from an operator's manual grade in
+    # --interactive (no per-criterion judgment exists for those).
+    criteria_met: Optional[list[bool]] = None
 
 
 class SeriesReportRecord(BaseModel):

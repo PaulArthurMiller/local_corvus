@@ -808,11 +808,18 @@ def test_missing_prompt_bank_file_hard_stops_before_wipe_graph_is_called(tmp_pat
 
 
 class FakeOllamaJudgeClient:
-    """Duck-typed stand-in for harness.judge.OllamaJudgeClient."""
+    """
+    Duck-typed stand-in for harness.judge.OllamaJudgeClient.
 
-    def __init__(self, verdicts=None, available=True, chat_json_fn=None):
-        self._verdicts = list(verdicts) if verdicts is not None else None
-        self._default_verdict = {"verdict": "up", "rationale": "ok", "criterion_triggered": None}
+    Milestone 31: the judge returns a per-criterion checklist (criteria_met,
+    a list of booleans) rather than a verdict/criterion_triggered pair — the
+    runner (via judge_turn/_parse_verdict) derives up/down/none host-side.
+    `checklists` entries are dicts of {"criteria_met": [...], "rationale": ...}.
+    """
+
+    def __init__(self, checklists=None, available=True, chat_json_fn=None):
+        self._checklists = list(checklists) if checklists is not None else None
+        self._default_checklist = {"criteria_met": [True], "rationale": "ok"}
         self.available = available
         self.calls = []
         if chat_json_fn is not None:
@@ -820,7 +827,7 @@ class FakeOllamaJudgeClient:
 
     def chat_json(self, model, temperature, prompt):
         self.calls.append(prompt)
-        v = self._verdicts.pop(0) if self._verdicts else self._default_verdict
+        v = self._checklists.pop(0) if self._checklists else self._default_checklist
         return json.dumps(v)
 
     def model_available(self, model):
@@ -848,7 +855,7 @@ def test_learned_condition_up_verdict_applies_weight_update(tmp_path):
         conditions=["learned"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+    judge_client = FakeOllamaJudgeClient(checklists=[{"criteria_met": [True], "rationale": "good"}])
 
     outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
 
@@ -859,6 +866,8 @@ def test_learned_condition_up_verdict_applies_weight_update(tmp_path):
     assert client.verdict_calls[0]["judge_source"] == "model:gemma4:e4b"
     assert outcome.checkpoint.turns[0].verdict == "up"
     assert outcome.checkpoint.turns[0].feedback_event_id == "fbevent-0"
+    # Milestone 31 — the per-criterion checklist is recorded for free.
+    assert outcome.checkpoint.turns[0].criteria_met == [True]
 
 
 def test_static_condition_up_verdict_does_not_apply_weight_update(tmp_path):
@@ -868,7 +877,7 @@ def test_static_condition_up_verdict_does_not_apply_weight_update(tmp_path):
         conditions=["static_weight"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+    judge_client = FakeOllamaJudgeClient(checklists=[{"criteria_met": [True], "rationale": "good"}])
 
     execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
 
@@ -876,19 +885,49 @@ def test_static_condition_up_verdict_does_not_apply_weight_update(tmp_path):
     assert client.verdict_calls[0]["condition_label"] == "static_weight"
 
 
-def test_learned_condition_none_verdict_does_not_apply_weight_update(tmp_path):
-    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+def test_learned_condition_mixed_criteria_derives_none_and_does_not_apply_weight_update(tmp_path):
+    """Milestone 31: a partial answer (some criteria met, some not) abstains
+    — recorded as 'none', no weight update — rather than the old any-unmet
+    -> 'down' rule that produced exp0's punishment-dominated regime."""
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", criteria=["mentions X", "mentions Y"],
+    )
     plan = _plan(
         dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
         conditions=["learned"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "none", "rationale": "ambiguous", "criterion_triggered": None}])
+    judge_client = FakeOllamaJudgeClient(checklists=[{"criteria_met": [True, False], "rationale": "partial"}])
 
-    execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
 
     assert client.verdict_calls[0]["apply_weight_update"] is False
     assert client.verdict_calls[0]["verdict"] == "none"
+    assert client.verdict_calls[0]["criterion_triggered"] is None
+    assert outcome.checkpoint.turns[0].criteria_met == [True, False]
+
+
+def test_learned_condition_down_verdict_cites_the_first_criterion(tmp_path):
+    """Milestone 31: 'down' is derived only when every criterion fails; the
+    citation is positional (criteria[0]) since which one is 'the' failure is
+    uninformative by construction once all have failed."""
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", criteria=["mentions X", "mentions Y"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[{"criteria_met": [False, False], "rationale": "missed both"}])
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert client.verdict_calls[0]["apply_weight_update"] is True
+    assert client.verdict_calls[0]["verdict"] == "down"
+    assert client.verdict_calls[0]["criterion_triggered"] == "mentions X"
+    assert outcome.checkpoint.turns[0].judge_model_verdict == "down"
+    assert outcome.checkpoint.turns[0].criteria_met == [False, False]
 
 
 def test_no_judge_client_means_no_judging_happens(tmp_path):
@@ -939,9 +978,13 @@ def test_judge_unparseable_hard_stop_when_policy_overridden(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Unparseable-judge recovery in --interactive, and unresolved-criterion downs.
-# Both close the same hole found in the exp0 calibration run: a judge problem
-# silently destroying a verdict the harness had enough information to keep.
+# Unparseable-judge recovery in --interactive. Closes the hole found in the
+# exp0 calibration run: a judge problem silently destroying a verdict the
+# harness had enough information to keep. (The old "unresolved criterion
+# citation" recovery paths this section used to also cover no longer exist
+# under Milestone 31's checklist protocol — a derived "down" always carries a
+# valid criterion, so there is nothing left to resolve or ask the operator
+# about on that path.)
 # ---------------------------------------------------------------------------
 
 
@@ -1015,11 +1058,12 @@ def test_judge_unparseable_hard_stop_is_not_softened_by_interactive(tmp_path):
     assert outcome.status == "aborted"
 
 
-def test_normalized_criterion_citation_posts_the_bank_criterion(tmp_path):
+def test_derived_down_posts_the_first_criterion_without_any_citation_resolution(tmp_path):
     """
-    exp0 regression: the judge cited the criterion without its "answer: "
-    prefix and the whole 'down' was discarded. It must now post, carrying the
-    bank's exact criterion text.
+    Milestone 31 regression for the exp0 citation-loss bug's root cause: since
+    the judge no longer free-text cites a criterion at all (it grades a
+    checklist), there is nothing to normalize or fail to resolve — a 'down'
+    always posts a valid criterion straight from the bank.
     """
     criteria = ["answer: local temporal readings/local time", "mentions UTC"]
     bank_path = _write_bank_with_criteria(tmp_path / "banks", criteria=criteria)
@@ -1028,10 +1072,9 @@ def test_normalized_criterion_citation_posts_the_bank_criterion(tmp_path):
         conditions=["learned"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[{
-        "verdict": "down", "rationale": "wrong",
-        "criterion_triggered": "local temporal readings/local time",
-    }])
+    judge_client = FakeOllamaJudgeClient(
+        checklists=[{"criteria_met": [False, False], "rationale": "wrong on both counts"}]
+    )
 
     outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
 
@@ -1041,65 +1084,37 @@ def test_normalized_criterion_citation_posts_the_bank_criterion(tmp_path):
     assert outcome.checkpoint.turns[0].verdict == "down"
 
 
-def test_unresolved_down_keeps_the_verdict_direction_in_the_checkpoint(tmp_path):
+def test_interactive_can_override_a_model_up_to_none(tmp_path):
     """
-    Non-interactive fallback: the verdict can't be posted (the backend 422s on
-    a 'down' with no criterion, and guessing one would corrupt the per-criterion
-    analysis), but the judge's direction is still recorded so the turn stays
-    visible to calibration analysis instead of vanishing.
+    Milestone 31 item 2: 'none' must be an explicit operator choice in the
+    override menu, not just a value the judge itself can derive — partial
+    answers are now an expected, common verdict, not an edge case.
     """
-    bank_path = _write_bank_with_criteria(
-        tmp_path / "banks", criteria=["mentions X", "mentions Y"],
-    )
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
     plan = _plan(
         dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
         conditions=["learned"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[
-        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
-        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
-    ])
-
-    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
-
-    turn = outcome.checkpoint.turns[0]
-    assert outcome.status == "complete"
-    assert client.verdict_calls == []
-    assert turn.verdict is None  # nothing was posted
-    assert turn.judge_model_verdict == "down"  # but the direction survives
-    assert "criterion_unresolved" in turn.judge_error
-
-
-def test_interactive_accepting_an_unresolved_down_asks_for_the_criterion(tmp_path):
-    bank_path = _write_bank_with_criteria(
-        tmp_path / "banks", criteria=["mentions X", "mentions Y"],
-    )
-    plan = _plan(
-        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
-        conditions=["learned"],
-    )
-    client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[
-        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
-        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
-    ])
-    scripted = iter(["a", "2"])  # accept the judge's "down", name criterion #2
+    judge_client = FakeOllamaJudgeClient(checklists=[{"criteria_met": [True], "rationale": "good"}])
+    scripted = iter(["o", "none"])
 
     outcome = execute_run(
         plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
         interactive=True, resume_input_fn=lambda _p: next(scripted),
     )
 
-    assert len(client.verdict_calls) == 1
-    assert client.verdict_calls[0]["verdict"] == "down"
-    assert client.verdict_calls[0]["criterion_triggered"] == "mentions Y"
-    # The direction was the judge's, so the source stays the model.
-    assert client.verdict_calls[0]["judge_source"] == "model:gemma4:e4b"
-    assert outcome.checkpoint.turns[0].judge_model_verdict == "down"
+    assert client.verdict_calls[0]["verdict"] == "none"
+    assert client.verdict_calls[0]["judge_source"] == "human"
+    assert client.verdict_calls[0]["criterion_triggered"] is None
+    assert client.verdict_calls[0]["apply_weight_update"] is False
+    assert outcome.checkpoint.turns[0].judge_model_verdict == "up"  # what the judge said
 
 
-def test_interactive_warns_when_the_judges_citation_matched_nothing(tmp_path):
+def test_interactive_calibration_context_shows_the_per_criterion_checklist(tmp_path):
+    """The operator calibrates against the same checklist the judge graded,
+    not just the derived up/down/none — each criterion shown with its own
+    [x]/[ ] mark."""
     bank_path = _write_bank_with_criteria(
         tmp_path / "banks", criteria=["mentions X", "mentions Y"],
     )
@@ -1108,19 +1123,19 @@ def test_interactive_warns_when_the_judges_citation_matched_nothing(tmp_path):
         conditions=["learned"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[
-        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
-        {"verdict": "down", "rationale": "no", "criterion_triggered": "invented criterion"},
-    ])
+    judge_client = FakeOllamaJudgeClient(
+        checklists=[{"criteria_met": [True, False], "rationale": "half right"}]
+    )
     printed = []
-    scripted = iter(["a", "1"])
 
     execute_run(
         plan, client, tmp_path, print_fn=printed.append, judge_client=judge_client,
-        interactive=True, resume_input_fn=lambda _p: next(scripted),
+        interactive=True, resume_input_fn=lambda _p: "a",
     )
 
-    assert "invented criterion" in "\n".join(printed)
+    output = "\n".join(printed)
+    assert "[x] mentions X" in output
+    assert "[ ] mentions Y" in output
 
 
 def test_interactive_override_sets_human_judge_source(tmp_path):
@@ -1130,7 +1145,7 @@ def test_interactive_override_sets_human_judge_source(tmp_path):
         conditions=["learned"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+    judge_client = FakeOllamaJudgeClient(checklists=[{"criteria_met": [True], "rationale": "good"}])
 
     scripted_answers = iter(["o", "down"])
 
@@ -1159,7 +1174,7 @@ def test_interactive_shows_prompt_criteria_and_response_before_asking(tmp_path):
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+        checklists=[{"criteria_met": [True], "rationale": "good"}]
     )
     printed = []
 
@@ -1190,7 +1205,7 @@ def test_interactive_reprompts_on_unrecognized_answer(tmp_path):
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+        checklists=[{"criteria_met": [True], "rationale": "good"}]
     )
     # "down" is a valid verdict but NOT a valid answer to the accept/override
     # question — the exact typo that previously auto-accepted "up".
@@ -1220,7 +1235,7 @@ def test_interactive_override_to_down_supplies_criterion_triggered(tmp_path):
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+        checklists=[{"criteria_met": [True], "rationale": "good"}]
     )
     scripted = iter(["o", "down"])  # single-criterion bank needs no criterion pick
 
@@ -1247,7 +1262,7 @@ def test_interactive_override_records_judge_model_verdict_for_calibration(tmp_pa
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+        checklists=[{"criteria_met": [True], "rationale": "good"}]
     )
     scripted = iter(["o", "down"])
 
@@ -1284,7 +1299,7 @@ def test_multi_criteria_down_override_asks_which_criterion_failed(tmp_path):
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}]
+        checklists=[{"criteria_met": [True, True], "rationale": "good"}]
     )
     scripted = iter(["o", "down", "2"])
 
@@ -1297,25 +1312,6 @@ def test_multi_criteria_down_override_asks_which_criterion_failed(tmp_path):
     assert client.verdict_calls[0]["criterion_triggered"] == "states the fixed order is mandatory"
 
 
-def test_non_interactive_model_down_verdict_keeps_its_own_criterion(tmp_path):
-    """Behavior-preserving guard: outside interactive mode the model's own
-    criterion_triggered is still what gets posted."""
-    bank_path = _write_bank_with_criteria(tmp_path / "banks")
-    plan = _plan(
-        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
-        conditions=["learned"],
-    )
-    client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "down", "rationale": "missed it", "criterion_triggered": "mentions X"}]
-    )
-
-    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
-
-    assert client.verdict_calls[0]["criterion_triggered"] == "mentions X"
-    assert outcome.checkpoint.turns[0].judge_model_verdict == "down"
-
-
 def test_interactive_accept_keeps_model_judge_source(tmp_path):
     bank_path = _write_bank_with_criteria(tmp_path / "banks")
     plan = _plan(
@@ -1323,7 +1319,7 @@ def test_interactive_accept_keeps_model_judge_source(tmp_path):
         conditions=["learned"],
     )
     client = FakeBackendClient()
-    judge_client = FakeOllamaJudgeClient(verdicts=[{"verdict": "up", "rationale": "good", "criterion_triggered": None}])
+    judge_client = FakeOllamaJudgeClient(checklists=[{"criteria_met": [True], "rationale": "good"}])
 
     def scripted_accept(_prompt):
         return "a"
@@ -1646,7 +1642,7 @@ def test_budget_cap_exceeded_by_projected_judge_costs_hard_stops_before_any_turn
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "up", "rationale": "ok", "criterion_triggered": None} for _ in range(3)]
+        checklists=[{"criteria_met": [True], "rationale": "ok"} for _ in range(3)]
     )
 
     outcome = execute_run(
@@ -1667,7 +1663,7 @@ def test_budget_cap_within_estimate_allows_judge_calls_to_proceed(tmp_path):
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(
-        verdicts=[{"verdict": "up", "rationale": "ok", "criterion_triggered": None} for _ in range(2)]
+        checklists=[{"criteria_met": [True], "rationale": "ok"} for _ in range(2)]
     )
 
     outcome = execute_run(

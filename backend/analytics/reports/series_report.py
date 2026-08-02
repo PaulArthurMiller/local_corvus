@@ -260,13 +260,28 @@ async def _section_55_edge_weight_deltas(
 
     Computes start/end weight for each edge activated in this series.
     Flags zero-delta edges traversed > 5 times.
+
+    Traversal counts are derived by counting each edge_id's appearances
+    across runs' `activated_edge_ids` (the per-turn retrieval-funnel output,
+    already stored on the analytics row) — NOT from `edges.traversal_count`.
+    That DB column defaults to 0 and nothing in the codebase ever increments
+    it (`update_edge_weight()`/`update_edge_counters()` only touch
+    weight/alpha/beta), so every edge reported `traversals: 0` regardless of
+    how many times it was actually traversed, including edges with
+    `updates >= 1` — impossible, since `process_verdict_for_learning()`
+    credits only edges on the traversal path. `retrieval.py` confirms
+    `activated_edge_ids` IS `traversed_edge_ids`, so counting occurrences
+    here is the correct source (M35).
     """
-    # Collect all edge IDs activated in this series
+    # Collect all edge IDs activated in this series, with per-edge traversal counts
     activated_edge_ids: set[str] = set()
+    traversal_count_map: dict[str, int] = defaultdict(int)
     for run in runs:
         eids = run.get("activated_edge_ids") or []
         if isinstance(eids, list):
             activated_edge_ids.update(eids)
+            for eid in eids:
+                traversal_count_map[eid] += 1
 
     # Collect weight updates from each run, keyed by edge_id
     # {edge_id: [{turn_index, old_weight, new_weight}]}
@@ -290,7 +305,6 @@ async def _section_55_edge_weight_deltas(
     edge_id_list = list(activated_edge_ids)
     current_edges = await store.get_edges_by_ids(edge_id_list)
     current_weight_map = {e["edge_id"]: e["weight"] for e in current_edges}
-    traversal_count_map = {e["edge_id"]: e.get("traversal_count", 0) for e in current_edges}
 
     deltas: list[dict] = []
     zero_delta_high_traversal: list[dict] = []

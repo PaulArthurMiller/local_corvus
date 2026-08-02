@@ -424,6 +424,8 @@ def _render_s61(section: dict) -> str:
         f"**Saturation threshold:** {sat.get('saturation_threshold', 0.9)}  ",
         f"**Unique edges tracked:** {sat.get('total_unique_edges', 0)}  ",
         f"**Saturation flags:** {sat.get('saturation_flag_count', 0)}  ",
+        f"**Same-direction streaks (informational — not anomalies):** "
+        f"{sat.get('same_direction_streak_count', 0)}  ",
         f"**Runaway flags:** {sat.get('runaway_flag_count', 0)}\n",
     ]
     sat_flags = sat.get("saturation_flags") or []
@@ -443,10 +445,16 @@ def _render_s61(section: dict) -> str:
     if runaway_flags:
         lines.append("\n#### Runaway-Reinforcement Edges\n")
         for rf in runaway_flags:
+            reasons = []
+            if rf.get("non_decreasing_magnitude"):
+                reasons.append("accelerating |delta|")
+            if rf.get("crosses_saturation_threshold"):
+                reasons.append("crosses saturation threshold")
+            reason_str = ", ".join(reasons) or "—"
             lines.append(
                 f"- `{str(rf.get('edge_id', ''))[:8]}…` "
                 f"consecutive deltas: {rf.get('consecutive_deltas')} "
-                f"(from turn {rf.get('starting_at_turn', '—')})"
+                f"(from turn {rf.get('starting_at_turn', '—')}) — {reason_str}"
             )
 
     return "\n".join(lines)

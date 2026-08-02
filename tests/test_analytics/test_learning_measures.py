@@ -686,6 +686,51 @@ class TestSaturationAnalysis:
         assert result["saturation_flag_count"] == 0
         assert result["runaway_flag_count"] == 0
         assert result["total_unique_edges"] == 0
+        assert result["same_direction_streak_count"] == 0
+
+    def test_decaying_down_streak_is_not_runaway_but_is_informational(self):
+        """
+        Regression (M35): exp0's exact sequence — a Beta(1,1) posterior-mean
+        down-streak with SHRINKING magnitude each step (1/2 -> 1/3 -> 1/4 ->
+        1/5, deltas -0.1667/-0.0833/-0.05) — is ordinary convergence, not
+        runaway reinforcement. The old heuristic (any 3 consecutive
+        algebraically-increasing deltas) flagged this because -0.05 > -0.0833
+        > -0.1667 numerically, even though |delta| is shrinking. It must not
+        appear in runaway_flags, but it IS a same-direction streak and must
+        still be counted in the informational statistic.
+        """
+        weights = [1 / 2, 1 / 3, 1 / 4, 1 / 5]
+        runs = self._make_runs_for_edge(weights)
+        result = _compute_saturation_analysis(runs, saturation_threshold=0.9)
+        assert result["runaway_flag_count"] == 0
+        assert result["same_direction_streak_count"] == 1
+        assert result["same_direction_streaks"][0]["edge_id"] == "edge-1"
+
+    def test_non_decreasing_magnitude_streak_flagged_as_runaway(self):
+        """A same-direction streak with non-decreasing |delta| (not just strictly
+        increasing) is still genuinely accelerating and must flag."""
+        # Deltas: 0.05, 0.05, 0.05 — constant magnitude, not diminishing.
+        weights = [0.5, 0.55, 0.60, 0.65]
+        runs = self._make_runs_for_edge(weights)
+        result = _compute_saturation_analysis(runs, saturation_threshold=0.9)
+        assert result["runaway_flag_count"] == 1
+        assert result["runaway_flags"][0]["non_decreasing_magnitude"] is True
+
+    def test_threshold_crossing_streak_flagged_despite_shrinking_magnitude(self):
+        """
+        A same-direction streak whose |delta| is shrinking (would not flag on
+        magnitude alone) must still flag as runaway if it carries the edge's
+        weight across saturation_threshold during the streak — dangerous
+        regardless of whether each step is individually diminishing.
+        """
+        # Deltas: 0.07, 0.03, 0.02 (shrinking) but weight crosses 0.9 (0.85 -> 0.97).
+        weights = [0.85, 0.92, 0.95, 0.97]
+        runs = self._make_runs_for_edge(weights)
+        result = _compute_saturation_analysis(runs, saturation_threshold=0.9)
+        assert result["runaway_flag_count"] == 1
+        flag = result["runaway_flags"][0]
+        assert flag["non_decreasing_magnitude"] is False
+        assert flag["crosses_saturation_threshold"] is True
 
 
 # ---------------------------------------------------------------------------

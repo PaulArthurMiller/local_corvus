@@ -31,6 +31,7 @@ from analytics.reports.experiment_report import (
     STATISTICAL_CAVEAT_TEXT,
     _aggregate_failures,
     _aggregate_retrieval_rates,
+    _aggregate_verdict_mix,
     _check_graph_wipe,
     _check_probe_replay_index,
     _check_seed_provenance,
@@ -225,6 +226,132 @@ def test_aggregate_retrieval_rates_mean_and_range():
     assert "series-B" in result["outlier_series"]
     # series-A at 0.8 is 0.2 above the mean → should also be flagged
     assert "series-A" in result["outlier_series"]
+
+
+def test_aggregate_retrieval_rates_seed_share_drift():
+    """M32: seed_share/cross_share pass through from series_report.py's new
+    fields, and the first-vs-last-series drift statement is computed."""
+    series_data = {
+        "s0": {
+            "sections": {
+                "s5_3": {
+                    "intra_series_rate": 0.5,
+                    "total_retrieved": 10,
+                    "intra_series_count": 5,
+                    "seed_fixture_count": 4,
+                    "cross_series_count": 1,
+                    "unknown_count": 0,
+                    "seed_fixture_rate": 0.4,
+                    "cross_series_rate": 0.1,
+                },
+            },
+            "run_count": 5,
+        },
+        "s1": {
+            "sections": {
+                "s5_3": {
+                    "intra_series_rate": 0.7,
+                    "total_retrieved": 10,
+                    "intra_series_count": 7,
+                    "seed_fixture_count": 1,
+                    "cross_series_count": 2,
+                    "unknown_count": 0,
+                    "seed_fixture_rate": 0.1,
+                    "cross_series_rate": 0.2,
+                },
+            },
+            "run_count": 5,
+        },
+    }
+
+    result = _aggregate_retrieval_rates(series_data)
+    print(f"per_series={result['per_series']} drift={result['seed_share_drift']}")
+    assert result["per_series"][0]["seed_share"] == 0.4
+    assert result["per_series"][1]["seed_share"] == 0.1
+    assert result["seed_share_drift"] == {
+        "first_series_id": "s0",
+        "first_seed_share": 0.4,
+        "last_series_id": "s1",
+        "last_seed_share": 0.1,
+        "delta": round(0.1 - 0.4, 4),
+    }
+
+
+def test_aggregate_retrieval_rates_missing_fields_backward_compat():
+    """M32: a stored series report written before M32 lacks seed_fixture_rate
+    / cross_series_rate — seed_share/cross_share must be None (not crash,
+    not recomputed from raw counts) and the drift statement must be None."""
+    series_data = {
+        "s0": {
+            "sections": {
+                "s5_3": {
+                    "intra_series_rate": 0.5,
+                    "total_retrieved": 10,
+                    "intra_series_count": 5,
+                    "seed_fixture_count": 4,
+                    "cross_series_count": 1,
+                    "unknown_count": 0,
+                    # no seed_fixture_rate / cross_series_rate keys — pre-M32 shape
+                },
+            },
+            "run_count": 5,
+        },
+        "s1": {
+            "sections": {
+                "s5_3": {
+                    "intra_series_rate": 0.7,
+                    "total_retrieved": 10,
+                    "intra_series_count": 7,
+                    "seed_fixture_count": 1,
+                    "cross_series_count": 2,
+                    "unknown_count": 0,
+                },
+            },
+            "run_count": 5,
+        },
+    }
+
+    result = _aggregate_retrieval_rates(series_data)
+    print(f"per_series={result['per_series']} drift={result['seed_share_drift']}")
+    assert result["per_series"][0]["seed_share"] is None
+    assert result["per_series"][0]["cross_share"] is None
+    assert result["seed_share_drift"] is None
+
+
+# ---------------------------------------------------------------------------
+# Verdict mix (M32)
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_verdict_mix_up_rate_excludes_none():
+    """up_rate = up / (up + down); 'none' verdicts don't affect it."""
+    verdict_counts = {
+        "s0": {"up": 3, "down": 1, "none": 4},
+        "s1": {"up": 1, "down": 3, "none": 0},
+    }
+    result = _aggregate_verdict_mix(["s0", "s1"], verdict_counts)
+    print(f"verdict_mix={result}")
+    assert result["per_series"][0] == {
+        "series_id": "s0", "up": 3, "down": 1, "none": 4, "up_rate": 0.75,
+    }
+    assert result["per_series"][1] == {
+        "series_id": "s1", "up": 1, "down": 3, "none": 0, "up_rate": 0.25,
+    }
+    assert result["total_up"] == 4
+    assert result["total_down"] == 4
+    assert result["total_none"] == 4
+    assert result["overall_up_rate"] == 0.5
+
+
+def test_aggregate_verdict_mix_series_with_no_feedback_renders_none_up_rate():
+    """A series absent from verdict_counts (all-probe series, dry run) gets
+    zero counts and up_rate=None — distinct from a genuine 0% up-rate."""
+    result = _aggregate_verdict_mix(["s0"], {})
+    print(f"verdict_mix={result}")
+    assert result["per_series"] == [
+        {"series_id": "s0", "up": 0, "down": 0, "none": 0, "up_rate": None},
+    ]
+    assert result["overall_up_rate"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +692,101 @@ def test_statistical_caveat_in_markdown():
     assert "statistical significance the sample size cannot support" in md
 
 
+def _base_series_summary_for_markdown(s53_overrides: dict) -> dict:
+    """Minimal series_summary dict, with an overridable §5.3 aggregation
+    block, for markdown-rendering tests below."""
+    return {
+        "series_ids": ["s0", "s1"],
+        "series_count": 2,
+        "total_run_count": 0,
+        "s5_1_failure_aggregation": {
+            "total_failed_turn_count": 0, "total_ghost_mu_incidents": 0,
+            "per_series": [], "all_ghost_incidents": [],
+        },
+        "verdict_mix": {
+            "total_up": 0, "total_down": 0, "total_none": 0,
+            "overall_up_rate": None, "per_series": [],
+        },
+        "s5_3_retrieval_rate_aggregation": s53_overrides,
+        "s5_5_edge_weight_aggregation": {
+            "total_activated_edge_count": 0, "edges_increased": 0,
+            "edges_decreased": 0, "edges_unchanged": 0, "mean_abs_delta": 0.0,
+            "per_series": [],
+        },
+        "s5_6_probe_integrity_aggregation": {
+            "status": "PASS", "total_violations": 0, "hard_fail_series": [],
+        },
+        "s5_7_mode3_aggregation": {
+            "total_mode3_mu_count": 0, "increasing_pressure_flag": False, "per_series": [],
+        },
+        "s5_8_ctx_pressure_aggregation": {
+            "increasing_pressure_flag": False, "per_series": [],
+        },
+    }
+
+
+def _base_report_for_markdown(s53_overrides: dict) -> dict:
+    return {
+        "report_id": "r1", "report_type": "experiment", "experiment_id": "exp-1",
+        "condition_label": "learning", "generated_at": "2026-01-01T00:00:00+00:00",
+        "series_summary": _base_series_summary_for_markdown(s53_overrides),
+        "integrity_checks": {
+            "overall_pass": True,
+            "seed_fixture_provenance": {"status": "PASS", "fixture_versions_found": [], "unregistered_versions": [], "hash_mismatch": False},
+            "graph_wipe_verification": {"status": "SKIP", "pre_experiment_foreign_mu_count": 0, "earliest_run_timestamp": None},
+            "probe_replay_index_normalization": {"status": "PASS", "condition_label": None, "session_indices_found": [], "gaps": []},
+        },
+        "learning_measures": None,
+        "control_shadow": None,
+    }
+
+
+def test_s53_experiment_markdown_renders_seed_share_and_drift():
+    """M32: the experiment-report §5.3 table gains seed_share/cross_share
+    columns and a drift statement line when the aggregation has them."""
+    report = _base_report_for_markdown({
+        "mean_intra_series_rate": 0.5, "min_intra_series_rate": 0.4,
+        "max_intra_series_rate": 0.6, "outlier_series": [], "outlier_threshold": 0.15,
+        "seed_share_drift": {
+            "first_series_id": "s0", "first_seed_share": 0.42,
+            "last_series_id": "s1", "last_seed_share": 0.14,
+            "delta": round(0.14 - 0.42, 4),
+        },
+        "per_series": [
+            {"series_id": "s0", "intra_series_rate": 0.5, "total_retrieved": 10,
+             "intra_series_count": 5, "seed_fixture_count": 4, "cross_series_count": 1,
+             "unknown_count": 0, "seed_share": 0.42, "cross_share": 0.1},
+            {"series_id": "s1", "intra_series_rate": 0.5, "total_retrieved": 10,
+             "intra_series_count": 5, "seed_fixture_count": 1, "cross_series_count": 4,
+             "unknown_count": 0, "seed_share": 0.14, "cross_share": 0.4},
+        ],
+    })
+    md = render_experiment_report_markdown(report)
+    print(f"§5.3 experiment markdown:\n{md}")
+    assert "Seed-share drift" in md
+    assert "42.0%" in md
+    assert "14.0%" in md
+
+
+def test_s53_experiment_markdown_missing_seed_share_renders_em_dash():
+    """M32: a pre-M32 stored series report (no seed_share/cross_share)
+    renders '—' in those columns rather than raising or fabricating a value."""
+    report = _base_report_for_markdown({
+        "mean_intra_series_rate": 0.5, "min_intra_series_rate": 0.5,
+        "max_intra_series_rate": 0.5, "outlier_series": [], "outlier_threshold": 0.15,
+        "seed_share_drift": None,
+        "per_series": [
+            {"series_id": "s0", "intra_series_rate": 0.5, "total_retrieved": 10,
+             "intra_series_count": 5, "seed_fixture_count": 4, "cross_series_count": 1,
+             "unknown_count": 0, "seed_share": None, "cross_share": None},
+        ],
+    })
+    md = render_experiment_report_markdown(report)
+    print(f"§5.3 backward-compat markdown:\n{md}")
+    assert "Seed-share drift" not in md
+    assert "| s0 | 50.0% | — | — | 10 |" in md
+
+
 # ---------------------------------------------------------------------------
 # JSON structure — placeholder keys
 # ---------------------------------------------------------------------------
@@ -622,6 +844,106 @@ def test_json_structure_complete():
     assert not missing
     assert report["report_type"] == "experiment"
     assert report["experiment_id"] == "exp-structure"
+
+
+# ---------------------------------------------------------------------------
+# Verdict mix (M32) — end-to-end through generate_experiment_report
+# ---------------------------------------------------------------------------
+
+
+def test_generate_experiment_report_includes_verdict_mix():
+    """verdict_mix is wired into series_summary and reflects real
+    feedback_events rows for this experiment's series, in series order."""
+    with TempDB() as store:
+        experiment_id = "exp-verdict-e2e"
+        run_a = _run_id()
+        run_b = _run_id()
+        run(store.insert_run(_make_minimal_run(
+            run_id=run_a, series_id="series-A", experiment_id=experiment_id, turn_index=1,
+        )))
+        run(store.insert_run(_make_minimal_run(
+            run_id=run_b, series_id="series-B", experiment_id=experiment_id, turn_index=2,
+        )))
+        run(store.insert_feedback_event({
+            "feedback_event_id": str(uuid.uuid4()), "run_id": run_a,
+            "verdict": "up", "is_probe_turn": False,
+        }))
+        run(store.insert_feedback_event({
+            "feedback_event_id": str(uuid.uuid4()), "run_id": run_b,
+            "verdict": "down", "is_probe_turn": False,
+        }))
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report(experiment_id, store))
+
+        verdict_mix = report["series_summary"]["verdict_mix"]
+        print(f"verdict_mix={verdict_mix}")
+        assert verdict_mix["total_up"] == 1
+        assert verdict_mix["total_down"] == 1
+        assert verdict_mix["overall_up_rate"] == 0.5
+        by_series = {p["series_id"]: p for p in verdict_mix["per_series"]}
+        assert by_series["series-A"]["up"] == 1
+        assert by_series["series-B"]["down"] == 1
+
+
+def test_generate_experiment_report_verdict_mix_scoped_to_experiment_id():
+    """A different experiment's feedback events must not leak into this
+    experiment's verdict-mix counts, even under a shared series_id."""
+    with TempDB() as store:
+        run_own = _run_id()
+        run_other = _run_id()
+        run(store.insert_run(_make_minimal_run(
+            run_id=run_own, series_id="series-A", experiment_id="exp-own", turn_index=1,
+        )))
+        run(store.insert_run(_make_minimal_run(
+            run_id=run_other, series_id="series-A", experiment_id="exp-other", turn_index=1,
+        )))
+        run(store.insert_feedback_event({
+            "feedback_event_id": str(uuid.uuid4()), "run_id": run_own,
+            "verdict": "up", "is_probe_turn": False,
+        }))
+        run(store.insert_feedback_event({
+            "feedback_event_id": str(uuid.uuid4()), "run_id": run_other,
+            "verdict": "down", "is_probe_turn": False,
+        }))
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report("exp-own", store))
+
+        verdict_mix = report["series_summary"]["verdict_mix"]
+        print(f"scoped verdict_mix={verdict_mix}")
+        assert verdict_mix["total_up"] == 1
+        assert verdict_mix["total_down"] == 0
+
+
+def test_generate_experiment_report_verdict_mix_empty_series_renders_cleanly():
+    """An experiment with runs but no feedback_events (e.g. an all-probe
+    series or a dry run) produces a zero-filled verdict_mix, not a crash."""
+    with TempDB() as store:
+        experiment_id = "exp-no-feedback"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id, turn_index=1,
+        )))
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report(experiment_id, store))
+
+        verdict_mix = report["series_summary"]["verdict_mix"]
+        print(f"empty verdict_mix={verdict_mix}")
+        assert verdict_mix["total_up"] == 0
+        assert verdict_mix["overall_up_rate"] is None
+        assert verdict_mix["per_series"] == [
+            {"series_id": "series-A", "up": 0, "down": 0, "none": 0, "up_rate": None},
+        ]
+
+        md = render_experiment_report_markdown(report)
+        assert "Verdict Mix" in md
 
 
 # ---------------------------------------------------------------------------

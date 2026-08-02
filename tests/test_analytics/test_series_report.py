@@ -183,6 +183,10 @@ def test_s53_classification_all_categories():
         assert result["cross_series_count"] == 1
         assert result["unknown_count"] == 1
         assert result["intra_series_rate"] == round(1 / 4, 4)
+        # M32: seed_fixture_rate / cross_series_rate mirror the same
+        # denominator (total_retrieved) as intra_series_rate.
+        assert result["seed_fixture_rate"] == round(1 / 4, 4)
+        assert result["cross_series_rate"] == round(1 / 4, 4)
 
 
 def test_s53_rate_computation_all_intra():
@@ -205,6 +209,9 @@ def test_s53_rate_computation_all_intra():
         print(f"intra_rate={result['intra_series_rate']}")
         assert result["intra_series_rate"] == 1.0
         assert result["cross_series_count"] == 0
+        # M32: with no seed/cross MUs retrieved, both new rates are 0.0.
+        assert result["seed_fixture_rate"] == 0.0
+        assert result["cross_series_rate"] == 0.0
 
 
 # ---------------------------------------------------------------------------

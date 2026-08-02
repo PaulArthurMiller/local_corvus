@@ -172,12 +172,74 @@ def _aggregate_failures(series_data: dict[str, dict]) -> dict:
     }
 
 
+def _aggregate_verdict_mix(
+    series_ids: list[str], verdict_counts: dict[str, dict[str, int]]
+) -> dict:
+    """
+    Verdict-mix subsection — per-series up/down/none counts and up-rate.
+
+    up_rate = up / (up + down); `none` (partial-answer/abstain) verdicts
+    are excluded from the denominator since they carry no learning signal
+    to be right or wrong about. A series with no bulk-turn feedback at all
+    (all-probe series, dry runs) reports up_rate=None rather than 0.0 —
+    "no data" and "0% up" are different findings.
+    """
+    per_series = []
+    total_up = total_down = total_none = 0
+
+    for sid in series_ids:
+        counts = verdict_counts.get(sid) or {"up": 0, "down": 0, "none": 0}
+        up = counts.get("up", 0)
+        down = counts.get("down", 0)
+        none_ct = counts.get("none", 0)
+        graded = up + down
+        up_rate = round(up / graded, 4) if graded > 0 else None
+        per_series.append(
+            {
+                "series_id": sid,
+                "up": up,
+                "down": down,
+                "none": none_ct,
+                "up_rate": up_rate,
+            }
+        )
+        total_up += up
+        total_down += down
+        total_none += none_ct
+
+    total_graded = total_up + total_down
+    overall_up_rate = round(total_up / total_graded, 4) if total_graded > 0 else None
+
+    logger.info(
+        "experiment_report verdict_mix: total_up=%d total_down=%d total_none=%d overall_up_rate=%s",
+        total_up, total_down, total_none, overall_up_rate,
+    )
+    return {
+        "total_up": total_up,
+        "total_down": total_down,
+        "total_none": total_none,
+        "overall_up_rate": overall_up_rate,
+        "per_series": per_series,
+    }
+
+
 def _aggregate_retrieval_rates(series_data: dict[str, dict]) -> dict:
     """
     §5.3 aggregation — mean intra-series rate ± range; flag outlier series.
 
     A series is flagged if its rate differs from the mean by more than 0.15
     (15 percentage points) — a heuristic threshold for a notable outlier.
+
+    M32: also carries seed_share/cross_share (the M32 seed_fixture_rate /
+    cross_series_rate fields from series_report.py's §5.3) through to the
+    per-series rows, plus a first-series-vs-last-series seed_share drift
+    statement — MU-accumulation drift (seed-fixture MUs losing retrieval
+    share to accumulated conversation MUs across series) is a permanent,
+    measured-not-controlled feature of the system (Paul's call, 2026-08-02).
+    Stored series reports written before M32 don't have these two fields;
+    `seed_share`/`cross_share` are None in that case rather than recomputed
+    from the raw counts, so the aggregation never silently disagrees with
+    what series_report.py itself would report for the same series.
     """
     rates = []
     per_series = []
@@ -195,6 +257,8 @@ def _aggregate_retrieval_rates(series_data: dict[str, dict]) -> dict:
                 "seed_fixture_count": s.get("seed_fixture_count", 0),
                 "cross_series_count": s.get("cross_series_count", 0),
                 "unknown_count": s.get("unknown_count", 0),
+                "seed_share": s.get("seed_fixture_rate"),
+                "cross_share": s.get("cross_series_rate"),
             }
         )
 
@@ -209,9 +273,25 @@ def _aggregate_retrieval_rates(series_data: dict[str, dict]) -> dict:
         if abs(p["intra_series_rate"] - mean_rate) > outlier_threshold
     ]
 
+    # Seed-share drift: first series vs. last series, in series order. Only
+    # meaningful with >= 2 series and only computed when both endpoints
+    # carry the M32 field — a pre-M32 stored report at either end means the
+    # drift can't be honestly stated, not that it's zero.
+    seed_share_drift = None
+    if len(per_series) >= 2:
+        first, last = per_series[0], per_series[-1]
+        if first["seed_share"] is not None and last["seed_share"] is not None:
+            seed_share_drift = {
+                "first_series_id": first["series_id"],
+                "first_seed_share": first["seed_share"],
+                "last_series_id": last["series_id"],
+                "last_seed_share": last["seed_share"],
+                "delta": round(last["seed_share"] - first["seed_share"], 4),
+            }
+
     logger.info(
-        "experiment_report §5.3: mean_rate=%.3f min=%.3f max=%.3f outliers=%s",
-        mean_rate, min_rate, max_rate, outlier_series,
+        "experiment_report §5.3: mean_rate=%.3f min=%.3f max=%.3f outliers=%s seed_share_drift=%s",
+        mean_rate, min_rate, max_rate, outlier_series, seed_share_drift,
     )
     return {
         "mean_intra_series_rate": round(mean_rate, 4),
@@ -219,6 +299,7 @@ def _aggregate_retrieval_rates(series_data: dict[str, dict]) -> dict:
         "max_intra_series_rate": round(max_rate, 4),
         "outlier_series": outlier_series,
         "outlier_threshold": outlier_threshold,
+        "seed_share_drift": seed_share_drift,
         "per_series": per_series,
     }
 
@@ -1353,12 +1434,18 @@ async def generate_experiment_report(
             },
         }
 
+    # Verdict mix (M32) — read live from feedback_events rather than stored
+    # series reports, since no pre-M32 series report captured verdict data.
+    verdict_counts = await store.get_verdict_counts_by_series(experiment_id)
+    verdict_mix = _aggregate_verdict_mix(series_ids, verdict_counts)
+
     # §5 aggregation
     series_summary = {
         "series_ids": series_ids,
         "series_count": len(series_ids),
         "total_run_count": sum(d["run_count"] for d in series_data.values()),
         "s5_1_failure_aggregation": _aggregate_failures(series_data),
+        "verdict_mix": verdict_mix,
         "s5_3_retrieval_rate_aggregation": _aggregate_retrieval_rates(series_data),
         "s5_5_edge_weight_aggregation": _aggregate_edge_deltas(series_data),
         "s5_6_probe_integrity_aggregation": _aggregate_probe_integrity(series_data),

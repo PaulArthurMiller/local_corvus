@@ -5369,6 +5369,9 @@ backend change, the exp0b re-baseline run itself.
 
 ## Environment-Drift Metrics: Seed-Share + Verdict Mix — Milestone 32
 
+**Status: COMPLETE (2026-08-02).** See the Milestone 32 trailer entry near
+the end of this file for what was built.
+
 **Goal:** promote the two measures that had to be computed by hand in the
 2026-08-02 analysis into first-class report sections, because
 MU-accumulation drift is a permanent feature of the system (Paul's call:
@@ -5630,7 +5633,32 @@ directly rather than pre-selecting a clean-fail `trained_spokes`, but does
 not itself make that decision — that's still Paul's call once the PR is
 merged and a real dual-mode battery has been run through a real
 experiment.
-Last updated: 2026-07-26
+
+**Milestone 32 (Environment-Drift Metrics: Seed-Share + Verdict Mix) is
+COMPLETE**, the first of the "Experiment-0 Follow-Ups — Milestones 31–35"
+built (see that section above for the source finding). Report-layer only,
+per the milestone's explicit scope — no retrieval, wiping, or MU-creation
+change. `series_report.py`'s §5.3 gained `seed_fixture_rate`/
+`cross_series_rate` (same denominator as the existing `intra_series_rate`).
+`experiment_report.py`'s §5.3 aggregation carries those through per-series
+as `seed_share`/`cross_share` and adds a first-series-vs-last-series
+`seed_share_drift` statement; a pre-M32 stored series report (missing the
+new fields) renders `seed_share`/`cross_share` as `None` → `—` in Markdown
+rather than being recomputed from raw counts, so the aggregation can never
+silently disagree with what series_report.py itself would report. New
+verdict-mix subsection (`_aggregate_verdict_mix()` + `store.
+get_verdict_counts_by_series()`) reads bulk-turn `feedback_events` live
+(scoped by `experiment_id` via the `analytics` join, `is_probe_turn=0`,
+per-series `up`/`down`/`none` counts and `up_rate = up/(up+down)`), placed
+near §5.1 in both JSON and Markdown — exactly the table hand-built from the
+console log during the 2026-08-02 exp0 analysis. 14 new tests (872 total,
+all passing, no regressions): rate arithmetic, aggregation carry-through,
+missing-field backward compat (both the per-series values and the drift
+statement), verdict-mix scoping (a contaminating `experiment_id` does not
+leak, mirroring the existing §6.1 scoping-test pattern), and zero-feedback
+series (all-probe/dry-run) rendering cleanly with `up_rate=None` rather
+than a fabricated `0.0`. Branch: `milestone-32-seed-share-verdict-mix`.
+Last updated: 2026-08-02
 ```
 
 **Milestone 1:** Complete — branch `milestone-1-foundation`, PR merged to main.

@@ -79,7 +79,9 @@ def _render_s53(section: dict) -> str:
         f"**Seed fixture:** {section.get('seed_fixture_count', 0)}  ",
         f"**Cross-series:** {section.get('cross_series_count', 0)}  ",
         f"**Unknown (pre-M12):** {section.get('unknown_count', 0)}  ",
-        f"**Intra-series rate:** {section.get('intra_series_rate', 0.0):.1%}\n",
+        f"**Intra-series rate:** {section.get('intra_series_rate', 0.0):.1%}  ",
+        f"**Seed-fixture rate:** {section.get('seed_fixture_rate', 0.0):.1%}  ",
+        f"**Cross-series rate:** {section.get('cross_series_rate', 0.0):.1%}\n",
         "| turn | total | intra | seed | cross | unknown |",
         "|---|---|---|---|---|---|",
     ]
@@ -477,6 +479,7 @@ def render_experiment_report_markdown(report: dict) -> str:
 
     # §5 Aggregated Series Summary
     s51 = ss.get("s5_1_failure_aggregation") or {}
+    verdict_mix = ss.get("verdict_mix") or {}
     s53 = ss.get("s5_3_retrieval_rate_aggregation") or {}
     s55 = ss.get("s5_5_edge_weight_aggregation") or {}
     s56 = ss.get("s5_6_probe_integrity_aggregation") or {}
@@ -501,6 +504,25 @@ def render_experiment_report_markdown(report: dict) -> str:
             f"| {p.get('series_id', '—')} | {p.get('failed_turn_count', 0)} | {p.get('ghost_mu_count', 0)} |"
         )
 
+    # Verdict Mix (M32) — bulk-turn judge verdicts, per series
+    overall_up_rate = verdict_mix.get("overall_up_rate")
+    series_section_lines += [
+        "\n### Verdict Mix (Bulk Turns)\n",
+        f"**Total up:** {verdict_mix.get('total_up', 0)} | "
+        f"**Total down:** {verdict_mix.get('total_down', 0)} | "
+        f"**Total none:** {verdict_mix.get('total_none', 0)}  ",
+        f"**Overall up-rate (up / (up+down)):** "
+        f"{f'{overall_up_rate:.1%}' if overall_up_rate is not None else '—'}\n",
+        "| series | up | down | none | up_rate |",
+        "|---|---|---|---|---|",
+    ]
+    for p in verdict_mix.get("per_series") or []:
+        p_rate = p.get("up_rate")
+        series_section_lines.append(
+            f"| {p.get('series_id', '—')} | {p.get('up', 0)} | {p.get('down', 0)} "
+            f"| {p.get('none', 0)} | {f'{p_rate:.1%}' if p_rate is not None else '—'} |"
+        )
+
     # §5.3
     outliers = s53.get("outlier_series") or []
     series_section_lines += [
@@ -510,13 +532,26 @@ def render_experiment_report_markdown(report: dict) -> str:
     ]
     if outliers:
         series_section_lines.append(f"**⚠ Outlier series (>15% from mean):** {', '.join(outliers)}")
+    drift = s53.get("seed_share_drift")
+    if drift:
+        series_section_lines.append(
+            f"**Seed-share drift ({drift.get('first_series_id', '—')} → "
+            f"{drift.get('last_series_id', '—')}):** "
+            f"{drift.get('first_seed_share', 0.0):.1%} → {drift.get('last_seed_share', 0.0):.1%} "
+            f"({drift.get('delta', 0.0):+.1%})"
+        )
     series_section_lines += [
-        "\n| series | intra_rate | total_retrieved |",
-        "|---|---|---|",
+        "\n| series | intra_rate | seed_share | cross_share | total_retrieved |",
+        "|---|---|---|---|---|",
     ]
     for p in s53.get("per_series") or []:
+        seed_share = p.get("seed_share")
+        cross_share = p.get("cross_share")
         series_section_lines.append(
-            f"| {p.get('series_id', '—')} | {p.get('intra_series_rate', 0.0):.1%} | {p.get('total_retrieved', 0)} |"
+            f"| {p.get('series_id', '—')} | {p.get('intra_series_rate', 0.0):.1%} "
+            f"| {f'{seed_share:.1%}' if seed_share is not None else '—'} "
+            f"| {f'{cross_share:.1%}' if cross_share is not None else '—'} "
+            f"| {p.get('total_retrieved', 0)} |"
         )
 
     # §5.5

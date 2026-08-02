@@ -29,7 +29,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"
 import memory.store as store_module
 from memory.store import GraphStore
 from analytics.reports.experiment_report import (
+    _build_mu_lineage_clusters,
+    _classify_edge_update,
     _classify_probe_outcome,
+    _cluster_from_prompt_id,
     _compute_bridge_mu_analysis,
     _compute_cross_series_probe_mus,
     _compute_edge_delta_ledger,
@@ -343,6 +346,11 @@ class TestEdgeDeltaLedger:
         feedback_event_id="fe-1",
         source_mu_id=None,
         target_mu_id=None,
+        source_cluster=None,
+        target_cluster=None,
+        source_lineage_cluster=None,
+        target_lineage_cluster=None,
+        series_id="series-A",
     ) -> dict:
         return {
             "edge_id": edge_id,
@@ -352,10 +360,13 @@ class TestEdgeDeltaLedger:
             "feedback_event_id": feedback_event_id,
             "source_mu_id": source_mu_id or _mu_id(),
             "target_mu_id": target_mu_id or _mu_id(),
-            "source_cluster": None,
-            "target_cluster": None,
+            "source_cluster": source_cluster,
+            "target_cluster": target_cluster,
+            "source_lineage_cluster": source_lineage_cluster,
+            "target_lineage_cluster": target_lineage_cluster,
             "turn_index": 1,
             "run_id": _run_id(),
+            "series_id": series_id,
         }
 
     def test_orphan_count_zero_for_fully_linked(self):
@@ -375,20 +386,6 @@ class TestEdgeDeltaLedger:
         ledger = _compute_edge_delta_ledger(updates)
         assert ledger["orphan_update_count"] == 2
 
-    def test_cross_cluster_segmentation(self):
-        updates = [
-            # within-cluster
-            {**self._make_update(), "source_cluster": "cluster_a", "target_cluster": "cluster_a"},
-            # cross-cluster
-            {**self._make_update(), "source_cluster": "cluster_a", "target_cluster": "cluster_b"},
-            # unknown (no cluster info)
-            {**self._make_update(), "source_cluster": None, "target_cluster": None},
-        ]
-        ledger = _compute_edge_delta_ledger(updates)
-        assert ledger["within_cluster_count"] == 1
-        assert ledger["cross_cluster_count"] == 1
-        assert ledger["unknown_cluster_count"] == 1
-
     def test_increased_decreased_unchanged_counts(self):
         updates = [
             {**self._make_update(old_weight=0.5, new_weight=0.6)},   # increased
@@ -401,6 +398,234 @@ class TestEdgeDeltaLedger:
         assert ledger["increased_count"] == 1
         assert ledger["decreased_count"] == 1
         assert ledger["unchanged_count"] == 1
+
+    def test_edge_classification_grid_counts(self):
+        """M33: seed_seed/conv_seed/conv_conv x same/cross/mixed/unresolvable."""
+        updates = [
+            self._make_update(source_cluster="cluster_a", target_cluster="cluster_a"),
+            self._make_update(source_cluster="cluster_a", target_cluster="cluster_b"),
+            self._make_update(
+                source_cluster="cluster_a", target_lineage_cluster="cluster_a",
+            ),
+            self._make_update(
+                source_cluster="cluster_a", target_lineage_cluster="cluster_b",
+            ),
+            self._make_update(source_cluster="cluster_a"),  # conv endpoint unresolved
+            self._make_update(
+                source_lineage_cluster="cluster_a", target_lineage_cluster="cluster_a",
+            ),
+            self._make_update(
+                source_lineage_cluster="cluster_a", target_lineage_cluster="cluster_b",
+            ),
+            self._make_update(),  # both endpoints fully unresolved
+        ]
+        ledger = _compute_edge_delta_ledger(updates)
+        grid = ledger["edge_classification"]["by_class_relation"]
+        assert grid["seed_seed"]["same_cluster"]["count"] == 1
+        assert grid["seed_seed"]["cross_cluster"]["count"] == 1
+        assert grid["conv_seed"]["same_cluster"]["count"] == 1
+        assert grid["conv_seed"]["mixed"]["count"] == 1
+        assert grid["conv_seed"]["unresolvable"]["count"] == 1
+        assert grid["conv_conv"]["same_cluster"]["count"] == 1
+        assert grid["conv_conv"]["cross_cluster"]["count"] == 1
+        assert grid["conv_conv"]["unresolvable"]["count"] == 1
+
+        totals = ledger["edge_classification"]["totals_by_relation"]
+        assert totals["same_cluster"] == 3
+        assert totals["cross_cluster"] == 2
+        assert totals["mixed"] == 1
+        assert totals["unresolvable"] == 2
+
+    def test_cross_domain_watch_list_contains_mixed_and_cross_conv(self):
+        """The watch list is conv_seed/mixed + conv_conv/cross_cluster only —
+        the operational definition of emergent cross-domain linkage."""
+        mixed_update = self._make_update(
+            edge_id="edge-mixed",
+            source_cluster="cluster_a", target_lineage_cluster="cluster_b",
+        )
+        cross_conv_update = self._make_update(
+            edge_id="edge-cross-conv",
+            source_lineage_cluster="cluster_a", target_lineage_cluster="cluster_b",
+        )
+        same_cluster_update = self._make_update(
+            edge_id="edge-same",
+            source_cluster="cluster_a", target_cluster="cluster_a",
+        )
+        ledger = _compute_edge_delta_ledger(
+            [mixed_update, cross_conv_update, same_cluster_update]
+        )
+        watch = ledger["edge_classification"]["cross_domain_watch"]
+        watch_ids = {w["edge_id"] for w in watch}
+        assert watch_ids == {"edge-mixed", "edge-cross-conv"}
+
+    def test_edge_classification_by_series_longitudinal(self):
+        """Per-series breakdown, ordered by first appearance."""
+        updates = [
+            self._make_update(
+                series_id="series-0",
+                source_cluster="cluster_a", target_cluster="cluster_a",
+            ),
+            self._make_update(
+                series_id="series-1",
+                source_lineage_cluster="cluster_a", target_lineage_cluster="cluster_b",
+            ),
+            self._make_update(
+                series_id="series-0",
+                source_lineage_cluster="cluster_a", target_lineage_cluster="cluster_a",
+            ),
+        ]
+        ledger = _compute_edge_delta_ledger(updates)
+        by_series = ledger["edge_classification"]["by_series"]
+        assert [s["series_id"] for s in by_series] == ["series-0", "series-1"]
+        assert by_series[0]["by_class"]["seed_seed"]["count"] == 1
+        assert by_series[0]["by_class"]["conv_conv"]["count"] == 1
+        assert by_series[1]["by_class"]["conv_conv"]["count"] == 1
+
+    def test_no_old_flat_keys_in_ledger_output(self):
+        """The old within/cross/unknown_cluster_count keys are gone (M33
+        replaces them with edge_classification)."""
+        ledger = _compute_edge_delta_ledger([self._make_update()])
+        assert "within_cluster_count" not in ledger
+        assert "cross_cluster_count" not in ledger
+        assert "unknown_cluster_count" not in ledger
+        assert "cross_cluster_deltas" not in ledger
+
+
+# ---------------------------------------------------------------------------
+# M33 — _classify_edge_update
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyEdgeUpdate:
+    def _u(self, **kwargs) -> dict:
+        base = {
+            "source_cluster": None, "target_cluster": None,
+            "source_lineage_cluster": None, "target_lineage_cluster": None,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_seed_seed_same_cluster(self):
+        u = self._u(source_cluster="cluster_a", target_cluster="cluster_a")
+        assert _classify_edge_update(u) == ("seed_seed", "same_cluster")
+
+    def test_seed_seed_cross_cluster(self):
+        u = self._u(source_cluster="cluster_a", target_cluster="cluster_b")
+        assert _classify_edge_update(u) == ("seed_seed", "cross_cluster")
+
+    def test_conv_seed_same_cluster_source_is_seed(self):
+        u = self._u(source_cluster="cluster_a", target_lineage_cluster="cluster_a")
+        assert _classify_edge_update(u) == ("conv_seed", "same_cluster")
+
+    def test_conv_seed_same_cluster_target_is_seed(self):
+        u = self._u(target_cluster="cluster_a", source_lineage_cluster="cluster_a")
+        assert _classify_edge_update(u) == ("conv_seed", "same_cluster")
+
+    def test_conv_seed_mixed_on_disagreement(self):
+        u = self._u(source_cluster="cluster_a", target_lineage_cluster="cluster_b")
+        assert _classify_edge_update(u) == ("conv_seed", "mixed")
+
+    def test_conv_seed_unresolvable_when_lineage_missing(self):
+        """Missing prompt_id on the conv endpoint still yields edge_class
+        conv_seed via the seed-adjacency fallback — just an unresolvable
+        relation, not a fully-unknown edge."""
+        u = self._u(source_cluster="cluster_a")
+        assert _classify_edge_update(u) == ("conv_seed", "unresolvable")
+
+    def test_conv_conv_same_cluster(self):
+        u = self._u(source_lineage_cluster="cluster_a", target_lineage_cluster="cluster_a")
+        assert _classify_edge_update(u) == ("conv_conv", "same_cluster")
+
+    def test_conv_conv_cross_cluster(self):
+        u = self._u(source_lineage_cluster="cluster_a", target_lineage_cluster="cluster_b")
+        assert _classify_edge_update(u) == ("conv_conv", "cross_cluster")
+
+    def test_conv_conv_unresolvable_when_one_lineage_missing(self):
+        u = self._u(source_lineage_cluster="cluster_a")
+        assert _classify_edge_update(u) == ("conv_conv", "unresolvable")
+
+    def test_conv_conv_unresolvable_when_both_missing(self):
+        """The residual bucket: no prompt_id and no seed endpoint at all."""
+        u = self._u()
+        assert _classify_edge_update(u) == ("conv_conv", "unresolvable")
+
+
+# ---------------------------------------------------------------------------
+# M33 — _cluster_from_prompt_id / _build_mu_lineage_clusters
+# ---------------------------------------------------------------------------
+
+
+class TestPromptLineage:
+    def test_cluster_from_prompt_id_strips_numeric_suffix(self):
+        assert _cluster_from_prompt_id("cluster_a_0007") == "cluster_a"
+
+    def test_cluster_from_prompt_id_none_for_none(self):
+        assert _cluster_from_prompt_id(None) is None
+
+    def test_cluster_from_prompt_id_none_for_empty_string(self):
+        assert _cluster_from_prompt_id("") is None
+
+    def test_cluster_from_prompt_id_none_when_no_numeric_suffix(self):
+        assert _cluster_from_prompt_id("cluster_a") is None
+
+    def test_build_mu_lineage_covers_input_prompt_output_and_tool_mus(self):
+        run = _make_run_with_updates([], turn_index=1)
+        run["tool_calls"] = ["tc-mu-1", "tr-mu-1"]
+        run_prompt_ids = {run["run_id"]: "cluster_c_0002"}
+        lineage = _build_mu_lineage_clusters([run], run_prompt_ids)
+        assert lineage[run["input_mu_id"]] == "cluster_c"
+        assert lineage[run["prompt_mu_id"]] == "cluster_c"
+        assert lineage[run["output_mu_id"]] == "cluster_c"
+        assert lineage["tc-mu-1"] == "cluster_c"
+        assert lineage["tr-mu-1"] == "cluster_c"
+
+    def test_build_mu_lineage_skips_runs_with_no_prompt_id(self):
+        """Probe turns and dry runs never carry a bulk prompt_id — their
+        MUs contribute nothing to the lineage map."""
+        run = _make_run_with_updates([], turn_index=1)
+        lineage = _build_mu_lineage_clusters([run], run_prompt_ids={})
+        assert lineage == {}
+
+
+# ---------------------------------------------------------------------------
+# M33 — _collect_all_weight_updates carries the lineage signal through
+# ---------------------------------------------------------------------------
+
+
+class TestCollectAllWeightUpdatesLineage:
+    def test_lineage_cluster_populated_for_conversation_mu(self):
+        src_mu = _mu_id()
+        tgt_mu = _mu_id()
+        run = _make_run_with_updates(
+            weight_updates=[
+                {
+                    "edge_id": "edge-1", "old_weight": 0.5, "new_weight": 0.6,
+                    "feedback_event_id": "fe-1",
+                    "source_mu_id": src_mu, "target_mu_id": tgt_mu,
+                }
+            ],
+        )
+        mu_info = {}  # neither MU is a seed MU
+        mu_lineage = {src_mu: "cluster_a", tgt_mu: "cluster_b"}
+        updates = _collect_all_weight_updates([run], mu_info, mu_lineage)
+        assert updates[0]["source_lineage_cluster"] == "cluster_a"
+        assert updates[0]["target_lineage_cluster"] == "cluster_b"
+        assert updates[0]["source_cluster"] is None
+        assert updates[0]["target_cluster"] is None
+
+    def test_lineage_defaults_to_none_when_not_supplied(self):
+        run = _make_run_with_updates(
+            weight_updates=[
+                {
+                    "edge_id": "edge-1", "old_weight": 0.5, "new_weight": 0.6,
+                    "feedback_event_id": "fe-1",
+                    "source_mu_id": _mu_id(), "target_mu_id": _mu_id(),
+                }
+            ],
+        )
+        updates = _collect_all_weight_updates([run], mu_cluster_info={})
+        assert updates[0]["source_lineage_cluster"] is None
+        assert updates[0]["target_lineage_cluster"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -1329,6 +1329,153 @@ def test_sample_pass_rates_empty_when_no_sample_rows():
 
 
 # ---------------------------------------------------------------------------
+# M33 — §6.1 edge classification, end-to-end through the real store
+# ---------------------------------------------------------------------------
+
+
+def _make_run_with_conv_mu(
+    run_id: str, conv_mu: str, series_id: str, experiment_id: str,
+    weight_updates: list,
+) -> dict:
+    """A minimal run dict whose input_mu_id is pinned to conv_mu, so a
+    weight update referencing conv_mu resolves through the run's own
+    prompt-lineage signal."""
+    run_dict = _make_minimal_run(
+        run_id=run_id, series_id=series_id, experiment_id=experiment_id,
+        turn_index=1, weight_updates=weight_updates,
+    )
+    run_dict["input_mu_id"] = conv_mu
+    return run_dict
+
+
+def test_edge_classification_resolves_conv_seed_same_cluster_via_prompt_lineage():
+    """A weight update between a seed MU (cluster_a) and the conversation MU
+    a bulk turn created is conv_seed/same_cluster once that turn's
+    feedback_event carries a prompt_id landing on the same cluster."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "exp-m33"
+        seed_mu = _mu_id()
+        run(store.create_mu(
+            mu_id=seed_mu, source_type="user_input", raw_content="seed",
+            series_id="seed:v3", cluster_id="cluster_a",
+        ))
+
+        run_id = _run_id()
+        conv_mu = _mu_id()
+        run(store.insert_run(_make_run_with_conv_mu(
+            run_id, conv_mu, "series-A", experiment_id,
+            weight_updates=[{
+                "edge_id": "edge-1", "old_weight": 0.5, "new_weight": 0.6,
+                "feedback_event_id": "fe-1",
+                "source_mu_id": seed_mu, "target_mu_id": conv_mu,
+            }],
+        )))
+        run(store.insert_feedback_event({
+            "feedback_event_id": "fe-1",
+            "run_id": run_id,
+            "verdict": "up",
+            "is_probe_turn": False,
+            "prompt_id": "cluster_a_0005",
+        }))
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        grid = measures["edge_delta_ledger"]["edge_classification"]["by_class_relation"]
+        print(f"edge classification grid: {grid}")
+        assert grid["conv_seed"]["same_cluster"]["count"] == 1
+
+
+def test_edge_classification_conv_seed_mixed_when_lineage_disagrees():
+    """Same setup, but the bulk turn's prompt targets a different cluster
+    than the seed endpoint — a real cross-domain link, classified 'mixed'."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        experiment_id = "exp-m33-mixed"
+        seed_mu = _mu_id()
+        run(store.create_mu(
+            mu_id=seed_mu, source_type="user_input", raw_content="seed",
+            series_id="seed:v3", cluster_id="cluster_a",
+        ))
+
+        run_id = _run_id()
+        conv_mu = _mu_id()
+        run(store.insert_run(_make_run_with_conv_mu(
+            run_id, conv_mu, "series-A", experiment_id,
+            weight_updates=[{
+                "edge_id": "edge-1", "old_weight": 0.5, "new_weight": 0.6,
+                "feedback_event_id": "fe-1",
+                "source_mu_id": seed_mu, "target_mu_id": conv_mu,
+            }],
+        )))
+        run(store.insert_feedback_event({
+            "feedback_event_id": "fe-1",
+            "run_id": run_id,
+            "verdict": "up",
+            "is_probe_turn": False,
+            "prompt_id": "cluster_b_0005",
+        }))
+
+        measures = run(_section_61_learning_measures(experiment_id, store, {"reporting": {}}))
+
+        grid = measures["edge_delta_ledger"]["edge_classification"]["by_class_relation"]
+        print(f"edge classification grid: {grid}")
+        assert grid["conv_seed"]["mixed"]["count"] == 1
+        watch = measures["edge_delta_ledger"]["edge_classification"]["cross_domain_watch"]
+        assert any(w["edge_id"] == "edge-1" for w in watch)
+
+
+def test_edge_classification_lineage_scoped_to_experiment_id():
+    """A prompt_id belonging to a different experiment's feedback event must
+    not resolve this experiment's conversation MU lineage."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+
+    with TempDB() as store:
+        seed_mu = _mu_id()
+        run(store.create_mu(
+            mu_id=seed_mu, source_type="user_input", raw_content="seed",
+            series_id="seed:v3", cluster_id="cluster_a",
+        ))
+
+        own_run_id = _run_id()
+        own_conv_mu = _mu_id()
+        run(store.insert_run(_make_run_with_conv_mu(
+            own_run_id, own_conv_mu, "series-A", "exp-own",
+            weight_updates=[{
+                "edge_id": "edge-1", "old_weight": 0.5, "new_weight": 0.6,
+                "feedback_event_id": "fe-own",
+                "source_mu_id": seed_mu, "target_mu_id": own_conv_mu,
+            }],
+        )))
+        # No feedback event at all for "exp-own"'s run — its conv endpoint
+        # has no prompt lineage available.
+
+        # A different experiment's run whose prompt_id must not leak in.
+        other_run_id = _run_id()
+        run(store.insert_run(_make_minimal_run(
+            run_id=other_run_id, series_id="series-A", experiment_id="exp-other",
+            turn_index=1,
+        )))
+        run(store.insert_feedback_event({
+            "feedback_event_id": "fe-other",
+            "run_id": other_run_id,
+            "verdict": "up",
+            "is_probe_turn": False,
+            "prompt_id": "cluster_a_0009",
+        }))
+
+        measures = run(_section_61_learning_measures("exp-own", store, {"reporting": {}}))
+
+        grid = measures["edge_delta_ledger"]["edge_classification"]["by_class_relation"]
+        print(f"edge classification grid: {grid}")
+        assert grid["conv_seed"]["unresolvable"]["count"] == 1
+        assert grid["conv_seed"]["same_cluster"]["count"] == 0
+        assert grid["conv_seed"]["mixed"]["count"] == 0
+
+
+# ---------------------------------------------------------------------------
 # §5 aggregation must use stored series reports, not the wiped live graph
 # ---------------------------------------------------------------------------
 

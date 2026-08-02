@@ -303,3 +303,112 @@ def test_s61_renders_sample_pass_rate_section():
     assert "vs_a1" in md
     assert "0.8" in md
     assert "⚠ PARTIAL BATTERY" in md
+
+
+def _base_s61_section(edge_delta_ledger: dict) -> dict:
+    return {
+        "condition_label": "learned",
+        "pass_rank_threshold": 3,
+        "probe_count": 1,
+        "run_count": 1,
+        "state_transitions": {"per_probe": [], "by_phenomenon": {}},
+        "edge_delta_ledger": edge_delta_ledger,
+        "bridge_mu_analysis": {},
+        "saturation_analysis": {},
+        "sample_pass_rates": {"per_probe": [], "by_phenomenon": {}},
+    }
+
+
+def test_s61_renders_edge_classification():
+    """M33: the typed edge-class x cluster-relation breakdown renders as a
+    table, plus the cross-domain watch list and per-series longitudinal view."""
+    ledger = {
+        "total_updates": 3,
+        "increased_count": 2,
+        "decreased_count": 1,
+        "unchanged_count": 0,
+        "mean_abs_delta": 0.05,
+        "orphan_update_count": 0,
+        "edge_classification": {
+            "by_class_relation": {
+                "seed_seed": {
+                    "same_cluster": {"count": 1, "mean_abs_delta": 0.02},
+                    "cross_cluster": {"count": 0, "mean_abs_delta": 0.0},
+                    "mixed": {"count": 0, "mean_abs_delta": 0.0},
+                    "unresolvable": {"count": 0, "mean_abs_delta": 0.0},
+                },
+                "conv_seed": {
+                    "same_cluster": {"count": 0, "mean_abs_delta": 0.0},
+                    "cross_cluster": {"count": 0, "mean_abs_delta": 0.0},
+                    "mixed": {"count": 1, "mean_abs_delta": 0.1},
+                    "unresolvable": {"count": 0, "mean_abs_delta": 0.0},
+                },
+                "conv_conv": {
+                    "same_cluster": {"count": 0, "mean_abs_delta": 0.0},
+                    "cross_cluster": {"count": 1, "mean_abs_delta": 0.03},
+                    "mixed": {"count": 0, "mean_abs_delta": 0.0},
+                    "unresolvable": {"count": 0, "mean_abs_delta": 0.0},
+                },
+            },
+            "totals_by_relation": {
+                "same_cluster": 1, "cross_cluster": 1, "mixed": 1, "unresolvable": 0,
+            },
+            "cross_domain_watch": [
+                {
+                    "edge_id": "edge-mixed-1",
+                    "edge_class": "conv_seed",
+                    "cluster_relation": "mixed",
+                    "delta": 0.1,
+                    "source_cluster": "cluster_a",
+                    "target_cluster": "cluster_b",
+                    "feedback_event_id": "fe-1",
+                },
+            ],
+            "by_series": [
+                {
+                    "series_id": "series-0",
+                    "by_class": {
+                        "seed_seed": {"count": 1, "mean_abs_delta": 0.02},
+                        "conv_seed": {"count": 1, "mean_abs_delta": 0.1},
+                        "conv_conv": {"count": 1, "mean_abs_delta": 0.03},
+                    },
+                },
+            ],
+        },
+    }
+    md = _render_s61(_base_s61_section(ledger))
+    print(f"§6.1 edge classification section:\n{md}")
+    assert "Edge Classification" in md
+    assert "seed↔seed" in md
+    assert "conv→seed" in md
+    assert "conv↔conv" in md
+    assert "Totals by relation" in md
+    assert "Cross-Domain Linkage Watch List" in md
+    assert "edge-mix" in md
+    assert "Edge Classification by Series" in md
+    assert "series-0" in md
+    # Old flat within/cross/unknown keys must not appear anywhere.
+    assert "Within-cluster" not in md
+    assert "Unknown cluster" not in md
+
+
+def test_s61_edge_classification_absent_renders_without_crash():
+    """A pre-M33 stored report JSON has no 'edge_classification' key on its
+    ledger (only the old within/cross/unknown flat counts, since removed).
+    The renderer must degrade gracefully rather than crash."""
+    old_shape_ledger = {
+        "total_updates": 3,
+        "increased_count": 2,
+        "decreased_count": 1,
+        "unchanged_count": 0,
+        "mean_abs_delta": 0.05,
+        "orphan_update_count": 0,
+        "within_cluster_count": 1,
+        "cross_cluster_count": 1,
+        "unknown_cluster_count": 1,
+        "cross_cluster_deltas": [],
+    }
+    md = _render_s61(_base_s61_section(old_shape_ledger))
+    print(f"§6.1 pre-M33 ledger shape:\n{md}")
+    assert "Edge Weight Delta Ledger" in md
+    assert "Edge Classification" not in md

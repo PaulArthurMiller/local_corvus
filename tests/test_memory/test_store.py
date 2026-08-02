@@ -461,6 +461,85 @@ class TestVerdictCountsBySeries:
 
 
 # ---------------------------------------------------------------------------
+# M33 — get_prompt_ids_by_run (conversation-edge classification's prompt
+# lineage signal)
+# ---------------------------------------------------------------------------
+
+
+class TestGetPromptIdsByRun:
+
+    def _make_run_and_insert(self, s, run_id, series_id, experiment_id):
+        async def _insert():
+            import memory.store as sm
+            db = await sm._open_db()
+            try:
+                await db.execute(
+                    "INSERT INTO analytics (run_id, series_id, experiment_id, timestamp) "
+                    "VALUES (?, ?, ?, ?)",
+                    (run_id, series_id, experiment_id, "2026-01-01T00:00:00Z"),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+        run(_insert())
+
+    def _insert_feedback(self, s, run_id, prompt_id, verdict="up"):
+        run(s.insert_feedback_event({
+            "feedback_event_id": str(uuid.uuid4()),
+            "run_id": run_id,
+            "verdict": verdict,
+            "verdict_basis": None,
+            "turn_index": None,
+            "is_probe_turn": False,
+            "prompt_id": prompt_id,
+        }))
+
+    def test_maps_run_id_to_prompt_id(self):
+        with TempDBStore() as s:
+            exp_id = "exp-lineage"
+            run_a = str(uuid.uuid4())
+            self._make_run_and_insert(s, run_a, "series-A", exp_id)
+            self._insert_feedback(s, run_a, "cluster_a_0003")
+
+            mapping = run(s.get_prompt_ids_by_run(exp_id))
+            print(f"[test] prompt id mapping: {mapping}")
+            assert mapping == {run_a: "cluster_a_0003"}
+
+    def test_excludes_runs_with_no_prompt_id(self):
+        """Probe turns and dry runs never carry a prompt_id — they're
+        excluded rather than mapped to None."""
+        with TempDBStore() as s:
+            exp_id = "exp-lineage-probe"
+            run_a = str(uuid.uuid4())
+            self._make_run_and_insert(s, run_a, "series-A", exp_id)
+            self._insert_feedback(s, run_a, prompt_id=None)
+
+            mapping = run(s.get_prompt_ids_by_run(exp_id))
+            print(f"[test] mapping with null prompt_id: {mapping}")
+            assert mapping == {}
+
+    def test_scoped_to_experiment_id_no_contamination(self):
+        """A different experiment's feedback events must not leak into this
+        experiment's prompt-id mapping, even sharing a series_id string."""
+        with TempDBStore() as s:
+            run_own, run_other = str(uuid.uuid4()), str(uuid.uuid4())
+            self._make_run_and_insert(s, run_own, "series-A", "exp-own")
+            self._make_run_and_insert(s, run_other, "series-A", "exp-other")
+            self._insert_feedback(s, run_own, "cluster_a_0001")
+            self._insert_feedback(s, run_other, "cluster_b_0002")
+
+            mapping = run(s.get_prompt_ids_by_run("exp-own"))
+            print(f"[test] scoped mapping: {mapping}")
+            assert mapping == {run_own: "cluster_a_0001"}
+
+    def test_no_feedback_events_returns_empty_dict(self):
+        with TempDBStore() as s:
+            mapping = run(s.get_prompt_ids_by_run("exp-empty"))
+            print(f"[test] empty mapping: {mapping}")
+            assert mapping == {}
+
+
+# ---------------------------------------------------------------------------
 # Milestone 10 — use_session_context round-trip
 # ---------------------------------------------------------------------------
 

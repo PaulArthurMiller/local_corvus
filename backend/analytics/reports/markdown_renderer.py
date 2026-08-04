@@ -652,8 +652,13 @@ def render_experiment_report_markdown(report: dict) -> str:
             f"| {p.get('series_id', '—')} | {p.get('failed_turn_count', 0)} | {p.get('ghost_mu_count', 0)} |"
         )
 
-    # Verdict Mix (M32) — bulk-turn judge verdicts, per series
+    # Verdict Mix (M32) — bulk-turn judge verdicts, per series.
+    # M36 — recorded vs. judge-alone, so operator overrides are visible in the
+    # report rather than silently folded into the headline up-rate.
     overall_up_rate = verdict_mix.get("overall_up_rate")
+    judge_alone_rate = verdict_mix.get("judge_alone_up_rate")
+    human_sourced = verdict_mix.get("total_human_sourced", 0)
+    unrecoverable = verdict_mix.get("judge_alone_unrecoverable", 0)
     series_section_lines += [
         "\n### Verdict Mix (Bulk Turns)\n",
         f"**Total up:** {verdict_mix.get('total_up', 0)} | "
@@ -661,14 +666,38 @@ def render_experiment_report_markdown(report: dict) -> str:
         f"**Total none:** {verdict_mix.get('total_none', 0)}  ",
         f"**Overall up-rate (up / (up+down)):** "
         f"{f'{overall_up_rate:.1%}' if overall_up_rate is not None else '—'}\n",
-        "| series | up | down | none | up_rate |",
-        "|---|---|---|---|---|",
+        f"**Human-sourced verdicts (operator overrides / hand-grades):** {human_sourced}  ",
+        f"**Judge-alone up-rate (overrides reverted):** "
+        f"{f'{judge_alone_rate:.1%}' if judge_alone_rate is not None else '—'}  ",
+        f"**Judge-alone counts:** up {verdict_mix.get('total_judge_alone_up', 0)} | "
+        f"down {verdict_mix.get('total_judge_alone_down', 0)} | "
+        f"none {verdict_mix.get('total_judge_alone_none', 0)}\n",
+    ]
+    if human_sourced:
+        series_section_lines.append(
+            "> The overall up-rate above is **human-assisted**. An unattended run "
+            "has no operator to override the judge, so the judge-alone rate is the "
+            "one that describes it — treat any gap between the two as the judge's "
+            "measured miscalibration, and its direction as the direction of bias.\n"
+        )
+    if unrecoverable:
+        series_section_lines.append(
+            f"> ⚠️ {unrecoverable} human-sourced verdict(s) predate judge_model_verdict "
+            "recording and have no recoverable pre-override verdict; they are excluded "
+            "from the judge-alone tallies, which are therefore a partial view.\n"
+        )
+    series_section_lines += [
+        "| series | up | down | none | up_rate | human | judge_alone_up_rate |",
+        "|---|---|---|---|---|---|---|",
     ]
     for p in verdict_mix.get("per_series") or []:
         p_rate = p.get("up_rate")
+        p_j_rate = p.get("judge_alone_up_rate")
         series_section_lines.append(
             f"| {p.get('series_id', '—')} | {p.get('up', 0)} | {p.get('down', 0)} "
-            f"| {p.get('none', 0)} | {f'{p_rate:.1%}' if p_rate is not None else '—'} |"
+            f"| {p.get('none', 0)} | {f'{p_rate:.1%}' if p_rate is not None else '—'} "
+            f"| {p.get('human_sourced', 0)} "
+            f"| {f'{p_j_rate:.1%}' if p_j_rate is not None else '—'} |"
         )
 
     # §5.3

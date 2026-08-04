@@ -136,7 +136,9 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     judge_model_name TEXT,
     judge_temperature REAL,
     judge_pinned_snapshot TEXT,
-    prompt_id TEXT
+    prompt_id TEXT,
+    judge_model_verdict TEXT,
+    judge_model_rationale TEXT
 );
 
 CREATE TABLE IF NOT EXISTS probes (
@@ -264,6 +266,16 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         ("probe_results", "series_id", "TEXT"),
         ("probe_results", "battery_mode", "TEXT NOT NULL DEFAULT 'mean'"),
         ("probe_results", "battery_repeat_index", "INTEGER"),
+        # M36: the judge model's own verdict and rationale, preserved
+        # alongside the recorded ones. Before this, an --interactive operator
+        # override overwrote `verdict` while leaving the model's `rationale`
+        # in place, producing rows whose recorded verdict and stored reasoning
+        # contradicted each other, and destroying the only DB-side evidence of
+        # what the judge would have said unaided. Both are NULL on pre-M36
+        # rows — see get_verdict_counts_by_series for how that is handled
+        # without silently misreporting a judge-alone rate.
+        ("feedback_events", "judge_model_verdict", "TEXT"),
+        ("feedback_events", "judge_model_rationale", "TEXT"),
     ]
     for table, column, col_type in add_column_migrations:
         try:
@@ -816,8 +828,9 @@ class GraphStore:
                     (feedback_event_id, run_id, verdict, verdict_basis,
                      turn_index, is_probe_turn, condition_label, rationale,
                      criterion_triggered, judge_source, judge_model_name,
-                     judge_temperature, judge_pinned_snapshot, prompt_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     judge_temperature, judge_pinned_snapshot, prompt_id,
+                     judge_model_verdict, judge_model_rationale)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["feedback_event_id"],
@@ -834,6 +847,8 @@ class GraphStore:
                     event.get("judge_temperature"),
                     event.get("judge_pinned_snapshot"),
                     event.get("prompt_id"),
+                    event.get("judge_model_verdict"),
+                    event.get("judge_model_rationale"),
                 ),
             )
             await db.commit()
@@ -1343,26 +1358,50 @@ class GraphStore:
         self, experiment_id: str
     ) -> dict[str, dict[str, int]]:
         """
-        Count up/down/none feedback verdicts per series for an experiment.
+        Count feedback verdicts per series for an experiment, split by source.
 
         Scoped by experiment_id via the analytics join (M12 experiment_id
         stamping) and restricted to bulk turns (is_probe_turn=0) — probe
         turns are never graded on this path (see
         count_probe_feedback_events_for_series, which counts the reverse
         case as an integrity violation). Used by M32's verdict-mix report
-        subsection. Returns {series_id: {"up": n, "down": n, "none": n}};
-        a series with no feedback_events rows is simply absent from the
-        returned dict — callers default it to zeros.
+        subsection. A series with no feedback_events rows is simply absent
+        from the returned dict — callers default it to zeros.
+
+        Per series, returns the recorded tallies ("up"/"down"/"none" — what
+        actually drove learning) plus, as of M36, the judge-alone tallies
+        ("judge_up"/"judge_down"/"judge_none" — what the judge model would
+        have recorded with no operator in the loop). The two diverge exactly
+        where a human overrode the judge, and reporting only the first is
+        what let a calibration run's overrides vanish from its own report.
+
+        Judge-alone attribution, per row:
+          - judge_model_verdict present -> use it (M36 rows).
+          - absent, source is a model (or unknown) -> use `verdict`; for a
+            model-sourced row the recorded verdict IS the model's.
+          - absent, source is "human" -> the pre-override verdict is
+            unrecoverable. Counted in "human_unrecoverable" and excluded
+            from the judge-alone tallies rather than guessed at, so a
+            pre-M36 experiment reports reduced coverage instead of a
+            confidently wrong judge-alone rate.
+
+        "human_sourced" counts every row a human authored — in a harness run
+        those are --interactive overrides and hand-graded turns; the chat-UI
+        /feedback path also stamps judge_source="human" by rule.
         """
         db = await _open_db()
         try:
             async with db.execute(
                 """
-                SELECT a.series_id AS series_id, fe.verdict AS verdict, COUNT(*) AS cnt
+                SELECT a.series_id AS series_id,
+                       fe.verdict AS verdict,
+                       fe.judge_source AS judge_source,
+                       fe.judge_model_verdict AS judge_model_verdict,
+                       COUNT(*) AS cnt
                 FROM feedback_events fe
                 JOIN analytics a ON fe.run_id = a.run_id
                 WHERE a.experiment_id = ? AND fe.is_probe_turn = 0
-                GROUP BY a.series_id, fe.verdict
+                GROUP BY a.series_id, fe.verdict, fe.judge_source, fe.judge_model_verdict
                 """,
                 (experiment_id,),
             ) as cursor:
@@ -1374,12 +1413,34 @@ class GraphStore:
         for row in rows:
             r = dict(row)
             sid = r["series_id"]
-            verdict = r["verdict"]
             if sid is None:
                 continue
-            bucket = counts.setdefault(sid, {"up": 0, "down": 0, "none": 0})
-            if verdict in bucket:
-                bucket[verdict] += r["cnt"]
+            verdict = r["verdict"]
+            cnt = r["cnt"]
+            bucket = counts.setdefault(
+                sid,
+                {
+                    "up": 0, "down": 0, "none": 0,
+                    "judge_up": 0, "judge_down": 0, "judge_none": 0,
+                    "human_sourced": 0, "human_unrecoverable": 0,
+                },
+            )
+            if verdict in ("up", "down", "none"):
+                bucket[verdict] += cnt
+
+            is_human = r["judge_source"] == "human"
+            if is_human:
+                bucket["human_sourced"] += cnt
+
+            model_verdict = r["judge_model_verdict"]
+            if model_verdict is None and not is_human:
+                # Model-sourced row predating M36: the recorded verdict is
+                # the model's, unmodified.
+                model_verdict = verdict
+            if model_verdict in ("up", "down", "none"):
+                bucket[f"judge_{model_verdict}"] += cnt
+            elif is_human:
+                bucket["human_unrecoverable"] += cnt
         return counts
 
     async def get_prompt_ids_by_run(self, experiment_id: str) -> dict[str, str]:

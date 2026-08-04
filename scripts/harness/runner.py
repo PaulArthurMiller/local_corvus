@@ -328,6 +328,9 @@ def _judge_and_post_verdict(
     criterion_triggered = verdict_obj.criterion_triggered
     criteria_met = verdict_obj.criteria_met
     judge_source = f"model:{plan.judge.model}"
+    # Accepted-as-is, this stays the model's own rationale; an override below
+    # replaces it with one describing the recorded verdict (M36).
+    rationale = verdict_obj.rationale
 
     if interactive:
         _print_calibration_context(
@@ -362,14 +365,27 @@ def _judge_and_post_verdict(
                 _prompt_for_failed_criterion(resume_input_fn, print_fn, prompt_entry.criteria)
                 if verdict == "down" else None
             )
+            # M36 — `rationale` describes the verdict actually recorded, so an
+            # overridden row can no longer carry the model's argument for the
+            # verdict the operator just rejected. The 2026-08-04 calibration
+            # audit found rows reading judge_source="human", verdict="down",
+            # with a stored rationale insisting the criterion was met; anyone
+            # reading verdict and rationale together got a contradiction. The
+            # model's account is preserved in judge_model_rationale, not
+            # discarded — it is the evidence a calibration pass needs.
+            rationale = (
+                f"operator override of judge verdict {judge_model_verdict!r} "
+                f"-> {verdict!r} (--interactive calibration)"
+            )
 
     return _post_verdict(
         client, plan, condition, run_id, prompt_entry,
         verdict=verdict,
         judge_source=judge_source,
-        rationale=verdict_obj.rationale,
+        rationale=rationale,
         criterion_triggered=criterion_triggered,
         judge_model_verdict=judge_model_verdict,
+        judge_model_rationale=verdict_obj.rationale,
         criteria_met=criteria_met,
     )
 
@@ -418,6 +434,7 @@ def _post_verdict(
     rationale: Optional[str],
     criterion_triggered: Optional[str],
     judge_model_verdict: Optional[str],
+    judge_model_rationale: Optional[str] = None,
     criteria_met: Optional[list] = None,
 ) -> tuple:
     """
@@ -427,6 +444,12 @@ def _post_verdict(
     existing policy handling. criteria_met (Milestone 31) is not sent to the
     backend — no schema change there — it flows straight through to the
     checkpoint for local calibration/analysis use.
+
+    judge_model_verdict/judge_model_rationale are now sent (M36) rather than
+    only reaching the checkpoint: the report generators read the DB, so
+    without them there was no way to state a judge-alone up-rate — the
+    number that describes the real, unattended run — from a calibration
+    run's own data.
     """
     apply_weight_update = condition == "learned" and verdict in ("up", "down")
     verdict_response = client.post_verdict(
@@ -441,6 +464,8 @@ def _post_verdict(
         judge_temperature=plan.judge.temperature,
         judge_pinned_snapshot=plan.judge.pinned_snapshot,
         prompt_id=prompt_entry.prompt_id,
+        judge_model_verdict=judge_model_verdict,
+        judge_model_rationale=judge_model_rationale,
     )
     return verdict, verdict_response.get("feedback_event_id"), None, judge_model_verdict, criteria_met
 

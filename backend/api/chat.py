@@ -240,6 +240,13 @@ class VerdictRequest(BaseModel):
     judge_temperature: Optional[float] = None
     judge_pinned_snapshot: Optional[str] = None
     prompt_id: Optional[str] = None
+    # M36 — the judge model's own verdict/rationale, sent alongside the
+    # recorded ones so an override stays reconstructible from the DB alone
+    # (the checkpoint already carried judge_model_verdict; the reports read
+    # the DB). Optional: the hand-graded path after an unparseable judge
+    # response has no model verdict to report.
+    judge_model_verdict: Optional[str] = None
+    judge_model_rationale: Optional[str] = None
 
 
 class VerdictResponse(BaseModel):
@@ -277,12 +284,14 @@ async def feedback_verdict(request: VerdictRequest) -> VerdictResponse:
         )
 
     logger.info(
-        "feedback_verdict: run_id=%s verdict=%s condition=%s apply_weight_update=%s judge_source=%s",
+        "feedback_verdict: run_id=%s verdict=%s condition=%s apply_weight_update=%s "
+        "judge_source=%s judge_model_verdict=%s",
         request.run_id,
         request.verdict,
         request.condition_label,
         request.apply_weight_update,
         request.judge_source,
+        request.judge_model_verdict,
     )
 
     run = await graph_store.get_run(request.run_id)
@@ -305,6 +314,8 @@ async def feedback_verdict(request: VerdictRequest) -> VerdictResponse:
         judge_temperature=request.judge_temperature,
         judge_pinned_snapshot=request.judge_pinned_snapshot,
         prompt_id=request.prompt_id,
+        judge_model_verdict=request.judge_model_verdict,
+        judge_model_rationale=request.judge_model_rationale,
     )
 
     weight_updates: list[dict] = []

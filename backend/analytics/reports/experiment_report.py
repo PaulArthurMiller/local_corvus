@@ -186,17 +186,41 @@ def _aggregate_verdict_mix(
     to be right or wrong about. A series with no bulk-turn feedback at all
     (all-probe series, dry runs) reports up_rate=None rather than 0.0 —
     "no data" and "0% up" are different findings.
+
+    M36 adds the judge-alone view alongside the recorded one. The recorded
+    up-rate is what drove learning; on a `--interactive` calibration run it
+    is *human-assisted*, and quoting it as the judge's calibration overstates
+    the judge by exactly the overrides the operator made. The 2026-08-04
+    calibration read 70.6% recorded against 82.4% judge-alone, with three
+    overrides that appeared nowhere in the report at all — the gap this
+    subsection now closes. A fully automated run has zero overrides and the
+    two rates coincide, which is the point: the divergence is the signal.
+
+    judge_alone_up_rate is None when no judge-alone verdict is recoverable,
+    and `judge_alone_unrecoverable` counts human rows from before M36 whose
+    pre-override verdict was never stored — reduced coverage, stated rather
+    than papered over.
     """
     per_series = []
     total_up = total_down = total_none = 0
+    total_j_up = total_j_down = total_j_none = 0
+    total_human = total_unrecoverable = 0
 
     for sid in series_ids:
-        counts = verdict_counts.get(sid) or {"up": 0, "down": 0, "none": 0}
+        counts = verdict_counts.get(sid) or {}
         up = counts.get("up", 0)
         down = counts.get("down", 0)
         none_ct = counts.get("none", 0)
+        j_up = counts.get("judge_up", 0)
+        j_down = counts.get("judge_down", 0)
+        j_none = counts.get("judge_none", 0)
+        human = counts.get("human_sourced", 0)
+        unrecoverable = counts.get("human_unrecoverable", 0)
+
         graded = up + down
         up_rate = round(up / graded, 4) if graded > 0 else None
+        j_graded = j_up + j_down
+        j_up_rate = round(j_up / j_graded, 4) if j_graded > 0 else None
         per_series.append(
             {
                 "series_id": sid,
@@ -204,24 +228,48 @@ def _aggregate_verdict_mix(
                 "down": down,
                 "none": none_ct,
                 "up_rate": up_rate,
+                "human_sourced": human,
+                "judge_alone_up": j_up,
+                "judge_alone_down": j_down,
+                "judge_alone_none": j_none,
+                "judge_alone_up_rate": j_up_rate,
+                "judge_alone_unrecoverable": unrecoverable,
             }
         )
         total_up += up
         total_down += down
         total_none += none_ct
+        total_j_up += j_up
+        total_j_down += j_down
+        total_j_none += j_none
+        total_human += human
+        total_unrecoverable += unrecoverable
 
     total_graded = total_up + total_down
     overall_up_rate = round(total_up / total_graded, 4) if total_graded > 0 else None
+    total_j_graded = total_j_up + total_j_down
+    judge_alone_up_rate = (
+        round(total_j_up / total_j_graded, 4) if total_j_graded > 0 else None
+    )
 
     logger.info(
-        "experiment_report verdict_mix: total_up=%d total_down=%d total_none=%d overall_up_rate=%s",
+        "experiment_report verdict_mix: total_up=%d total_down=%d total_none=%d "
+        "overall_up_rate=%s human_sourced=%d judge_alone_up_rate=%s unrecoverable=%d",
         total_up, total_down, total_none, overall_up_rate,
+        total_human, judge_alone_up_rate, total_unrecoverable,
     )
     return {
         "total_up": total_up,
         "total_down": total_down,
         "total_none": total_none,
         "overall_up_rate": overall_up_rate,
+        # M36 — judge-alone (override-free) view of the same turns.
+        "total_human_sourced": total_human,
+        "total_judge_alone_up": total_j_up,
+        "total_judge_alone_down": total_j_down,
+        "total_judge_alone_none": total_j_none,
+        "judge_alone_up_rate": judge_alone_up_rate,
+        "judge_alone_unrecoverable": total_unrecoverable,
         "per_series": per_series,
     }
 

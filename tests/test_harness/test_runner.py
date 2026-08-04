@@ -1277,6 +1277,72 @@ def test_interactive_override_records_judge_model_verdict_for_calibration(tmp_pa
     assert turn.verdict == "down"      # what the operator recorded
 
 
+def test_override_does_not_stamp_the_model_rationale_on_a_human_verdict(tmp_path):
+    """
+    Regression (2026-08-04 calibration audit): an override replaced `verdict`
+    but left the judge's rationale in place, producing rows that read
+    judge_source="human", verdict="down", rationale="...the criterion was
+    met". Verdict and rationale must agree; the model's account is preserved
+    under judge_model_rationale rather than discarded.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        checklists=[{"criteria_met": [True], "rationale": "the response met the criterion"}]
+    )
+    scripted = iter(["o", "down"])
+
+    execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True,
+        resume_input_fn=lambda _p: next(scripted),
+    )
+
+    call = client.verdict_calls[0]
+    print(f"[test] posted verdict call: {call}")
+    assert call["judge_source"] == "human"
+    assert call["verdict"] == "down"
+    assert "the response met the criterion" not in (call["rationale"] or ""), (
+        "the model's argument for the rejected verdict must not be recorded "
+        "as the rationale for the human verdict"
+    )
+    assert "operator override" in call["rationale"]
+    # Preserved, not destroyed — this is the evidence a calibration pass reads.
+    assert call["judge_model_rationale"] == "the response met the criterion"
+    assert call["judge_model_verdict"] == "up"
+
+
+def test_accepted_verdict_keeps_the_model_rationale(tmp_path):
+    """Accepting the judge leaves its rationale as the recorded one, and the
+    model-side fields mirror it — so a model row needs no special-casing
+    downstream."""
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        checklists=[{"criteria_met": [True], "rationale": "clean pass"}]
+    )
+
+    execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        judge_client=judge_client, interactive=True, resume_input_fn=lambda _p: "a",
+    )
+
+    call = client.verdict_calls[0]
+    print(f"[test] accepted verdict call: {call}")
+    assert call["judge_source"].startswith("model:")
+    assert call["rationale"] == "clean pass"
+    assert call["judge_model_rationale"] == "clean pass"
+    assert call["judge_model_verdict"] == call["verdict"] == "up"
+
+
 def test_multi_criteria_down_override_asks_which_criterion_failed(tmp_path):
     """With more than one criterion the operator picks by number, and the
     exact criterion text is what gets posted."""

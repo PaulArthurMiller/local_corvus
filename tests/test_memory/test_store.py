@@ -396,7 +396,10 @@ class TestVerdictCountsBySeries:
                 await db.close()
         run(_insert())
 
-    def _insert_feedback(self, s, run_id, verdict, is_probe_turn=False):
+    def _insert_feedback(
+        self, s, run_id, verdict, is_probe_turn=False,
+        judge_source=None, judge_model_verdict=None,
+    ):
         run(s.insert_feedback_event({
             "feedback_event_id": str(uuid.uuid4()),
             "run_id": run_id,
@@ -404,6 +407,8 @@ class TestVerdictCountsBySeries:
             "verdict_basis": None,
             "turn_index": None,
             "is_probe_turn": is_probe_turn,
+            "judge_source": judge_source,
+            "judge_model_verdict": judge_model_verdict,
         }))
 
     def test_counts_up_down_none_per_series(self):
@@ -420,8 +425,10 @@ class TestVerdictCountsBySeries:
 
             counts = run(s.get_verdict_counts_by_series(exp_id))
             print(f"[test] verdict counts: {counts}")
-            assert counts["series-A"] == {"up": 1, "down": 1, "none": 0}
-            assert counts["series-B"] == {"up": 0, "down": 0, "none": 1}
+            assert counts["series-A"]["up"] == 1
+            assert counts["series-A"]["down"] == 1
+            assert counts["series-A"]["none"] == 0
+            assert counts["series-B"]["none"] == 1
 
     def test_excludes_probe_turn_feedback(self):
         """A feedback_events row with is_probe_turn=1 is not counted — probe
@@ -449,7 +456,76 @@ class TestVerdictCountsBySeries:
 
             counts = run(s.get_verdict_counts_by_series("exp-own"))
             print(f"[test] scoped counts: {counts}")
-            assert counts == {"series-A": {"up": 1, "down": 0, "none": 0}}
+            assert list(counts) == ["series-A"]
+            assert counts["series-A"]["up"] == 1
+            assert counts["series-A"]["down"] == 0
+
+    # --- M36: judge-alone split -------------------------------------------
+
+    def test_override_splits_recorded_from_judge_alone(self):
+        """An operator override records the human verdict but tallies the
+        judge's own verdict separately — the divergence the report needs."""
+        with TempDBStore() as s:
+            exp_id = "exp-override"
+            r_ok, r_override = str(uuid.uuid4()), str(uuid.uuid4())
+            self._make_run_and_insert(s, r_ok, "series-A", exp_id)
+            self._make_run_and_insert(s, r_override, "series-A", exp_id)
+            self._insert_feedback(
+                s, r_ok, "up", judge_source="model:gemma4:e4b", judge_model_verdict="up",
+            )
+            # The judge said "up"; the operator overrode to "down".
+            self._insert_feedback(
+                s, r_override, "down", judge_source="human", judge_model_verdict="up",
+            )
+
+            counts = run(s.get_verdict_counts_by_series(exp_id))["series-A"]
+            print(f"[test] override split: {counts}")
+            # Recorded: what drove learning.
+            assert counts["up"] == 1
+            assert counts["down"] == 1
+            # Judge-alone: both turns were "up" before the operator stepped in.
+            assert counts["judge_up"] == 2
+            assert counts["judge_down"] == 0
+            assert counts["human_sourced"] == 1
+            assert counts["human_unrecoverable"] == 0
+
+    def test_pre_m36_model_rows_fall_back_to_recorded_verdict(self):
+        """A model-sourced row with no judge_model_verdict (pre-M36) counts
+        toward judge-alone using its recorded verdict — for a model row the
+        two are the same thing, so this is recovery, not guesswork."""
+        with TempDBStore() as s:
+            exp_id = "exp-legacy-model"
+            run_id = str(uuid.uuid4())
+            self._make_run_and_insert(s, run_id, "series-A", exp_id)
+            self._insert_feedback(
+                s, run_id, "down", judge_source="model:gemma4:e4b", judge_model_verdict=None,
+            )
+
+            counts = run(s.get_verdict_counts_by_series(exp_id))["series-A"]
+            print(f"[test] legacy model row: {counts}")
+            assert counts["down"] == 1
+            assert counts["judge_down"] == 1
+            assert counts["human_unrecoverable"] == 0
+
+    def test_pre_m36_human_rows_are_unrecoverable_not_guessed(self):
+        """A human row with no judge_model_verdict has no recoverable
+        pre-override verdict. It must be flagged, never folded into the
+        judge-alone tallies as if the judge had said it."""
+        with TempDBStore() as s:
+            exp_id = "exp-legacy-human"
+            run_id = str(uuid.uuid4())
+            self._make_run_and_insert(s, run_id, "series-A", exp_id)
+            self._insert_feedback(
+                s, run_id, "down", judge_source="human", judge_model_verdict=None,
+            )
+
+            counts = run(s.get_verdict_counts_by_series(exp_id))["series-A"]
+            print(f"[test] legacy human row: {counts}")
+            assert counts["down"] == 1
+            assert counts["judge_down"] == 0, "must not attribute a human verdict to the judge"
+            assert counts["judge_up"] == 0
+            assert counts["human_sourced"] == 1
+            assert counts["human_unrecoverable"] == 1
 
     def test_no_feedback_events_returns_empty_dict(self):
         """An experiment with no bulk-turn feedback (all-probe or dry-run

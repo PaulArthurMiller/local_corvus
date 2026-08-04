@@ -233,9 +233,15 @@ class BackendClient:
         judge_temperature: Optional[float] = None,
         judge_pinned_snapshot: Optional[str] = None,
         prompt_id: Optional[str] = None,
+        judge_model_verdict: Optional[str] = None,
+        judge_model_rationale: Optional[str] = None,
     ) -> dict:
         """POST /feedback/verdict (M19 Phase 2) — record a judge or human-override
-        verdict, applying the weight update only when apply_weight_update is True."""
+        verdict, applying the weight update only when apply_weight_update is True.
+
+        judge_model_verdict/judge_model_rationale (M36) carry what the judge
+        model itself produced, which on an overridden turn is no longer what
+        `verdict`/`rationale` hold."""
         body = {
             "run_id": run_id,
             "verdict": verdict,
@@ -248,6 +254,8 @@ class BackendClient:
             "judge_temperature": judge_temperature,
             "judge_pinned_snapshot": judge_pinned_snapshot,
             "prompt_id": prompt_id,
+            "judge_model_verdict": judge_model_verdict,
+            "judge_model_rationale": judge_model_rationale,
         }
         try:
             resp = self._client.post("/feedback/verdict", json=body)

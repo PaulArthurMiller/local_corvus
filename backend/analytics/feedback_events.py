@@ -48,6 +48,13 @@ class FeedbackEvent(BaseModel):
     judge_temperature: Optional[float] = None
     judge_pinned_snapshot: Optional[str] = None
     prompt_id: Optional[str] = None
+    # M36 — what the judge model itself said, kept separate from what was
+    # recorded. On a model-sourced row these mirror verdict/rationale. On a
+    # human override they hold the verdict and reasoning that were replaced,
+    # so `rationale` can describe the recorded verdict without destroying the
+    # judge's own account of the turn — the raw material for calibration.
+    judge_model_verdict: Optional[str] = None  # "up" | "down" | "none"
+    judge_model_rationale: Optional[str] = None
 
 
 async def record_feedback_event(event: FeedbackEvent) -> None:

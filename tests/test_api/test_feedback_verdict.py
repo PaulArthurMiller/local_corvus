@@ -202,6 +202,45 @@ class TestVerdictAlwaysPersisted:
         assert recorded_event.prompt_id == "cluster_a_0001"
         assert recorded_event.is_probe_turn is False
 
+    def test_judge_model_verdict_and_rationale_persist_alongside_the_override(self):
+        """M36 — an overridden turn records the human verdict *and* what the
+        judge said, so the report can state a judge-alone rate without the
+        checkpoint file."""
+        request = _verdict_request(
+            verdict="down",
+            apply_weight_update=False,
+            judge_source="human",
+            criterion_triggered="states amber breach or crimson breach",
+            rationale="operator override of judge verdict 'up' -> 'down'",
+            judge_model_verdict="up",
+            judge_model_rationale="the response stated a recognized synonym",
+        )
+        with patch("api.chat.graph_store.get_run", AsyncMock(return_value=_run_record())), \
+             patch("api.chat.record_feedback_event", AsyncMock()) as record_mock:
+            run(feedback_verdict(request))
+
+        recorded_event = record_mock.call_args[0][0]
+        print(f"[test] recorded override event: {recorded_event}")
+        assert recorded_event.verdict == "down"
+        assert recorded_event.judge_source == "human"
+        assert recorded_event.judge_model_verdict == "up"
+        assert recorded_event.judge_model_rationale == (
+            "the response stated a recognized synonym"
+        )
+        assert "operator override" in recorded_event.rationale
+
+    def test_judge_model_fields_default_to_none_when_omitted(self):
+        """Callers predating M36 (and the hand-graded path, which has no model
+        verdict to report) must keep working — the fields are optional."""
+        request = _verdict_request(verdict="up", apply_weight_update=False)
+        with patch("api.chat.graph_store.get_run", AsyncMock(return_value=_run_record())), \
+             patch("api.chat.record_feedback_event", AsyncMock()) as record_mock:
+            run(feedback_verdict(request))
+
+        recorded_event = record_mock.call_args[0][0]
+        assert recorded_event.judge_model_verdict is None
+        assert recorded_event.judge_model_rationale is None
+
 
 class TestOldFeedbackEndpointUnchanged:
 

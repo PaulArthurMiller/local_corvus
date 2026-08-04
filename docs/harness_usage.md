@@ -221,6 +221,35 @@ rationale, and lets you accept (`a`), override (`o` — recorded with
 targets), or `skip`. This is calibration mode, not routine use — never use it
 on the real run.
 
+#### Reading a calibration run's report (Milestone 36)
+
+An override changes the verdict that drove learning, so a calibration run's
+headline up-rate is **human-assisted** — it is not the judge's calibration.
+The report's Verdict Mix section states both:
+
+| Line | Means |
+|---|---|
+| `Overall up-rate` | What actually drove learning on this run, overrides included |
+| `Human-sourced verdicts` | How many turns you overrode or hand-graded |
+| `Judge-alone up-rate` | What the judge would have recorded unaided — **the number that describes the real, unattended run** |
+
+A fully automated run has zero human-sourced verdicts and the two rates
+coincide; the gap between them is the judge's measured miscalibration, and
+the direction of the gap is the direction of its bias. The 2026-08-04
+calibration read 70.6% recorded against 82.4% judge-alone across 3 overrides
+— none of which appeared in the report before this milestone.
+
+Two caveats on the judge-alone figure:
+
+- Verdicts recorded before M36 have no stored pre-override verdict. Those
+  rows are excluded from the judge-alone tallies and counted in an explicit
+  ⚠️ coverage warning rather than guessed at, so an old experiment reports a
+  partial view instead of a confidently wrong rate.
+- `rationale` on an overridden row describes *your* verdict; the judge's own
+  reasoning is preserved separately as `judge_model_rationale`. Query that
+  column when auditing *why* the judge disagreed — it is the per-turn
+  evidence behind the rate.
+
 ---
 
 ## 6. The full run

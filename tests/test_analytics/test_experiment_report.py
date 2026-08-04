@@ -331,12 +331,8 @@ def test_aggregate_verdict_mix_up_rate_excludes_none():
     }
     result = _aggregate_verdict_mix(["s0", "s1"], verdict_counts)
     print(f"verdict_mix={result}")
-    assert result["per_series"][0] == {
-        "series_id": "s0", "up": 3, "down": 1, "none": 4, "up_rate": 0.75,
-    }
-    assert result["per_series"][1] == {
-        "series_id": "s1", "up": 1, "down": 3, "none": 0, "up_rate": 0.25,
-    }
+    assert result["per_series"][0]["up_rate"] == 0.75
+    assert result["per_series"][1]["up_rate"] == 0.25
     assert result["total_up"] == 4
     assert result["total_down"] == 4
     assert result["total_none"] == 4
@@ -348,10 +344,72 @@ def test_aggregate_verdict_mix_series_with_no_feedback_renders_none_up_rate():
     zero counts and up_rate=None — distinct from a genuine 0% up-rate."""
     result = _aggregate_verdict_mix(["s0"], {})
     print(f"verdict_mix={result}")
-    assert result["per_series"] == [
-        {"series_id": "s0", "up": 0, "down": 0, "none": 0, "up_rate": None},
-    ]
+    p = result["per_series"][0]
+    assert (p["series_id"], p["up"], p["down"], p["none"], p["up_rate"]) == (
+        "s0", 0, 0, 0, None,
+    )
     assert result["overall_up_rate"] is None
+    assert result["judge_alone_up_rate"] is None
+
+
+# --- M36: recorded vs. judge-alone -----------------------------------------
+
+
+def test_aggregate_verdict_mix_reports_judge_alone_rate_beside_recorded():
+    """The headline up-rate is human-assisted when an operator overrode the
+    judge; the judge-alone rate is what an unattended run would produce.
+    Modelled on the 2026-08-04 calibration: 3 overrides, all judge "up"
+    corrected downward, so judge-alone reads higher than recorded."""
+    verdict_counts = {
+        "s0": {
+            # Recorded: 12 up / 5 down / 3 none -> 70.6%
+            "up": 12, "down": 5, "none": 3,
+            # Judge-alone: 14 up / 3 down / 3 none -> 82.4%
+            "judge_up": 14, "judge_down": 3, "judge_none": 3,
+            "human_sourced": 3, "human_unrecoverable": 0,
+        },
+    }
+    result = _aggregate_verdict_mix(["s0"], verdict_counts)
+    print(f"verdict_mix={result}")
+    assert result["overall_up_rate"] == 0.7059
+    assert result["judge_alone_up_rate"] == 0.8235
+    assert result["total_human_sourced"] == 3
+    assert result["judge_alone_unrecoverable"] == 0
+    assert result["per_series"][0]["human_sourced"] == 3
+    assert result["per_series"][0]["judge_alone_up_rate"] == 0.8235
+
+
+def test_aggregate_verdict_mix_automated_run_rates_coincide():
+    """With no operator in the loop the two rates are identical — the
+    divergence, not the judge-alone figure itself, is the signal."""
+    verdict_counts = {
+        "s0": {
+            "up": 8, "down": 2, "none": 1,
+            "judge_up": 8, "judge_down": 2, "judge_none": 1,
+            "human_sourced": 0, "human_unrecoverable": 0,
+        },
+    }
+    result = _aggregate_verdict_mix(["s0"], verdict_counts)
+    print(f"verdict_mix={result}")
+    assert result["overall_up_rate"] == result["judge_alone_up_rate"] == 0.8
+    assert result["total_human_sourced"] == 0
+
+
+def test_aggregate_verdict_mix_surfaces_unrecoverable_pre_m36_overrides():
+    """Pre-M36 human rows can't contribute a judge-alone verdict. The count
+    is surfaced so the partial coverage is stated, not silently absorbed."""
+    verdict_counts = {
+        "s0": {
+            "up": 4, "down": 2, "none": 0,
+            "judge_up": 4, "judge_down": 0, "judge_none": 0,
+            "human_sourced": 2, "human_unrecoverable": 2,
+        },
+    }
+    result = _aggregate_verdict_mix(["s0"], verdict_counts)
+    print(f"verdict_mix={result}")
+    assert result["judge_alone_unrecoverable"] == 2
+    # Judge-alone is computed from the 4 recoverable rows only.
+    assert result["judge_alone_up_rate"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +946,79 @@ def test_generate_experiment_report_includes_verdict_mix():
         assert by_series["series-B"]["down"] == 1
 
 
+def test_generate_experiment_report_surfaces_overrides_end_to_end():
+    """Regression for the 2026-08-04 calibration gap: three operator
+    overrides were recorded in the DB and appeared nowhere in the report,
+    and the headline up-rate silently presented human-corrected verdicts as
+    the judge's own calibration. The report must now show both the override
+    count and the judge-alone rate, and the rendered markdown must say so."""
+    with TempDB() as store:
+        experiment_id = "exp-override-e2e"
+        # Two accepted judge verdicts (up, up) and one override (judge up ->
+        # operator down) — recorded 2/3 up, judge-alone 3/3 up.
+        specs = [
+            ("up", "model:gemma4:e4b", "up"),
+            ("up", "model:gemma4:e4b", "up"),
+            ("down", "human", "up"),
+        ]
+        for i, (verdict, source, model_verdict) in enumerate(specs):
+            rid = _run_id()
+            run(store.insert_run(_make_minimal_run(
+                run_id=rid, series_id="series-A",
+                experiment_id=experiment_id, turn_index=i,
+            )))
+            run(store.insert_feedback_event({
+                "feedback_event_id": str(uuid.uuid4()), "run_id": rid,
+                "verdict": verdict, "is_probe_turn": False,
+                "judge_source": source, "judge_model_verdict": model_verdict,
+            }))
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report(experiment_id, store))
+
+        verdict_mix = report["series_summary"]["verdict_mix"]
+        print(f"override verdict_mix={verdict_mix}")
+        assert verdict_mix["overall_up_rate"] == round(2 / 3, 4)
+        assert verdict_mix["judge_alone_up_rate"] == 1.0
+        assert verdict_mix["total_human_sourced"] == 1
+        assert verdict_mix["judge_alone_unrecoverable"] == 0
+
+        md = render_experiment_report_markdown(report)
+        print(md[md.index("### Verdict Mix"):][:700])
+        assert "Human-sourced verdicts" in md
+        assert "Judge-alone up-rate" in md
+        assert "human-assisted" in md, "the caveat must appear when overrides exist"
+
+
+def test_render_verdict_mix_omits_caveat_for_fully_automated_run():
+    """The human-assisted caveat is noise on a run with no operator in the
+    loop — it must appear only when there is actually a divergence to warn
+    about."""
+    with TempDB() as store:
+        experiment_id = "exp-no-override"
+        rid = _run_id()
+        run(store.insert_run(_make_minimal_run(
+            run_id=rid, series_id="series-A", experiment_id=experiment_id, turn_index=0,
+        )))
+        run(store.insert_feedback_event({
+            "feedback_event_id": str(uuid.uuid4()), "run_id": rid,
+            "verdict": "up", "is_probe_turn": False,
+            "judge_source": "model:gemma4:e4b", "judge_model_verdict": "up",
+        }))
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report(experiment_id, store))
+
+        md = render_experiment_report_markdown(report)
+        assert "Judge-alone up-rate" in md
+        assert "human-assisted" not in md
+        assert "⚠️" not in md.split("### §5.3")[0], "no unrecoverable-coverage warning expected"
+
+
 def test_generate_experiment_report_verdict_mix_scoped_to_experiment_id():
     """A different experiment's feedback events must not leak into this
     experiment's verdict-mix counts, even under a shared series_id."""
@@ -938,9 +1069,10 @@ def test_generate_experiment_report_verdict_mix_empty_series_renders_cleanly():
         print(f"empty verdict_mix={verdict_mix}")
         assert verdict_mix["total_up"] == 0
         assert verdict_mix["overall_up_rate"] is None
-        assert verdict_mix["per_series"] == [
-            {"series_id": "series-A", "up": 0, "down": 0, "none": 0, "up_rate": None},
-        ]
+        p = verdict_mix["per_series"][0]
+        assert (p["series_id"], p["up"], p["down"], p["none"], p["up_rate"]) == (
+            "series-A", 0, 0, 0, None,
+        )
 
         md = render_experiment_report_markdown(report)
         assert "Verdict Mix" in md

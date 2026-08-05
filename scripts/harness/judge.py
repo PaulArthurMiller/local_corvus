@@ -11,6 +11,18 @@ Runs host-side against Ollama at localhost:11434 — NOT host.docker.internal,
 which is the container-side alias used by the backend's own Ollama calls.
 This module calls the same local Ollama instance the backend talks to, just
 from outside Docker.
+
+Grading protocol, in the order it was built:
+
+  M19 P2  The judge asserted a verdict and cited a criterion in free text.
+  M31     It grades each criterion independently instead, and the verdict is
+          derived host-side (derive_verdict) — all met -> up, none met ->
+          down, mixed -> none/abstain.
+  M37     Each checklist entry must carry the words it copied out of the
+          response, criteria are graded against family-specific standards
+          ([EXACT] vs [CONCEPT]), and the host verifies the evidence. This
+          answers the 2026-08-04 calibration audit, which found the grading
+          layer above M31's derivation systematically lenient.
 """
 
 import json
@@ -42,16 +54,93 @@ class ProbeTurnJudgeError(Exception):
 class JudgeUnparseableError(Exception):
     """Raised when the judge's response fails to parse into a valid VERDICT
     even after one re-ask — malformed JSON, a missing/wrong-length/non-bool
-    criteria_met list, or an HTTP failure talking to Ollama. Routes through
+    checklist, or an HTTP failure talking to Ollama. Routes through
     error_policy["judge_unparseable"] (default soft_continue) in the runner.
 
-    Under the Milestone 31 per-criterion checklist protocol the verdict is
-    always derived host-side from criteria_met (never asserted by the judge
-    directly), so every parse failure is direction-neutral by construction —
-    there is no longer an "unresolved citation" failure mode that could only
-    ever destroy "down" verdicts (the asymmetry the 2026-07-27 fix addressed
-    under the old free-text criterion_triggered protocol).
+    Under the per-criterion checklist protocol the verdict is always derived
+    host-side from the checklist (never asserted by the judge directly), so
+    every parse failure is direction-neutral by construction — there is no
+    longer an "unresolved citation" failure mode that could only ever destroy
+    "down" verdicts (the asymmetry the 2026-07-27 fix addressed under the old
+    free-text criterion_triggered protocol).
     """
+
+
+# --- Milestone 37: criterion families -------------------------------------
+#
+# The prompt bank writes criteria in two distinct styles, and a single
+# grading rule cannot serve both:
+#
+#   "answer: L-2"                         -> a specific required answer
+#   "mentions consistent/fixed field ordering" -> an idea, worded freely
+#
+# The 2026-08-04 calibration audit found the judge crediting an answer
+# criterion because it judged a *different* rule ID to be "a recognized
+# synonym". That is the failure literal-match discipline has to kill. But
+# applying literal matching to the "mentions ..." criteria — three quarters
+# of the bank — would be the opposite error, since those are deliberately
+# paraphrase-tolerant by construction. So the judge prompt tags each
+# criterion with its family and states a different standard for each.
+CRITERION_KIND_EXACT = "exact"
+CRITERION_KIND_CONCEPT = "concept"
+
+_ANSWER_PREFIX_RE = re.compile(r"^\s*answer\s*:\s*", re.IGNORECASE)
+# An "answer:" criterion whose answer is a whole clause ("all claims must
+# remain fully auditable") is a concept criterion wearing an answer label —
+# there is no token to match literally. Only short answers ("L-2", "UTC",
+# "minute precision") get the exact standard.
+MAX_EXACT_ANSWER_WORDS = 4
+
+
+def _answer_alternatives(criterion: str) -> list[str]:
+    """
+    Split an "answer: ..." criterion into the answer variants that satisfy it.
+
+    Slashes separate accepted alternatives ("local temporal readings/local
+    time"), and a parenthetical is itself an alternative rather than required
+    trailing text ("UTC (Universal Coordinated Time)" is satisfied by either
+    form). Returns [] for a criterion that is not answer-shaped.
+    """
+    if not _ANSWER_PREFIX_RE.match(criterion or ""):
+        return []
+    body = _ANSWER_PREFIX_RE.sub("", criterion).strip()
+    alternatives: list[str] = []
+    for part in body.split("/"):
+        part = part.strip()
+        if not part:
+            continue
+        # "seven (L-1 through L-7)" -> "seven" and "L-1 through L-7".
+        match = re.match(r"^(.*?)\s*\(([^)]*)\)\s*$", part)
+        if match:
+            outside, inside = match.group(1).strip(), match.group(2).strip()
+            alternatives.extend(a for a in (outside, inside) if a)
+        else:
+            alternatives.append(part)
+    return alternatives
+
+
+def _exact_answer_tokens(criterion: str) -> list[str]:
+    """
+    The short answer variants of an exact-answer criterion — the strings the
+    response has to actually contain. Empty for concept criteria and for
+    answer criteria whose every variant is a full clause.
+    """
+    return [a for a in _answer_alternatives(criterion) if len(a.split()) <= MAX_EXACT_ANSWER_WORDS]
+
+
+def _criterion_kind(criterion: str) -> str:
+    """Which grading standard a criterion is held to (see the family note above)."""
+    return CRITERION_KIND_EXACT if _exact_answer_tokens(criterion) else CRITERION_KIND_CONCEPT
+
+
+# --- Milestone 37: evidence flags ------------------------------------------
+#
+# Recorded per criterion, in the same order as criteria_met, so a calibration
+# pass can count how often each judge failure mode fired instead of
+# rediscovering them by hand as the 2026-08-04 audit had to.
+EVIDENCE_DEMOTED_NO_QUOTE = "demoted_no_quote"
+EVIDENCE_UNVERIFIED_QUOTE = "unverified_quote"
+EVIDENCE_ANSWER_TOKEN_ABSENT = "answer_token_absent"
 
 
 @dataclass
@@ -64,6 +153,19 @@ class JudgeVerdict:
     # calibration or M33-style analysis pass can see which specific criteria
     # were met/failed, not just the derived up/down/none.
     criteria_met: Optional[list[bool]] = None
+    # Milestone 37 — the words the judge copied out of the response as its
+    # evidence for each criterion, same order/length as criteria_met. None
+    # when the judge answered with a bare boolean list and never engaged with
+    # the quote field at all.
+    criteria_evidence: Optional[list[str]] = None
+    # Milestone 37 — per-criterion evidence-check outcomes, same order as
+    # criteria_met; each entry is a (possibly empty) list of the EVIDENCE_*
+    # constants above. Empty list = the criterion's evidence checked out.
+    evidence_flags: Optional[list[list[str]]] = None
+    # True when the judge supplied at least one quote, so the evidence rules
+    # were applied to this turn. False means the judge returned a bare
+    # checklist and enforcement was skipped wholesale (see _parse_verdict).
+    evidence_enforced: bool = False
 
 
 class OllamaJudgeClient:
@@ -123,27 +225,75 @@ class OllamaJudgeClient:
 
 def _build_judge_prompt(prompt_text: str, criteria: list[str], response_text: str) -> str:
     """
-    Milestone 31 per-criterion checklist protocol (Paul, 2026-08-02): the
-    judge grades each criterion independently; the runner derives the overall
-    verdict from the checklist rather than asking the judge to apply an
-    up/down rule itself. The old any-criterion-unmet-means-down framing
-    produced a punishment-dominated 34% up-rate against exp0's demanding
-    criteria — grading one criterion at a time is also an easier task for a
-    small local judge model than applying a global rule in one shot.
+    Build the judge prompt: Milestone 31's per-criterion checklist, tightened
+    for literal-match discipline in Milestone 37.
+
+    M31 (Paul, 2026-08-02) moved the up/down rule off the judge — it grades
+    each criterion independently and the harness derives the verdict — because
+    the old any-criterion-unmet-means-down framing produced a
+    punishment-dominated 34% up-rate, and one criterion at a time is an easier
+    task for a small local judge than a global rule in one shot.
+
+    M37 (Paul, 2026-08-05) targets the layer M31 left untouched: the
+    2026-08-04 calibration audit found all three operator overrides were the
+    same defect — the judge marking a criterion true on a looser standard than
+    the criterion states (a checklist contradicting its own rationale, an
+    invented synonym, a paraphrase accepted as a match), every one lenient in
+    direction. Three changes answer that, all shaped by what gemma4:e4b can
+    actually be relied on to do:
+
+    1. **Quote before verdict.** Each checklist entry asks for the exact words
+       from the response first and the boolean second. A small model that has
+       to produce the evidence before the judgment cannot reach the judgment
+       by vibe, and the quote is what makes the claim checkable — host-side
+       (see _parse_verdict) and by the operator during calibration.
+    2. **Per-family standards.** Criteria are tagged [EXACT] or [CONCEPT] and
+       given different rules, because the bank contains both kinds and one
+       blanket rule breaks whichever family it wasn't written for.
+    3. **An explicit default.** "If unsure, answer false" — a small instruct
+       model with no stated default drifts agreeable, which is precisely the
+       observed error direction.
+
+    Rules are kept short, imperative, and free of nested conditionals: a 4B
+    judge follows a handful of flat rules far more reliably than a precise
+    but layered rubric. The response is placed before the criteria so the
+    rules land last, closest to the generation.
     """
-    criteria_lines = "\n".join(f"{i}. {c}" for i, c in enumerate(criteria, 1))
+    criteria_lines = "\n".join(
+        f"{i}. [{_criterion_kind(c).upper()}] {c}" for i, c in enumerate(criteria, 1)
+    )
+    # Built by concatenation rather than one f-string: the schema example is
+    # dense in braces, and doubling every one of them to survive f-string
+    # interpolation makes the literal the model sees unreadable in source.
+    schema_example = (
+        '{"checklist": [{"quote": "<exact words copied from the response, or an '
+        'empty string>", "met": true or false}], "rationale": "<one or two sentences>"}'
+    )
     return (
         "You are grading an AI assistant's response against a fixed checklist of criteria.\n\n"
         f"Original prompt given to the assistant:\n{prompt_text}\n\n"
-        f"Criteria to grade independently, in order:\n{criteria_lines}\n\n"
         f"Assistant's response:\n{response_text}\n\n"
-        "For EACH criterion above, judge on its own whether the response satisfies it. Do "
-        "not apply any overall up/down/pass-fail judgment yourself — that is derived "
-        "separately from your per-criterion answers.\n\n"
-        'Return ONLY a JSON object with keys "criteria_met" (a list of exactly '
-        f"{len(criteria)} true/false booleans, in the SAME order as the criteria listed "
-        'above — one boolean per criterion, no more, no fewer) and "rationale" (a short '
-        "string explaining your per-criterion judgments). No prose, no markdown fences."
+        f"Criteria to grade independently, in order:\n{criteria_lines}\n\n"
+        "Grading rules — apply them strictly:\n"
+        "- Grade only what the response actually says. Never mark a criterion met because "
+        "the response is close to it, related to it, or implies it.\n"
+        "- For each criterion, first copy the exact words from the response that satisfy it "
+        'into "quote". If no words in the response satisfy it, "quote" must be an empty '
+        'string and "met" must be false.\n'
+        "- [EXACT] criteria name a specific required answer. The response must state that "
+        "answer itself. A different code, label, number, or term does not count, even if it "
+        "looks similar or you believe it means the same thing. Never treat two different "
+        "labels as synonyms.\n"
+        "- [CONCEPT] criteria describe an idea. The response may word the idea differently, "
+        "but it must actually state the idea, not merely hint at it or leave it implied.\n"
+        "- A criterion that asks for more than one thing is met only if every part is present.\n"
+        "- If you are unsure, answer false. False is the default.\n"
+        "- Judge each criterion on its own. Do not give an overall pass/fail — that is "
+        "derived from your answers, not by you.\n\n"
+        f"Return ONLY a JSON object of this exact shape:\n{schema_example}\n\n"
+        f'"checklist" must hold exactly {len(criteria)} objects, one per criterion, in the '
+        "SAME order as the criteria listed above — no more, no fewer. No prose, no markdown "
+        "fences."
     )
 
 
@@ -236,24 +386,206 @@ def _resolve_criterion(citation: Optional[str], criteria: list[str]) -> Optional
     return None
 
 
-def _parse_verdict(raw_text: str, criteria: list[str]) -> JudgeVerdict:
+def derive_verdict(criteria_met: list, criteria: list[str]) -> tuple:
     """
-    Parse the judge's per-criterion checklist and derive the verdict
-    host-side (Milestone 31, Paul's 2026-08-02 decision): all criteria met ->
-    "up", none met -> "down", anything mixed -> "none" (a partial answer gets
-    no feedback — no weight update — matching the backend's existing
-    "absence of signal is an explicit observation" contract, M8).
+    Apply the Milestone 31 derivation rule to a checklist, returning
+    (verdict, criterion_triggered): all criteria met -> "up", none met ->
+    "down", anything mixed -> "none" (a partial answer gets no feedback and no
+    weight update, matching the backend's "absence of signal is an explicit
+    observation" contract, M8).
 
-    Deriving the verdict from a fixed-length list of booleans rather than
-    asking the judge to apply the all-vs-none rule itself is the point: the
-    old any-criterion-unmet-means-down framing produced a punishment-dominated
-    34% up-rate on exp0's fairly demanding criteria, and per-criterion grading
-    is an easier task for a small local judge model than a global rule.
+    Public and shared on purpose. The runner's --interactive per-criterion
+    regrade (M37) re-derives the verdict from the operator's corrected
+    checklist, and that has to be the same rule the judge path uses — a
+    calibration pass whose two sides applied different rules would measure
+    the rule, not the judge. The 2026-08-04 audit found no override
+    indicting this rule, so it is deliberately unchanged by M37.
+    """
+    if all(criteria_met):
+        return "up", None
+    if not any(criteria_met):
+        # All criteria failed, so which one is cited is uninformative by
+        # construction — the rationale carries the real detail. The first
+        # listed criterion satisfies the backend's down-requires-criterion
+        # contract without inventing or guessing anything.
+        return "down", criteria[0]
+    return "none", None
+
+
+def _normalize_for_evidence(text: str) -> str:
+    """
+    Reduce text to a form in which a judge's quote can be checked against the
+    response it was supposedly copied from.
+
+    Deliberately loose about presentation (case, whitespace, the quote and
+    emphasis characters a model wraps citations in, and trailing ellipses)
+    and strict about words: a model that re-cases or re-wraps a real quote is
+    still quoting, but one that changes the words is not.
+    """
+    normalized = (text or "").strip().strip(_WRAPPER_CHARS)
+    normalized = normalized.replace("…", " ").replace("...", " ")
+    normalized = re.sub(r"[\"'“”‘’`*_]", "", normalized)
+    # Collapse *then* strip: collapsing "order..." to "order " leaves a
+    # trailing space that would defeat the substring check against a response
+    # reading "order, always" — a false "unverified_quote" on a real quote.
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.casefold()
+
+
+def _check_evidence(
+    index: int,
+    criterion: str,
+    met: bool,
+    quote: str,
+    normalized_response: str,
+) -> tuple:
+    """
+    Verify one criterion's evidence, returning (met, flags).
+
+    Only one check can change a judgment, and only in the strict direction:
+    **a criterion marked met with no quote at all is forced to false.** That
+    is not second-guessing the judge — the protocol tells it that an empty
+    quote requires `met: false`, so the pair (met=true, quote="") is the
+    checklist contradicting itself, which is exactly the defect the
+    2026-08-04 audit found on turn 5. Forcing it resolves the contradiction
+    the only way the protocol allows.
+
+    The two content checks — a quote that does not appear in the response,
+    and an [EXACT] criterion whose required answer is nowhere in the response
+    — only raise flags. They are heuristics over normalized text (a judge may
+    legitimately stitch two clauses together, and "minute-level precision"
+    against a response saying "minute precision" would fire), and silently
+    reclassifying a verdict on a heuristic would corrupt the record this run
+    exists to produce. Flagged criteria are surfaced in --interactive
+    calibration and counted in the calibration summary, so the recalibration
+    pass measures how often each fires before anyone decides to promote a
+    flag into a demotion. Deciding that is Paul's call on real numbers, not
+    a guess made here.
+    """
+    flags: list[str] = []
+    if not met:
+        return met, flags
+
+    normalized_quote = _normalize_for_evidence(quote)
+    if not normalized_quote:
+        logger.warning(
+            "judge: criterion %d marked met with no supporting quote — forcing false "
+            "(protocol requires met=false when quote is empty)", index + 1,
+        )
+        return False, [EVIDENCE_DEMOTED_NO_QUOTE]
+
+    if normalized_quote not in normalized_response:
+        flags.append(EVIDENCE_UNVERIFIED_QUOTE)
+
+    tokens = _exact_answer_tokens(criterion)
+    if tokens and not any(_normalize_for_evidence(t) in normalized_response for t in tokens):
+        flags.append(EVIDENCE_ANSWER_TOKEN_ABSENT)
+
+    return met, flags
+
+
+def _extract_checklist(data: dict, criteria: list[str]) -> tuple:
+    """
+    Pull (criteria_met, criteria_evidence) out of the judge's JSON, accepting
+    every shape gemma4:e4b plausibly emits for the M37 schema.
+
+    Tolerance here is not sloppiness — it is the cheapest available lever on
+    the unparseable rate. A rejected response costs a re-ask and, if that also
+    fails, a whole turn's verdict; accepting a correctly-graded checklist that
+    arrived under the M31 key name costs nothing and changes no judgment.
+    Accepted shapes:
+
+      {"checklist":   [{"quote": "...", "met": true}, ...]}   <- M37, requested
+      {"criteria":    [{"quote": "...", "met": true}, ...]}   <- key drift
+      {"criteria_met": [true, false, ...]}                    <- M31 bare list
+      {"checklist":   [true, false, ...]}                     <- shape drift
+
+    Returns (criteria_met, criteria_evidence, quote_field_present).
+    criteria_evidence is None for the two bare-list shapes: the judge never
+    engaged with the checklist-object schema at all, so there is no evidence
+    to check.
+
+    quote_field_present distinguishes the two ways a checklist can arrive
+    without evidence, and the distinction decides whether a met criterion
+    gets demoted (see _parse_verdict). An entry that *omits* "quote" is a
+    model that dropped an output field. An entry that supplies "quote": ""
+    while claiming met is a model answering the field and contradicting
+    itself — the protocol says an empty quote requires met=false. Collapsing
+    those two into one "no evidence" case is what an earlier draft did, and
+    it silently exempted every single-criterion prompt from the demotion
+    rule: with one criterion there is no other entry to carry a quote, so
+    the whole turn looked like a dropped field. Single-criterion prompts are
+    the entire cluster_d "answer: X" family — precisely where the
+    2026-08-04 audit's synonym defect lives.
+
+    Raises ValueError on anything else — wrong length, non-bool "met",
+    missing key — which routes through judge_turn's direction-neutral retry.
+    """
+    entries = None
+    for key in ("checklist", "criteria", "criteria_met"):
+        if isinstance(data.get(key), list):
+            entries = data[key]
+            break
+    if entries is None:
+        raise ValueError(
+            f"judge response carried no checklist: expected a list under "
+            f'"checklist" (or "criteria_met"), got keys {sorted(data)!r}'
+        )
+    if len(entries) != len(criteria):
+        raise ValueError(
+            f"judge checklist has {len(entries)} entries but the prompt carried "
+            f"{len(criteria)} criteria — one entry per criterion, in order, is required"
+        )
+
+    criteria_met: list[bool] = []
+    criteria_evidence: list[str] = []
+    saw_object = False
+    quote_field_present = False
+    for i, entry in enumerate(entries):
+        if isinstance(entry, bool):
+            criteria_met.append(entry)
+            criteria_evidence.append("")
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("met"), bool):
+            saw_object = True
+            criteria_met.append(entry["met"])
+            quote = entry.get("quote")
+            if isinstance(quote, str):
+                quote_field_present = True
+            criteria_evidence.append(quote if isinstance(quote, str) else "")
+            continue
+        raise ValueError(
+            f"judge checklist entry {i + 1} is {entry!r} — expected "
+            '{"quote": "...", "met": true/false} or a bare true/false'
+        )
+
+    return criteria_met, (criteria_evidence if saw_object else None), quote_field_present
+
+
+def _parse_verdict(raw_text: str, criteria: list[str], response_text: str = "") -> JudgeVerdict:
+    """
+    Parse the judge's per-criterion checklist, verify its evidence, and derive
+    the verdict host-side.
+
+    Deriving the verdict from a fixed-length checklist rather than asking the
+    judge to apply the all-vs-none rule itself is the M31 point: the old
+    any-criterion-unmet-means-down framing produced a punishment-dominated
+    34% up-rate on exp0's demanding criteria, and per-criterion grading is an
+    easier task for a small local judge than a global rule. M37 adds the
+    evidence layer above it — see _check_evidence for what can and cannot
+    change a judgment.
+
+    Evidence enforcement is all-or-nothing per turn by design. If the judge
+    returned a bare boolean list with no quotes anywhere, the quote rule is
+    skipped entirely rather than demoting every met criterion — a 4B model
+    that ignores an output field is a protocol miss, and turning that into a
+    turn where nothing is met would manufacture a "down" out of a formatting
+    failure. `evidence_enforced` records which regime the turn was graded
+    under so the two are never pooled in analysis.
 
     Raises ValueError (caught by judge_turn's retry loop, direction-neutral
-    per JudgeUnparseableError) if criteria_met is missing, not a list, the
-    wrong length, or contains a non-bool element — the exact malformed shapes
-    the model can produce when it doesn't follow the schema.
+    per JudgeUnparseableError) on the malformed shapes _extract_checklist
+    rejects.
     """
     try:
         data = json.loads(raw_text)
@@ -263,36 +595,47 @@ def _parse_verdict(raw_text: str, criteria: list[str]) -> JudgeVerdict:
     if not isinstance(data, dict):
         raise ValueError(f"judge response JSON was not an object: {raw_text[:200]!r}")
 
-    criteria_met = data.get("criteria_met")
-    if (
-        not isinstance(criteria_met, list)
-        or len(criteria_met) != len(criteria)
-        or not all(isinstance(v, bool) for v in criteria_met)
-    ):
-        raise ValueError(
-            f"judge criteria_met {criteria_met!r} must be a list of exactly "
-            f"{len(criteria)} booleans (one per criterion, in order)"
-        )
+    criteria_met, criteria_evidence, quote_field_present = _extract_checklist(data, criteria)
 
-    if all(criteria_met):
-        verdict = "up"
-        criterion_triggered = None
-    elif not any(criteria_met):
-        verdict = "down"
-        # All criteria failed, so which one is cited is uninformative by
-        # construction — the rationale carries the real detail. The first
-        # listed criterion satisfies the backend's down-requires-criterion
-        # contract without inventing or guessing anything.
-        criterion_triggered = criteria[0]
-    else:
-        verdict = "none"
-        criterion_triggered = None
+    # Enforce whenever the judge answered in checklist-object form, with one
+    # bailout: it returned objects that omit the "quote" key entirely while
+    # still marking something met. That is a model dropping an output field,
+    # not a response that failed every criterion, and demoting the lot would
+    # manufacture a "down" out of a formatting miss — the one direction of
+    # error this milestone must not introduce while fixing the other. A
+    # supplied-but-empty quote is NOT this case: see _extract_checklist.
+    dropped_quote_field = (
+        criteria_evidence is not None and any(criteria_met) and not quote_field_present
+    )
+    if dropped_quote_field:
+        logger.warning(
+            "judge: checklist marked %d/%d criteria met but omitted the quote field "
+            "entirely — evidence enforcement skipped for this turn",
+            sum(1 for m in criteria_met if m), len(criteria_met),
+        )
+    evidence_enforced = criteria_evidence is not None and not dropped_quote_field
+    evidence_flags: Optional[list[list[str]]] = None
+    if evidence_enforced:
+        normalized_response = _normalize_for_evidence(response_text)
+        checked = [
+            _check_evidence(i, criterion, met, quote, normalized_response)
+            for i, (criterion, met, quote) in enumerate(
+                zip(criteria, criteria_met, criteria_evidence)
+            )
+        ]
+        criteria_met = [met for met, _ in checked]
+        evidence_flags = [flags for _, flags in checked]
+
+    verdict, criterion_triggered = derive_verdict(criteria_met, criteria)
 
     return JudgeVerdict(
         verdict=verdict,
         rationale=data.get("rationale"),
         criterion_triggered=criterion_triggered,
         criteria_met=criteria_met,
+        criteria_evidence=criteria_evidence,
+        evidence_flags=evidence_flags,
+        evidence_enforced=evidence_enforced,
     )
 
 
@@ -313,11 +656,14 @@ def judge_turn(
 
     Raises JudgeUnparseableError only if the judge's response fails to parse
     into a valid checklist even after one re-ask (covers malformed JSON, a
-    missing/wrong-length/non-bool criteria_met, and HTTP/connectivity
+    missing/wrong-length/non-bool checklist, and HTTP/connectivity
     failures talking to Ollama — all contained by the same
     retry-then-soft-continue path). Every failure here is direction-neutral:
     unlike the pre-Milestone-31 free-text citation protocol, there is no verdict
-    to partially trust when criteria_met is malformed.
+    to partially trust when the checklist is malformed.
+
+    The response text is passed to _parse_verdict as well as into the prompt
+    (M37) — the judge's quoted evidence is checked against it host-side.
     """
     if turn_type == TURN_TYPE_PROBE:
         raise ProbeTurnJudgeError("judge_turn must never be called for a probe turn")
@@ -328,7 +674,7 @@ def judge_turn(
     for attempt in range(MAX_JUDGE_ATTEMPTS):
         try:
             raw_text = client.chat_json(judge_config.model, judge_config.temperature, prompt)
-            return _parse_verdict(raw_text, criteria)
+            return _parse_verdict(raw_text, criteria, response_text)
         except (ValueError, KeyError, httpx.HTTPError) as exc:
             last_exc = exc
             logger.warning("judge: parse/call failure (attempt %d/%d): %s", attempt + 1, MAX_JUDGE_ATTEMPTS, exc)

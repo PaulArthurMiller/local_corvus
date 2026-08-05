@@ -1,0 +1,54 @@
+{
+  "plan_id": "exp0-calibration-2026-08-05-m37",
+  "plan_name": "Milestone 37 judge recalibration - same 20-turn slice as the 2026-08-02 (M31) and 2026-07-27 calibration plans, re-graded under the literal-match judge prompt with per-criterion operator regrading. Identical random_seed, so the turn slice is the same one M31 was calibrated on and the two passes are directly comparable.",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 5,
+  "turns_per_series": 70,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
+  "difficulty": {
+    "hop_distance_levels": [
+      0,
+      1
+    ]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": [
+    "learned",
+    "static_weight",
+    "random_weight"
+  ],
+  "condition_order": [
+    "learned",
+    "static_weight",
+    "random_weight"
+  ],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": 25.0,
+  "prompt_gen": {
+    "model": "claude-sonnet-5",
+    "max_retries": 2
+  },
+  "dry_run": true,
+  "dry_run_n": 20,
+  "random_seed": 20260726,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
+}

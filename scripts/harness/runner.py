@@ -45,7 +45,20 @@ from harness.docker_lifecycle import (
     restart_backend,
     wait_for_health,
 )
-from harness.judge import VALID_VERDICTS, JudgeUnparseableError, judge_turn
+from harness.calibration import (
+    collect_calibration_record,
+    render_calibration_summary,
+    write_calibration_summary,
+)
+from harness.judge import (
+    EVIDENCE_ANSWER_TOKEN_ABSENT,
+    EVIDENCE_DEMOTED_NO_QUOTE,
+    EVIDENCE_UNVERIFIED_QUOTE,
+    VALID_VERDICTS,
+    JudgeUnparseableError,
+    derive_verdict,
+    judge_turn,
+)
 from harness.manifest import (
     RunManifest,
     compute_config_hash,
@@ -101,6 +114,9 @@ class RunOutcome:
     manifest_path: Path
     notification_log_path: Path
     turns_processed: int = 0
+    # M37 — set only for --interactive calibration passes, which are the only
+    # runs that produce operator-vs-judge agreement data to summarize.
+    calibration_summary_path: Optional[Path] = None
 
 
 def resolve_error_policy(plan: RunPlan) -> dict:
@@ -154,15 +170,59 @@ def build_turn_message(turn: dict, condition: str, prompt_lookup: Optional[dict]
     return _placeholder_bulk_message(condition, turn)
 
 
+# Milestone 37 — how each host-side evidence flag reads on screen during
+# calibration. Kept next to the renderer rather than in judge.py: these are
+# operator-facing prose, not part of the recorded vocabulary.
+_EVIDENCE_FLAG_NOTES = {
+    EVIDENCE_DEMOTED_NO_QUOTE: "FORCED FALSE — marked met with no supporting quote",
+    EVIDENCE_UNVERIFIED_QUOTE: "quote not found in the response",
+    EVIDENCE_ANSWER_TOKEN_ABSENT: "required answer does not appear in the response",
+}
+
+
+def _format_criteria_block(
+    criteria: list,
+    criteria_met: Optional[list] = None,
+    criteria_evidence: Optional[list] = None,
+    evidence_flags: Optional[list] = None,
+) -> str:
+    """
+    Render the numbered criteria with the judge's mark, its quoted evidence,
+    and any host-side evidence flags — the block the operator grades against.
+
+    The quote is the point (M37). The 2026-08-04 audit's three overrides were
+    all the judge accepting something looser than the criterion states, and
+    that is invisible from a bare [x] but obvious the moment the words it
+    relied on sit next to the criterion: "answer: L-2" marked met on the
+    quote "the applicable rule is V-1" needs no deliberation at all. Falls
+    back to a plain list when there is no checklist (judge_unparseable manual
+    recovery has no per-criterion data to show).
+    """
+    if criteria_met is None or len(criteria_met) != len(criteria):
+        return "\n".join(f"    {i}. {c}" for i, c in enumerate(criteria, 1))
+
+    lines = []
+    for i, (criterion, met) in enumerate(zip(criteria, criteria_met)):
+        lines.append(f"    {i + 1}. [{'x' if met else ' '}] {criterion}")
+        if criteria_evidence is not None and i < len(criteria_evidence):
+            quote = (criteria_evidence[i] or "").strip()
+            lines.append(f"         quote: {quote!r}" if quote else "         quote: (none)")
+        for flag in (evidence_flags[i] if evidence_flags and i < len(evidence_flags) else []):
+            lines.append(f"         ** {_EVIDENCE_FLAG_NOTES.get(flag, flag)}")
+    return "\n".join(lines)
+
+
 def _print_calibration_context(
     print_fn: Callable[[str], None],
     prompt_entry: PromptBankEntry,
     response_text: str,
     criteria_met: Optional[list] = None,
+    criteria_evidence: Optional[list] = None,
+    evidence_flags: Optional[list] = None,
 ) -> None:
     """
     Show the operator everything the judge saw, before asking them to accept
-    or override its verdict (--interactive only).
+    or regrade its checklist (--interactive only).
 
     Without this, calibration mode is unanswerable: the operator is shown the
     verdict and the judge's own rationale, which is the thing under audit —
@@ -174,26 +234,13 @@ def _print_calibration_context(
     exactly the wrong labels into the calibration record this mode exists to
     produce. Verbosity is the correct trade here — this path runs for a
     ~20-turn calibration pass, never for a real run.
-
-    Milestone 31: when criteria_met is available (a judge model verdict was
-    parsed), each criterion is shown with its own [x]/[ ] mark so the operator
-    is calibrating against the same per-criterion checklist the judge graded,
-    not just the derived up/down/none. Falls back to a plain list when there
-    is no checklist (judge_unparseable manual recovery has no per-criterion
-    data to show).
     """
-    if criteria_met is not None and len(criteria_met) == len(prompt_entry.criteria):
-        criteria_lines = "\n".join(
-            f"    [{'x' if met else ' '}] {c}"
-            for c, met in zip(prompt_entry.criteria, criteria_met)
-        )
-    else:
-        criteria_lines = "\n".join(f"    - {c}" for c in prompt_entry.criteria)
     print_fn(
         f"\n  {'-' * 68}\n"
         f"  PROMPT [{prompt_entry.prompt_id}]:\n    {prompt_entry.prompt_text}\n\n"
-        f"  CRITERIA:\n{criteria_lines}\n\n"
-        f"  AGENT RESPONSE:\n    {response_text.strip() or '(empty)'}\n"
+        f"  AGENT RESPONSE:\n    {response_text.strip() or '(empty)'}\n\n"
+        f"  CRITERIA:\n"
+        f"{_format_criteria_block(prompt_entry.criteria, criteria_met, criteria_evidence, evidence_flags)}\n"
         f"  {'-' * 68}"
     )
 
@@ -257,6 +304,75 @@ def _prompt_for_failed_criterion(
     return criteria[int(choice) - 1]
 
 
+def _regrade_criteria_interactively(
+    resume_input_fn: Callable[[str], str],
+    print_fn: Callable[[str], None],
+    criteria: list,
+    judge_criteria_met: list,
+) -> list:
+    """
+    Walk the operator through the checklist one criterion at a time, returning
+    the corrected list of booleans (--interactive only).
+
+    This is Milestone 37's calibration change: the 2026-08-04 audit found the
+    judge's error lives at the per-criterion layer — all three overrides were
+    a criterion accepted on a looser standard than it states — while the
+    verdict-level accept/override question could only ever record that a turn
+    moved, never which criterion moved it or in which direction. Grading
+    per criterion yields one observation per criterion instead of one per turn
+    (~2.4x on the current bank, where prompts carry 1-3 criteria) and each
+    observation names its criterion, which is what turns a 20-turn pass from
+    an uninformative override *rate* into a usable measurement.
+
+    Enter keeps the judge's answer, so agreeing with a whole checklist costs
+    one keypress per criterion and the operator never has to retype a
+    judgment they accept. Anything other than y/n/Enter re-asks (see
+    _prompt_until_valid's reasoning — a typo silently recorded is worse here
+    than in any ordinary CLI, because the record is the product).
+    """
+    corrected = []
+    print_fn("  Regrade each criterion (Enter keeps the judge's answer):")
+    for i, (criterion, judge_met) in enumerate(zip(criteria, judge_criteria_met), 1):
+        answer = _prompt_until_valid(
+            resume_input_fn, print_fn,
+            f"    {i}. [{'x' if judge_met else ' '}] {criterion}\n"
+            f"       Met? [y/n, Enter={'y' if judge_met else 'n'}]: ",
+            ("y", "n", ""),
+        )
+        corrected.append(judge_met if answer == "" else answer == "y")
+    return corrected
+
+
+@dataclass
+class VerdictOutcome:
+    """
+    Everything one turn's judging produced, for the checkpoint.
+
+    Replaced a 5-tuple in Milestone 37. The tuple was already at the edge of
+    readability and M37 adds four more fields; a positional unpack of nine
+    values is exactly the shape that silently transposes two of them.
+
+    verdict/feedback_event_id are None when judging soft-continues, with
+    judge_error holding the reason. judge_model_verdict and
+    judge_model_criteria_met are what the judge itself produced, before any
+    --interactive correction, so an operator's disagreement stays recoverable
+    from the checkpoint at both the verdict and the criterion layer; both are
+    None when the judge never produced a parseable verdict at all — including
+    when the operator hand-grades an unparseable turn, where there is no model
+    judgment to record.
+    """
+
+    verdict: Optional[str] = None
+    feedback_event_id: Optional[str] = None
+    judge_error: Optional[str] = None
+    judge_model_verdict: Optional[str] = None
+    criteria_met: Optional[list] = None
+    judge_model_criteria_met: Optional[list] = None
+    criteria_evidence: Optional[list] = None
+    evidence_flags: Optional[list] = None
+    evidence_enforced: Optional[bool] = None
+
+
 def _judge_and_post_verdict(
     client: BackendClient,
     judge_client: Any,
@@ -270,22 +386,11 @@ def _judge_and_post_verdict(
     interactive: bool,
     resume_input_fn: Callable[[str], str],
     print_fn: Callable[[str], None],
-) -> tuple:
+) -> VerdictOutcome:
     """
     Judge one bulk turn's response and post the verdict to the backend.
 
-    Returns (verdict, feedback_event_id, judge_error, judge_model_verdict,
-    criteria_met) — verdict and feedback_event_id are None when judging
-    soft-continues (judge_error holds the reason instead). judge_model_verdict
-    is what the judge model itself returned, before any --interactive
-    override, so an override's direction stays recoverable from the
-    checkpoint; it is None only when the judge never produced a parseable
-    verdict at all — including when the operator hand-grades an unparseable
-    turn in --interactive, where there is no model verdict to record.
-    criteria_met is the judge's per-criterion checklist (Milestone 31),
-    recorded through to the checkpoint whenever the judge produced one; None
-    when there is no judge model verdict to derive it from. Raises
-    HardStopError only for the judge_unparseable hard_stop policy case.
+    Raises HardStopError only for the judge_unparseable hard_stop policy case.
     BackendConnectivityError / BackendTurnError raised by
     client.post_verdict() propagate to the caller, which applies the
     standard connectivity/turn_ambiguous policy — the same categories every
@@ -317,37 +422,79 @@ def _judge_and_post_verdict(
                     rationale=f"operator verdict after unparseable judge response: {exc}",
                     criterion_triggered=criterion_triggered,
                     judge_model_verdict=None,
-                    criteria_met=None,
                 )
         print_fn(f"  judge verdict unparseable — soft-continuing, no verdict recorded: {exc}")
         logger.warning("runner: judge_unparseable (soft_continue): %s", exc)
-        return None, None, f"judge_unparseable: {exc}", None, None
+        return VerdictOutcome(judge_error=f"judge_unparseable: {exc}")
 
     judge_model_verdict = verdict_obj.verdict
+    judge_model_criteria_met = list(verdict_obj.criteria_met or [])
     verdict = judge_model_verdict
     criterion_triggered = verdict_obj.criterion_triggered
-    criteria_met = verdict_obj.criteria_met
+    criteria_met = judge_model_criteria_met
     judge_source = f"model:{plan.judge.model}"
-    # Accepted-as-is, this stays the model's own rationale; an override below
+    # Accepted-as-is, this stays the model's own rationale; a correction below
     # replaces it with one describing the recorded verdict (M36).
     rationale = verdict_obj.rationale
 
     if interactive:
         _print_calibration_context(
-            print_fn, prompt_entry, response_text, criteria_met=verdict_obj.criteria_met,
+            print_fn, prompt_entry, response_text,
+            criteria_met=verdict_obj.criteria_met,
+            criteria_evidence=verdict_obj.criteria_evidence,
+            evidence_flags=verdict_obj.evidence_flags,
         )
         print_fn(
             f"  Judge verdict: {verdict} rationale={verdict_obj.rationale!r} "
             f"criterion_triggered={verdict_obj.criterion_triggered!r}"
         )
+        # M37 — "regrade" is listed first and is the calibration path: it
+        # measures the layer the 2026-08-04 audit found to be wrong. Direct
+        # verdict override is kept as the escape hatch for the case regrading
+        # cannot express — an operator who disagrees with the derivation rule
+        # itself rather than with any individual criterion.
         answer = _prompt_until_valid(
             resume_input_fn, print_fn,
-            "Accept judge verdict, or override? [a/o/skip]: ",
-            ("a", "o", "skip"),
+            "Regrade per-criterion, accept checklist, override verdict, or skip? [r/a/o/skip]: ",
+            ("r", "a", "o", "skip"),
         )
         if answer == "skip":
-            return None, None, "verdict skipped by operator (--interactive)", judge_model_verdict, criteria_met
-        if answer == "o":
+            return VerdictOutcome(
+                judge_error="verdict skipped by operator (--interactive)",
+                judge_model_verdict=judge_model_verdict,
+                criteria_met=criteria_met,
+                judge_model_criteria_met=judge_model_criteria_met,
+                criteria_evidence=verdict_obj.criteria_evidence,
+                evidence_flags=verdict_obj.evidence_flags,
+                evidence_enforced=verdict_obj.evidence_enforced,
+            )
+        if answer == "r":
+            criteria_met = _regrade_criteria_interactively(
+                resume_input_fn, print_fn, prompt_entry.criteria, judge_model_criteria_met,
+            )
+            # Same derivation the judge path uses, applied to the corrected
+            # checklist — the operator grades criteria, never the verdict, so
+            # the rule under test stays constant across both sides of the
+            # comparison.
+            verdict, criterion_triggered = derive_verdict(criteria_met, prompt_entry.criteria)
+            if criteria_met == judge_model_criteria_met:
+                # Regraded and agreed with every criterion. That is an
+                # affirmation of the judge, not a human verdict, and recording
+                # it as human-sourced would understate the judge-alone up-rate
+                # M36 exists to report.
+                print_fn(f"  Checklist confirmed as graded — verdict {verdict}.")
+            else:
+                judge_source = "human"
+                rationale = (
+                    f"operator per-criterion regrade: judge {judge_model_criteria_met} "
+                    f"-> {criteria_met}, verdict {judge_model_verdict!r} -> {verdict!r} "
+                    f"(--interactive calibration)"
+                )
+                print_fn(
+                    f"  Regraded {judge_model_criteria_met} -> {criteria_met}; "
+                    f"verdict {judge_model_verdict} -> {verdict}."
+                )
+        elif answer == "o":
             verdict = _prompt_until_valid(
                 resume_input_fn, print_fn,
                 "Override verdict (up/down/none): ",
@@ -387,6 +534,10 @@ def _judge_and_post_verdict(
         judge_model_verdict=judge_model_verdict,
         judge_model_rationale=verdict_obj.rationale,
         criteria_met=criteria_met,
+        judge_model_criteria_met=judge_model_criteria_met,
+        criteria_evidence=verdict_obj.criteria_evidence,
+        evidence_flags=verdict_obj.evidence_flags,
+        evidence_enforced=verdict_obj.evidence_enforced,
     )
 
 
@@ -436,16 +587,23 @@ def _post_verdict(
     judge_model_verdict: Optional[str],
     judge_model_rationale: Optional[str] = None,
     criteria_met: Optional[list] = None,
-) -> tuple:
+    judge_model_criteria_met: Optional[list] = None,
+    criteria_evidence: Optional[list] = None,
+    evidence_flags: Optional[list] = None,
+    evidence_enforced: Optional[bool] = None,
+) -> VerdictOutcome:
     """
-    POST one verdict and shape the caller's 5-tuple. Shared by the normal
-    judged path and the --interactive manual-recovery path so both record
-    identical metadata; connectivity/turn errors propagate to the caller's
-    existing policy handling. criteria_met (Milestone 31) is not sent to the
-    backend — no schema change there — it flows straight through to the
-    checkpoint for local calibration/analysis use.
+    POST one verdict and shape the caller's VerdictOutcome. Shared by the
+    normal judged path and the --interactive manual-recovery path so both
+    record identical metadata; connectivity/turn errors propagate to the
+    caller's existing policy handling.
 
-    judge_model_verdict/judge_model_rationale are now sent (M36) rather than
+    The per-criterion fields (M31's checklist, M37's evidence and pre-regrade
+    checklist) are not sent to the backend — no schema change there — they
+    flow straight through to the checkpoint for local calibration/analysis
+    use.
+
+    judge_model_verdict/judge_model_rationale are sent (M36) rather than
     only reaching the checkpoint: the report generators read the DB, so
     without them there was no way to state a judge-alone up-rate — the
     number that describes the real, unattended run — from a calibration
@@ -467,7 +625,16 @@ def _post_verdict(
         judge_model_verdict=judge_model_verdict,
         judge_model_rationale=judge_model_rationale,
     )
-    return verdict, verdict_response.get("feedback_event_id"), None, judge_model_verdict, criteria_met
+    return VerdictOutcome(
+        verdict=verdict,
+        feedback_event_id=verdict_response.get("feedback_event_id"),
+        judge_model_verdict=judge_model_verdict,
+        criteria_met=criteria_met,
+        judge_model_criteria_met=judge_model_criteria_met,
+        criteria_evidence=criteria_evidence,
+        evidence_flags=evidence_flags,
+        evidence_enforced=evidence_enforced,
+    )
 
 
 def _generate_series_report(
@@ -1097,11 +1264,7 @@ def execute_run(
                 # M19 Phase 2 — judge the response and post the verdict.
                 # Bulk turns only (guard #1 — probes are never judged); the
                 # judge module itself refuses probe turns too (guard #2).
-                verdict_str: Optional[str] = None
-                feedback_event_id: Optional[str] = None
-                judge_error: Optional[str] = None
-                judge_model_verdict: Optional[str] = None
-                criteria_met: Optional[list] = None
+                verdict_outcome = VerdictOutcome()
                 if (
                     status == STATUS_OK
                     and turn["turn_type"] != TURN_TYPE_PROBE
@@ -1111,7 +1274,7 @@ def execute_run(
                     prompt_entry = entry_by_prompt_id.get(turn.get("prompt_id"))
                     if prompt_entry is not None:
                         try:
-                            verdict_str, feedback_event_id, judge_error, judge_model_verdict, criteria_met = _judge_and_post_verdict(
+                            verdict_outcome = _judge_and_post_verdict(
                                 client, judge_client, plan, condition, detail, prompt_entry,
                                 (response or {}).get("response", ""), turn["turn_type"],
                                 error_policy, interactive, resume_input_fn, print_fn,
@@ -1125,12 +1288,12 @@ def execute_run(
                             if error_policy.get("connectivity") == "hard_stop":
                                 error_summary = f"connectivity during verdict post {key}: {exc}"
                                 raise HardStopError(error_summary) from exc
-                            judge_error = f"verdict post connectivity error: {exc}"
+                            verdict_outcome.judge_error = f"verdict post connectivity error: {exc}"
                         except BackendTurnError as exc:
                             if error_policy.get("turn_ambiguous") == "hard_stop":
                                 error_summary = f"verdict post turn error {key}: {exc}"
                                 raise HardStopError(error_summary) from exc
-                            judge_error = f"verdict post turn error: {exc}"
+                            verdict_outcome.judge_error = f"verdict post turn error: {exc}"
 
                         # M19 Phase 3 — a judge call was made regardless of
                         # outcome (verdict, unparseable, or a soft-continued
@@ -1152,11 +1315,15 @@ def execute_run(
                     turn_type=turn["turn_type"],
                     status=status,
                     detail=detail,
-                    verdict=verdict_str,
-                    feedback_event_id=feedback_event_id,
-                    judge_error=judge_error,
-                    judge_model_verdict=judge_model_verdict,
-                    criteria_met=criteria_met,
+                    verdict=verdict_outcome.verdict,
+                    feedback_event_id=verdict_outcome.feedback_event_id,
+                    judge_error=verdict_outcome.judge_error,
+                    judge_model_verdict=verdict_outcome.judge_model_verdict,
+                    criteria_met=verdict_outcome.criteria_met,
+                    judge_model_criteria_met=verdict_outcome.judge_model_criteria_met,
+                    criteria_evidence=verdict_outcome.criteria_evidence,
+                    evidence_flags=verdict_outcome.evidence_flags,
+                    evidence_enforced=verdict_outcome.evidence_enforced,
                     probe_id=turn.get("probe_id"),
                     measurement_session_index=turn.get("measurement_session_index"),
                     probe_sample_result_ids=probe_sample_result_ids,
@@ -1164,7 +1331,7 @@ def execute_run(
                 ))
                 save_checkpoint(checkpoint, run_base_dir)
                 turns_processed += 1
-                verdict_note = f" verdict={verdict_str}" if verdict_str else ""
+                verdict_note = f" verdict={verdict_outcome.verdict}" if verdict_outcome.verdict else ""
                 probe_note = (
                     f" probe={turn['probe_id']} session={turn['measurement_session_index']} "
                     f"sample_repeats={probe_sample_repeats_completed}/{sample_battery_repeats}"
@@ -1221,6 +1388,19 @@ def execute_run(
     checkpoint.final_status = "aborted" if aborted else "complete"
     save_checkpoint(checkpoint, run_base_dir)
 
+    # M37 — a calibration pass's product is the agreement data, so write it
+    # out as its own artifact rather than leaving it implicit in
+    # checkpoint.json. Written on abort too: a pass that stopped at turn 12
+    # still measured 12 turns' worth of criteria, and that is exactly when
+    # nobody wants to reconstruct it by hand. Interactive only — an
+    # unattended run has no operator judgments to compare against.
+    calibration_summary_path = None
+    if interactive:
+        record = collect_calibration_record(checkpoint.turns)
+        calibration_summary_path = write_calibration_summary(record, run_id, run_base_dir)
+        print_fn("\n" + render_calibration_summary(record, run_id))
+        print_fn(f"Calibration summary written to {calibration_summary_path}")
+
     # M19 Phase 3 — the experiment-close report's md_path becomes report_path
     # in the notification payload, exactly the field the Phase 0 stub
     # already defined. None when aborted, skipped, or itself soft-continued.
@@ -1252,4 +1432,5 @@ def execute_run(
         manifest_path=manifest_path,
         notification_log_path=notification_log_path,
         turns_processed=turns_processed,
+        calibration_summary_path=calibration_summary_path,
     )

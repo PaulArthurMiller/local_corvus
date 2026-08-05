@@ -1816,3 +1816,267 @@ def test_resolve_run_attempt_no_existing_checkpoint_starts_fresh(tmp_path):
     assert attempt == 1
     assert resume is False
     assert existing is None
+
+
+# ---------------------------------------------------------------------------
+# Milestone 37 — per-criterion calibration.
+#
+# The 2026-08-04 audit could report that 3/20 turns were overridden and
+# nothing more: the verdict-level accept/override question records that a
+# turn moved, never which criterion moved it. Regrading per criterion yields
+# one observation per criterion and names the criterion each time. These
+# tests pin the regrade path, what it records, and what it must not disturb.
+# ---------------------------------------------------------------------------
+
+
+def _checklist(criteria_met, quotes=None, rationale="ok"):
+    """A judge reply in the M37 quote-bearing shape."""
+    quotes = quotes if quotes is not None else ["evidence"] * len(criteria_met)
+    return {
+        "checklist": [{"quote": q, "met": m} for q, m in zip(quotes, criteria_met)],
+        "rationale": rationale,
+    }
+
+
+def test_interactive_regrade_derives_the_verdict_from_the_corrected_checklist(tmp_path):
+    """
+    The operator grades criteria; the verdict follows from the same M31 rule
+    the judge path uses. Flipping the one met criterion of a two-criterion
+    checklist takes the turn from "none" (mixed) to "down" (none met) without
+    the operator ever naming a verdict.
+    """
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", n=1, criteria=["answer: L-2", "mentions fixed ordering"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        checklists=[_checklist([True, False], quotes=["the rule is V-1", ""])]
+    )
+    # "r" to regrade, then "n" for criterion 1, Enter to keep criterion 2.
+    scripted = iter(["r", "n", ""])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert client.verdict_calls[0]["verdict"] == "down"
+    assert client.verdict_calls[0]["judge_source"] == "human"
+    # criterion_triggered must be populated or the backend 422s on a "down".
+    assert client.verdict_calls[0]["criterion_triggered"] == "answer: L-2"
+    turn = outcome.checkpoint.turns[0]
+    assert turn.criteria_met == [False, False]
+    assert turn.judge_model_criteria_met == [True, False]
+    assert turn.judge_model_verdict == "none"
+    assert turn.verdict == "down"
+
+
+def test_interactive_regrade_with_enter_keeps_every_judge_answer(tmp_path):
+    """
+    Enter accepts the judge's answer, so agreeing with a whole checklist costs
+    one keypress per criterion. A regrade that changes nothing is an
+    affirmation of the judge, not a human verdict — recording it as
+    human-sourced would understate the judge-alone up-rate M36 exists to
+    report.
+    """
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", n=1, criteria=["mentions X", "mentions Y"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[_checklist([True, True])])
+    scripted = iter(["r", "", ""])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert client.verdict_calls[0]["verdict"] == "up"
+    assert client.verdict_calls[0]["judge_source"] == "model:gemma4:e4b"
+    turn = outcome.checkpoint.turns[0]
+    assert turn.criteria_met == [True, True]
+    assert turn.judge_model_criteria_met == [True, True]
+
+
+def test_interactive_regrade_preserves_the_judges_own_checklist(tmp_path):
+    """
+    judge_model_criteria_met is the per-criterion analogue of M36's
+    judge_model_verdict. Without it a regrade is unrecoverable after the
+    fact — the pass could report that the operator intervened but never in
+    which direction at the criterion layer, which is the whole measurement.
+    """
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", n=1, criteria=["mentions X", "mentions Y"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[_checklist([True, True])])
+    scripted = iter(["r", "n", ""])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    turn = outcome.checkpoint.turns[0]
+    assert turn.judge_model_criteria_met == [True, True]
+    assert turn.criteria_met == [False, True]
+    assert turn.verdict == "none"  # mixed after the correction
+    assert client.verdict_calls[0]["judge_model_verdict"] == "up"
+
+
+def test_interactive_regrade_rejects_a_typo_instead_of_recording_it(tmp_path):
+    """
+    Same reasoning as _prompt_until_valid's: a typo silently recorded is
+    worse here than in an ordinary CLI, because the record is the product.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", n=1, criteria=["mentions X"])
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[_checklist([True])])
+    scripted = iter(["r", "yes please", "n"])
+    printed = []
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=printed.append, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert any("Unrecognized answer" in line for line in printed)
+    assert outcome.checkpoint.turns[0].criteria_met == [False]
+
+
+def test_interactive_shows_the_judges_quote_and_evidence_flags(tmp_path):
+    """
+    The quote is what makes a lenient grade visible. "answer: L-2" marked met
+    on the quote "the applicable rule is V-1" needs no deliberation once the
+    words it relied on sit next to the criterion — which is exactly the
+    turn-12 override from the 2026-08-04 audit.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", n=1, criteria=["answer: L-2"])
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(
+        checklists=[_checklist([True], quotes=["the applicable rule is V-1"])]
+    )
+    printed = []
+
+    execute_run(
+        plan, client, tmp_path, print_fn=printed.append, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: "a",
+    )
+
+    output = "\n".join(printed)
+    assert "quote:" in output
+    assert "the applicable rule is V-1" in output
+    assert "required answer does not appear in the response" in output
+
+
+def test_verdict_override_still_available_alongside_regrade(tmp_path):
+    """
+    Direct verdict override is the escape hatch for the case regrading cannot
+    express: an operator who disagrees with the derivation rule itself rather
+    than with any individual criterion. It contributes no per-criterion
+    observations, so criteria_met keeps the judge's checklist.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", n=1, criteria=["mentions X"])
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[_checklist([True])])
+    scripted = iter(["o", "none"])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert client.verdict_calls[0]["verdict"] == "none"
+    assert client.verdict_calls[0]["judge_source"] == "human"
+    turn = outcome.checkpoint.turns[0]
+    assert turn.criteria_met == [True]
+    assert turn.judge_model_criteria_met == [True]
+
+
+def test_evidence_data_is_recorded_on_the_checkpoint(tmp_path):
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", n=1, criteria=["answer: L-2"])
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[_checklist([True], quotes=["rule V-1"])])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+    )
+
+    turn = outcome.checkpoint.turns[0]
+    assert turn.criteria_evidence == ["rule V-1"]
+    assert turn.evidence_enforced is True
+    assert turn.evidence_flags is not None
+
+
+def test_non_interactive_runs_write_no_calibration_summary(tmp_path):
+    """An unattended run has no operator judgments to compare against."""
+    bank_path = _write_bank_with_criteria(tmp_path / "banks", n=1)
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[_checklist([True])])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+    )
+
+    assert outcome.calibration_summary_path is None
+
+
+def test_interactive_run_writes_a_calibration_summary(tmp_path):
+    """
+    M36's lesson applied one layer down: a number nobody reports is a number
+    nobody has. The per-criterion agreement data gets its own artifact rather
+    than living only as fields inside checkpoint.json.
+    """
+    bank_path = _write_bank_with_criteria(
+        tmp_path / "banks", n=1, criteria=["mentions X", "mentions Y"],
+    )
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(checklists=[_checklist([True, True])])
+    scripted = iter(["r", "n", ""])
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client,
+        interactive=True, resume_input_fn=lambda _p: next(scripted),
+    )
+
+    assert outcome.calibration_summary_path is not None
+    text = outcome.calibration_summary_path.read_text(encoding="utf-8")
+    assert "Per-criterion agreement" in text
+    assert "Criteria graded: **2**" in text
+    assert "Judge lenient (judge met, operator not met): **1**" in text

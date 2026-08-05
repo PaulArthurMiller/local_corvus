@@ -215,11 +215,52 @@ python scripts/run_experiment_harness.py --plan plans/my_plan.json --dry-run --i
 
 (Temporarily raise `dry_run_n` in the plan or via a copy of it to get enough
 judged bulk turns.) `--interactive` shows the full per-criterion checklist the
-judge graded (each criterion marked `[x]`/`[ ]`), the derived verdict, and its
-rationale, and lets you accept (`a`), override (`o` — recorded with
-`judge_source: "human"`, and `up`/`down`/`none` are all valid override
-targets), or `skip`. This is calibration mode, not routine use — never use it
-on the real run.
+judge graded — each criterion marked `[x]`/`[ ]`, **with the exact words the
+judge quoted from the response as its evidence**, plus any host-side evidence
+flags — then the derived verdict and rationale. This is calibration mode, not
+routine use; never use it on the real run.
+
+You then choose:
+
+| Answer | Does |
+|---|---|
+| `r` | **Regrade per-criterion** — walk the checklist one criterion at a time (`y`/`n`, Enter keeps the judge's answer); the verdict is re-derived from your corrected checklist by the same rule the judge path uses |
+| `a` | Accept the checklist as graded |
+| `o` | Override the verdict directly (`up`/`down`/`none`), leaving the checklist untouched |
+| `skip` | Record no verdict for this turn |
+
+**Prefer `r`.** Calibrating per-criterion instead of per-verdict is the
+Milestone 37 change, and the reason is what the 2026-08-04 pass could and
+could not measure: 3 overrides out of 20 turns is a rate with a 5–36%
+confidence interval — uninformative — while the *composition* of those
+overrides was decisive (all three were the judge crediting a criterion on a
+looser standard than it states, every one lenient). Regrading produces one
+observation per criterion rather than one per turn (~2.4x on the current
+bank) and each observation names its criterion, so the next pass measures
+the composition directly instead of reconstructing it by hand afterwards.
+
+Use `o` only when you disagree with the **derivation rule** itself rather
+than with any individual criterion — it records no per-criterion data.
+
+A regrade in which you keep every judge answer is recorded as the judge's own
+verdict, not a human one: confirming a checklist is an affirmation, and
+counting it as human-sourced would understate the judge-alone up-rate.
+
+#### The calibration summary
+
+Every `--interactive` run writes `calibration_summary.md` into its
+`harness_runs/{run_id}/` directory (and prints it at the end), covering:
+
+- **Per-criterion agreement** — criteria graded, agreement rate, and the
+  lenient/strict split. A split skewed to one side is a systematic grading
+  standard problem; a balanced split at a similar total is noise in a hard
+  judgment call.
+- **Turn-level outcomes** — regraded, confirmed, verdict-overridden, skipped.
+- **Verdict mix** — recorded vs. judge-alone (see the next section).
+- **Evidence checks** — how often each host-side check fired.
+
+It is written on an aborted pass too: a pass that stopped at turn 12 still
+measured 12 turns' worth of criteria.
 
 #### Reading a calibration run's report (Milestone 36)
 
@@ -267,7 +308,7 @@ python scripts/run_experiment_harness.py --plan plans/my_plan.json
 | `--backend-url URL` | Default `http://localhost:8000` |
 | `--judge-host URL` | Default local Ollama |
 | `--generate-bank` | Generate/reuse the plan's bank, then exit |
-| `--interactive` | Per-verdict accept/override prompts (calibration only) |
+| `--interactive` | Per-criterion regrade / accept / override prompts (calibration only) |
 | `--no-docker-restart` | Skip per-condition backend restarts. **Only safe for single-condition runs** — without the restart, every condition gets stamped with the same `EXPERIMENT_ID`/`RUN_CONDITION` and the experiment is garbage |
 
 ### What happens, in order
@@ -347,12 +388,23 @@ Override per-category in the plan's `error_policy`. Some stops are
 **unconditional** and cannot be overridden: budget exceeded, missing probe
 battery, missing judge model, and Docker restart failure.
 
-#### Judge protocol: the per-criterion checklist (Milestone 31)
+#### Judge protocol: the quote-bearing per-criterion checklist (M31 + M37)
 
 The judge does not assert `up`/`down`/`none` itself. For each of the prompt's
-criteria it returns one `true`/`false` (`criteria_met`, same order as the
-criteria list) plus a `rationale`, and the harness **derives** the verdict
-host-side:
+criteria it returns one checklist entry — the exact words it copied from the
+response as evidence, then `true`/`false` — plus a `rationale`:
+
+```json
+{"checklist": [{"quote": "the applicable rule is L-2", "met": true}],
+ "rationale": "..."}
+```
+
+The quote is requested **before** the boolean on purpose: a small model that
+has to produce its evidence first cannot arrive at the judgment by vibe, and
+the quote is what makes the claim checkable afterwards — by the host and by
+you during calibration.
+
+The harness then **derives** the verdict host-side:
 
 - **All criteria met → `up`.**
 - **No criteria met → `down`.** `criterion_triggered` is set to the *first*
@@ -368,17 +420,60 @@ host-side:
   easier task for a small local judge model than applying a global rule in
   one shot.
 
-Because the verdict is derived from a fixed-length list of booleans rather
-than a free-text citation, there is no "unresolved criterion" failure mode
-anymore: `judge_unparseable` covers every parse failure (malformed JSON, a
-missing/wrong-length/non-bool `criteria_met`, or an HTTP failure), and every
-one of them is direction-neutral — unlike the pre-Milestone-31 protocol, no
+Because the verdict is derived from a fixed-length checklist rather than a
+free-text citation, there is no "unresolved criterion" failure mode anymore:
+`judge_unparseable` covers every parse failure (malformed JSON, a
+missing/wrong-length/non-bool checklist, or an HTTP failure), and every one
+of them is direction-neutral — unlike the pre-Milestone-31 protocol, no
 failure mode can silently delete only `down` verdicts.
 
-The judge's checklist is recorded on the checkpoint (`criteria_met`) whenever
-a model verdict was parsed, whether or not the operator later overrides it —
-free per-criterion data for calibration or cross-domain analysis, not just
-the derived up/down/none.
+##### Criterion families: `[EXACT]` vs `[CONCEPT]` (Milestone 37)
+
+The bank writes criteria in two styles, and one grading rule cannot serve
+both. Each criterion is tagged in the judge prompt and held to its own
+standard:
+
+| Family | Looks like | Standard given to the judge |
+|---|---|---|
+| `[EXACT]` | `answer: L-2`, `answer: UTC (Universal Coordinated Time)` | The response must state that answer itself. A different code, label, or term does not count, "even if you believe it means the same thing." |
+| `[CONCEPT]` | `mentions consistent/fixed field ordering` | The idea may be worded differently, but it must actually be stated — not hinted at or implied. |
+
+An `answer:` criterion whose answer is a whole clause (`answer: all claims
+must remain fully auditable`) is classified `[CONCEPT]`: there is no token to
+match literally. Slash-separated alternatives and parentheticals are each
+accepted variants (`local temporal readings/local time` → either;
+`UTC (Universal Coordinated Time)` → either).
+
+This split is why the fix is not simply "demand literal matches everywhere."
+The `mentions ...` criteria are three quarters of the bank and are
+deliberately paraphrase-tolerant; holding them to a literal standard would
+trade a lenient judge for an over-strict one rather than calibrating it.
+
+##### Host-side evidence checks (Milestone 37)
+
+| Check | Effect | Why that effect |
+|---|---|---|
+| `met: true` with `"quote": ""` | **Forced to `false`** | The protocol tells the judge an empty quote requires `met: false`, so this is the checklist contradicting itself — resolved the only way the protocol allows, not second-guessed |
+| Quote not found in the response | **Flag only** | A heuristic over normalized text; a judge may legitimately stitch clauses together |
+| `[EXACT]` criterion met, required answer absent from the response | **Flag only** | Also a heuristic (`minute-level precision` vs. a response saying `minute precision`) |
+
+Flags never change a verdict — silently reclassifying on a heuristic would
+corrupt the record the run exists to produce. They surface in `--interactive`
+and are counted in the calibration summary, which is what will say whether
+either is worth promoting into enforcement.
+
+One bailout: if the judge **omits** the `quote` key entirely while still
+marking criteria met, enforcement is skipped for that turn and
+`evidence_enforced` records it. A 4B model dropping an output field is a
+protocol miss, not a response that failed everything, and demoting the whole
+checklist would manufacture a `down` out of a formatting failure. Supplying
+`"quote": ""` is *not* this case — that is the model answering the field.
+
+The checklist is recorded on the checkpoint whenever a model verdict was
+parsed, whether or not you later correct it: `criteria_met` (final),
+`judge_model_criteria_met` (the judge's own, before any regrade),
+`criteria_evidence`, `evidence_flags`, and `evidence_enforced`. These are
+harness-side only — no backend schema change.
 
 #### Unparseable judge verdicts in `--interactive`
 
@@ -483,8 +578,10 @@ Lessons from the 2026-07-06 real-model pilot that affect how you set up the
 | `docker restart failed for condition ...` | Docker Desktop down, or compose project broken. Fix and relaunch; resume the checkpoint |
 | Hard stop mid-run on `connectivity` | Backend container died — `docker compose logs backend`. Relaunch and resume |
 | Judge verdicts all `judge_unparseable` | Judge model responding off-format — verify the model tag; check with a dry run `--interactive` |
-| Judge verdicts mostly `none` | Expected under the Milestone 31 checklist protocol whenever answers are frequently partial — check the `criteria_met` checklists on individual turns (`--interactive`) before assuming a bug; a large `none` share was the expected side effect of fixing exp0's punishment-dominated regime |
-| `judge_unparseable` citing a wrong-length or non-bool `criteria_met` | The judge model isn't following the checklist schema (wrong number of booleans, or returning strings/ints instead of `true`/`false`). Verify the model tag with a dry run `--interactive`; a smaller/older model may need a different prompt or model choice |
+| Judge verdicts mostly `none` | Expected under the checklist protocol whenever answers are frequently partial — check the checklists on individual turns (`--interactive`) before assuming a bug; a large `none` share was the expected side effect of fixing exp0's punishment-dominated regime |
+| `judge_unparseable` citing a wrong-length or non-bool checklist | The judge model isn't following the checklist schema (wrong number of entries, or a non-boolean `met`). Verify the model tag with a dry run `--interactive`; a smaller/older model may need a different prompt or model choice |
+| Many turns with `evidence_enforced: false` | The judge is omitting the `quote` key, so the M37 evidence checks are being skipped wholesale and the up-skew they correct is back. Check a turn's raw checklist with `--interactive`; this is the signal that the model is not following the M37 schema even though the checklist itself parses |
+| Calibration summary shows a large lenient split | The judge is crediting criteria on a looser standard than they state — the 2026-08-04 failure mode. Look at the flagged criteria first; they are pre-sorted candidates |
 | Report `§6.x` numbers look contaminated across attempts/dry runs | Should be impossible post-M21 (`experiment_id` scoping + `_dryrun` suffix). If seen, check for pre-M21 legacy rows in the DB and report it as a bug |
 | All conditions share one `experiment_id` | You ran multi-condition with `--no-docker-restart`. The run is not salvageable — re-run without the flag |
 

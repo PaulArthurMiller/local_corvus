@@ -5547,6 +5547,92 @@ read against real exp0 data.
 
 ---
 
+## Judge Literal-Match Discipline + Per-Criterion Calibration — Milestone 37
+
+**Status: CODE COMPLETE (2026-08-05).** See the Milestone 37 trailer entry
+near the end of this file. **AWAITING PAUL:** the live 20-turn
+`--interactive` recalibration pass
+(`plans/exp0_calibration_2026-08-05.json`) — same requirement as M31's, and
+same reason it is not run autonomously: it needs a real local Ollama
+instance and live human judgment on real judge output.
+
+**Why (from the M36 override audit, 2026-08-04):** M31 fixed how the verdict
+is *derived* from the checklist. The recalibration pass then showed the layer
+above it is what is actually wrong. All three operator overrides were the
+same defect — the judge marking a criterion `true` on a looser standard than
+the criterion states (a checklist contradicting its own rationale, an
+invented synonym, a paraphrase accepted as a match) — and **all three were
+lenient in direction, none indicting M31's mixed→none rule**. Judge-alone
+up-rate was 82.4%.
+
+Two changes, both aimed at that layer:
+
+1. **Tighten the judge prompt toward literal-match discipline**
+   (`scripts/harness/judge.py`).
+2. **Recalibrate per-criterion rather than per-verdict**
+   (`scripts/harness/runner.py`, new `scripts/harness/calibration.py`) —
+   denser signal per turn, and it names the criterion each disagreement
+   lives on.
+
+**Design constraint — two criterion families, not one.** The bank contains
+both `answer: L-2` (a required answer) and `mentions consistent/fixed field
+ordering` (an idea, deliberately paraphrase-tolerant). "Literal match
+everywhere" would fix the first family and break the second, which is three
+quarters of the bank — trading a lenient judge for an over-strict one rather
+than calibrating it. The prompt therefore tags each criterion `[EXACT]` or
+`[CONCEPT]`, derived host-side from the bank's own `answer:` convention, and
+states a different standard for each. No criteria text changes —
+`content_hash` survives, same rule as the 07-27 normalization fix.
+
+**Design constraint — gemma4:e4b's actual capabilities.** Rules are flat,
+imperative, and few; a 4B instruct model follows a handful of unconditional
+rules far more reliably than a precise but nested rubric. Three levers:
+quote-before-verdict (the model must copy its evidence before answering, so
+it cannot reach the judgment by vibe and the claim becomes checkable), the
+per-family standards above, and an explicit `if unsure, answer false`
+default (a small model with no stated default drifts agreeable — precisely
+the observed error direction). Parsing is deliberately tolerant of key and
+shape drift, because a rejected response costs a re-ask and possibly a whole
+turn's verdict while accepting a correctly-graded checklist under the M31
+key costs nothing.
+
+**What the host may and may not change.** `met: true` with a supplied-but-
+empty quote is **forced false** — the protocol tells the judge an empty
+quote requires `met: false`, so that pair is the checklist contradicting
+itself, resolved the only way the protocol allows. The two content checks (a
+quote absent from the response; an `[EXACT]` criterion whose answer is
+nowhere in the response) **flag only, never demote**: they are heuristics
+over normalized text, and silently reclassifying a verdict on a heuristic
+would corrupt the record the run exists to produce. The recalibration pass
+measures how often each fires; promoting a flag into a demotion is Paul's
+call on real numbers. One bailout: a checklist that *omits* the quote key
+entirely skips enforcement, so a dropped output field cannot manufacture a
+`down` — but a supplied-empty quote is not that case, which is what keeps
+single-criterion (`cluster_d` `answer:`) prompts inside the rule.
+
+**Calibration is per-criterion.** `--interactive` now offers
+`[r/a/o/skip]`, with `r` (regrade the checklist one criterion at a time,
+Enter keeps the judge's answer) as the calibration path; the verdict is
+re-derived from the corrected checklist by `derive_verdict()`, the same
+function the judge path uses, so a pass can never measure the rule instead
+of the judge. Direct verdict override (`o`) stays as the escape hatch for
+disagreeing with the derivation rule itself. A regrade that changes nothing
+records as the judge's own verdict, not a human one. Every `--interactive`
+run writes `calibration_summary.md` beside its checkpoint — M36's lesson
+applied one layer down: a number nobody reports is a number nobody has.
+
+**Out of scope:** any change to the bank's criteria text, any backend
+schema change (per-criterion data stays harness-side, as in M31), the M31
+derivation rule itself (the audit found no override indicting it), and the
+exp0b re-baseline run.
+
+**Next after the live pass:** compare the per-criterion agreement and the
+lenient/strict split against M31's 82.4% judge-alone / 3-override read,
+decide whether either evidence flag graduates to enforcement, then decide on
+exp0b.
+
+---
+
 ## Status
 
 ```
@@ -5841,6 +5927,67 @@ correct reason recorded), a regression proving traversal count is derived
 from `activated_edge_ids` and not the dead DB column, and a
 markdown-rendering test for the two-statistic split.
 Branch: `milestone-35-instrumentation-fixes`.
+
+**Milestone 37 (Judge Literal-Match Discipline + Per-Criterion
+Calibration):** CODE COMPLETE — the follow-up the M36 override audit called
+for. `scripts/harness/judge.py`: `_build_judge_prompt()` now asks for a
+quote-bearing checklist (`{"checklist": [{"quote": ..., "met": ...}],
+"rationale": ...}`, quote requested before the boolean so the model commits
+to evidence before judgment), tags each criterion `[EXACT]`/`[CONCEPT]` via
+`_criterion_kind()`/`_exact_answer_tokens()` (derived from the bank's own
+`answer:` convention — slash alternatives and parentheticals are accepted
+variants; an `answer:` whose answer is a whole clause classifies as
+`[CONCEPT]` since there is no token to match), states a different standard
+per family, and adds an explicit `if unsure, answer false` default.
+`_extract_checklist()` accepts the M37 object form under `checklist` or
+`criteria` plus M31's bare `criteria_met` list — tolerance is the cheapest
+lever on the unparseable rate and changes no judgment. `_check_evidence()`
+forces `met: true` + supplied-empty quote to false (protocol
+self-contradiction) and flags-without-demoting an unverifiable quote or an
+`[EXACT]` criterion whose answer is absent from the response.
+`derive_verdict()` extracted and made public so the runner's regrade path
+applies the identical M31 rule. `JudgeVerdict` gains `criteria_evidence`,
+`evidence_flags`, `evidence_enforced`.
+
+`scripts/harness/runner.py`: `--interactive` prompt becomes
+`[r/a/o/skip]`; `_regrade_criteria_interactively()` walks the checklist
+(Enter keeps the judge's answer) and the verdict is re-derived from the
+result; `judge_source` stays `model:` when a regrade changes nothing (an
+affirmation is not a human verdict); `_format_criteria_block()` renders each
+criterion with its quote and any evidence flags, which is what makes a
+lenient grade visible at a glance. The 5-tuple returned by
+`_judge_and_post_verdict()` became a `VerdictOutcome` dataclass (nine fields
+positionally unpacked is the shape that silently transposes two).
+New `scripts/harness/calibration.py`: `collect_calibration_record()` /
+`render_calibration_summary()` / `write_calibration_summary()` — pure
+aggregation over `TurnCheckpoint` rows, so it also recomputes after the fact
+from a finished pass's `checkpoint.json`. `TurnCheckpoint` gains
+`judge_model_criteria_met`, `criteria_evidence`, `evidence_flags`,
+`evidence_enforced`; `RunOutcome` gains `calibration_summary_path`.
+
+**Two defects found and fixed while writing the tests**, both real: (1)
+`_normalize_for_evidence()` collapsed whitespace without a trailing strip,
+so a quote ending in an ellipsis kept a trailing space and failed the
+substring check — a false `unverified_quote` on a genuine quote, which would
+have made the flag noise rather than signal; (2) the enforcement bailout
+originally keyed on "no non-empty quote anywhere", which conflated a dropped
+`quote` key with a supplied-empty one and thereby exempted **every
+single-criterion prompt** from the demotion rule — and single-criterion
+prompts are the entire `cluster_d` `answer: X` family, exactly where the
+audit's synonym defect lives. The bailout now keys on the key's presence.
+
+New `plans/exp0_calibration_2026-08-05.json` (clone of the 08-02 plan, same
+`random_seed`/20-turn slice, new `plan_id`) so the M37 pass is directly
+comparable to M31's. `docs/harness_usage.md` updated: the calibration
+section documents the `[r/a/o/skip]` menu and why `r` is preferred, plus new
+subsections on criterion families, the host-side evidence checks, and the
+calibration summary; three troubleshooting rows added/revised. 65 new/changed
+tests (`test_judge.py` evidence layer + family classification + shared
+derivation, `test_runner.py` regrade flow, new `test_calibration.py`).
+**1003 tests passing, no regressions.** **AWAITING PAUL: the live 20-turn
+`--interactive` recalibration pass** — same constraint as M31's (real Ollama
++ live human judgment). Branch:
+`claude-judge-literal-match-per-criterion-calibration`.
 
 **Milestone 31 (Judge Verdict Scheme — Partial Answers Abstain):** CODE
 COMPLETE — the last of the M31-M35 Experiment-0 follow-ups, built per the

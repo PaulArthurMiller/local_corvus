@@ -60,12 +60,35 @@ class TurnCheckpoint(BaseModel):
     # rather than silently looking identical to a full K-repeat pass.
     probe_sample_result_ids: list[str] = Field(default_factory=list)
     probe_sample_repeats_completed: int = 0
-    # Milestone 31 — the judge's per-criterion checklist for this turn (same
-    # order as the prompt's criteria), recorded whenever the judge produced a
-    # parseable verdict. None when no judging happened, the judge was
-    # unparseable, or the verdict came from an operator's manual grade in
-    # --interactive (no per-criterion judgment exists for those).
+    # Milestone 31 — the per-criterion checklist for this turn (same order as
+    # the prompt's criteria), recorded whenever the judge produced a parseable
+    # verdict. None when no judging happened, the judge was unparseable, or
+    # the verdict came from an operator's manual grade in --interactive (no
+    # per-criterion judgment exists for those). Since M37 this holds the
+    # FINAL checklist — the operator's, if they regraded it in --interactive.
     criteria_met: Optional[list[bool]] = None
+    # Milestone 37 — the judge model's own checklist, before any operator
+    # regrade, and the exact analogue of judge_model_verdict one layer down.
+    # This is what makes calibration per-criterion instead of per-verdict:
+    # comparing it against criteria_met yields one agreement observation per
+    # criterion (~2.4x the turns on the current bank) and, more importantly,
+    # names which criterion the judge got wrong rather than only that the
+    # turn's verdict moved. Equal to criteria_met on every unregraded turn.
+    #
+    # Recorded AFTER the host-side evidence checks, matching judge_model_verdict:
+    # both describe what an unattended run would have stored, and those checks
+    # run unattended too. The model's raw pre-demotion claim stays recoverable —
+    # an EVIDENCE_DEMOTED_NO_QUOTE entry in evidence_flags marks each criterion
+    # the model asserted and the host forced false.
+    judge_model_criteria_met: Optional[list[bool]] = None
+    # Milestone 37 — the judge's supporting quote per criterion, and the
+    # host-side evidence-check outcomes over them (lists of the judge module's
+    # EVIDENCE_* constants). None when the judge answered with a bare boolean
+    # list; evidence_enforced records whether the quote rules were applied at
+    # all, so bare-list turns are never pooled with quoted ones in analysis.
+    criteria_evidence: Optional[list[str]] = None
+    evidence_flags: Optional[list[list[str]]] = None
+    evidence_enforced: Optional[bool] = None
 
 
 class SeriesReportRecord(BaseModel):

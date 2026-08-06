@@ -381,12 +381,37 @@ mixes trials.
 |---|---|---|
 | `connectivity` | `hard_stop` | Backend unreachable / DB failure |
 | `turn_ambiguous` | `soft_continue` | One turn's result malformed/missing |
-| `judge_unparseable` | `soft_continue` | No usable **verdict** after one re-ask (turn completes, no verdict recorded) |
+| `judge_unparseable` | `record_none` | No usable **verdict** after one re-ask (turn completes; a `none` verdict is recorded) |
 | `report_generation` | `soft_continue` | A report call failing — reports are re-generatable later; a nearly-finished run is not |
 
 Override per-category in the plan's `error_policy`. Some stops are
 **unconditional** and cannot be overridden: budget exceeded, missing probe
 battery, missing judge model, and Docker restart failure.
+
+##### `record_none` (judge_unparseable only)
+
+`judge_unparseable` is the one category that accepts a third action, and it is
+the default as of 2026-08-06. Instead of recording nothing, the turn stores a
+`none` verdict with `judge_source="model:<name>:unparseable"` and a rationale
+naming the parse failure.
+
+The reason is that a dropped verdict is **invisible**: nothing in the data
+distinguishes it from a turn that never ran, so the denominator quietly
+shrinks. The 2026-08-06 calibration lost 1 turn in 20 that way, which is ~50
+turns across exp0's 1,050.
+
+Two properties make this safe rather than a thumb on the scale:
+
+- **Learning is unaffected.** A `none` verdict triggers no weight update —
+  exactly what recording nothing did. The change is to the record, not to the
+  experiment.
+- **The rows stay separable.** The `:unparseable` suffix means these are never
+  silently pooled with genuine partial grades, while still being
+  model-attributed (an unattended run is precisely what they describe).
+
+In `--interactive`, an explicit operator skip still wins: the policy exists so
+an *unattended* run does not lose the turn, not to overrule someone who was
+asked and declined. Use `soft_continue` to restore the old drop-it behavior.
 
 #### Judge protocol: the quote-bearing per-criterion checklist (M31 + M37)
 
@@ -449,6 +474,40 @@ The `mentions ...` criteria are three quarters of the bank and are
 deliberately paraphrase-tolerant; holding them to a literal standard would
 trade a lenient judge for an over-strict one rather than calibrating it.
 
+**Known limitation.** The tag is derived from the `answer:` prefix alone, so a
+`[CONCEPT]` criterion carrying specific terminology (`states fields must
+appear in declared **spine** order`) is still graded paraphrase-tolerantly,
+and the judge will accept a generic restatement of it. That is where the
+residual leniency measured on 2026-08-06 lives — see "Naming a subject is not
+stating a fact about it" below.
+
+##### The topical-mention rule (2026-08-06)
+
+The 2026-08-06 recalibration found the judge's three lenient calls were all
+one move: **the quote named the criterion's subject without asserting its
+content.** `"K-1: Addresses field order."` was credited for *states fields
+must appear in the fixed declared order*.
+
+The evidence checks below cannot catch this — those quotes really were in the
+response, they simply did not support the criterion — so the judge prompt
+carries two extra rules and a worked example:
+
+- Naming a subject is not stating a fact about it. A quote that only points at
+  what the criterion is about (a rule number, a heading, a label, a sentence
+  saying the subject matters) does not meet it.
+- The quote **by itself** must satisfy the criterion; nothing else in the
+  response may fill in what it leaves out.
+
+The worked example is deliberately in a subject the bank never touches. An
+example drawn from the Kestrel fixtures would prime the judge on the very
+turns it grades.
+
+Measured against the real `gemma4:e4b` on the 20 calibration turns, scored
+against the operator's regrade: **3 lenient / 0 strict → 1 lenient / 1
+strict** (stable across 3 runs; the pre-change prompt reproduces the recorded
+pass exactly). **This reduced the bias, it did not remove it** — and the
+sample is far too small to read 1-and-1 as balanced.
+
 ##### Host-side evidence checks (Milestone 37)
 
 | Check | Effect | Why that effect |
@@ -461,6 +520,14 @@ Flags never change a verdict — silently reclassifying on a heuristic would
 corrupt the record the run exists to produce. They surface in `--interactive`
 and are counted in the calibration summary, which is what will say whether
 either is worth promoting into enforcement.
+
+**On 2026-08-06 that question got a real answer: do not enforce them.** One
+flag fired across the whole pass, on a criterion the operator confirmed *met*
+— promoting it would have forced the checklist `[True, False]` → `[False,
+False]` and flipped that turn from `none` to `down`. It also caught none of
+the pass's three genuine (lenient) errors. The flags are aimed at fabricated
+quotes; the actual failure mode was real quotes that did not support the
+criterion, which is a grading-standard problem, not a verification one.
 
 One bailout: if the judge **omits** the `quote` key entirely while still
 marking criteria met, enforcement is skipped for that turn and
@@ -481,8 +548,16 @@ When the judge produces no verdict at all during a calibration run, you are
 shown the full prompt/criteria/response context and offered
 `Grade this turn yourself, or skip it? [g/skip]`. Grading it posts with
 `judge_source="human"` and leaves `judge_model_verdict` null (there was no
-model verdict). Skipping soft-continues as before. Under
+model verdict). Skipping soft-continues as before — an explicit operator skip
+is honored even under `record_none`, which exists so an *unattended* run does
+not lose the turn, not to overrule someone who was asked. Under
 `judge_unparseable: hard_stop` the run aborts without prompting.
+
+Both paths mark `judge_error` (`judge_unparseable (hand-graded)` /
+`judge_unparseable (recorded none)`) so the calibration summary can bucket
+them. Without that marker they are indistinguishable from an ordinary graded
+turn — every checklist field is `None` on all three — which is why the
+2026-08-06 summary accounted for only 19 of its 20 turns.
 
 ---
 

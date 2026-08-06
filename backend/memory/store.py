@@ -1839,6 +1839,77 @@ class GraphStore:
         )
         return {"mus_deleted": mus_deleted, "edges_deleted": edges_deleted}
 
+    async def delete_turn_artifacts(
+        self, mu_ids: list[str], run_id: Optional[str] = None
+    ) -> dict:
+        """
+        Delete the MUs and edges a single failed turn created — turn-scoped
+        rollback, deliberately not a general-purpose delete primitive.
+
+        Deliberately narrow, because this is the only non-wipe delete path in
+        the system: it takes an explicit MU-id list (the caller's own record of
+        what it created this turn) plus that turn's run_id, and touches nothing
+        else. It cannot express "delete everything matching a predicate", so it
+        cannot be repurposed into a second wipe.
+
+        Both arguments are needed and neither subsumes the other:
+          - mu_ids removes the MUs the turn created. memory_units has no
+            run_id column, so they cannot be found any other way.
+          - run_id removes edges the turn created that point at MUs which
+            *survive* — the co_activation edges from the output MU to retrieved
+            seed MUs (orchestrator.py's "Edges: output MU -> each
+            retrieved/contributing MU"). Deleting by MU id alone would leave
+            those dangling against a deleted source.
+
+        Edges go first: edges.source_mu_id/target_mu_id are declared REFERENCES
+        memory_units(mu_id), so deleting the MUs first would orphan or reject
+        them depending on whether foreign keys are enforced on the connection.
+
+        Analytics tables (runs, feedback_events, probe_results) are untouched,
+        same contract as wipe_graph. Unlike wipe_graph this does NOT archive
+        first: the blast radius is one failed turn's own artifacts, the caller
+        logs the ids it rolled back, and archiving every transient Ollama
+        failure would bury the real archives in noise.
+        """
+        if not mu_ids and not run_id:
+            return {"mus_deleted": 0, "edges_deleted": 0}
+
+        db = await _open_db()
+        try:
+            edges_deleted = 0
+
+            if run_id:
+                cursor = await db.execute(
+                    "DELETE FROM edges WHERE creation_run_id = ?", (run_id,)
+                )
+                edges_deleted += cursor.rowcount or 0
+
+            mus_deleted = 0
+            if mu_ids:
+                placeholders = ",".join("?" for _ in mu_ids)
+                cursor = await db.execute(
+                    f"DELETE FROM edges WHERE source_mu_id IN ({placeholders}) "
+                    f"OR target_mu_id IN ({placeholders})",
+                    (*mu_ids, *mu_ids),
+                )
+                edges_deleted += cursor.rowcount or 0
+
+                cursor = await db.execute(
+                    f"DELETE FROM memory_units WHERE mu_id IN ({placeholders})",
+                    tuple(mu_ids),
+                )
+                mus_deleted = cursor.rowcount or 0
+
+            await db.commit()
+        finally:
+            await db.close()
+
+        logger.info(
+            "store: rolled back turn artifacts run_id=%s — deleted %d MU(s) and %d edge(s)",
+            run_id, mus_deleted, edges_deleted,
+        )
+        return {"mus_deleted": mus_deleted, "edges_deleted": edges_deleted}
+
     async def get_mu_info_batch(self, mu_ids: list[str]) -> dict[str, dict]:
         """
         Return {mu_id: {series_id, cluster_id, source_type}} for a list of MU IDs.

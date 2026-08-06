@@ -246,13 +246,95 @@ class InteractionResult:
     failure_reason: Optional[str] = None
 
 
+async def _rollback_failed_turn(
+    created_mu_ids: list[str], run_id: str, cause: BaseException
+) -> None:
+    """
+    Delete every MU and edge a failed turn wrote, so the graph is left exactly
+    as it was before the turn started.
+
+    Why a failed turn must leave nothing behind: the input and prompt MUs are
+    written *before* Ollama is called, so an LLM failure used to strand them in
+    the graph permanently. Retrieval reads at K1=3 + K2=1 — a four-slot window —
+    so a stranded near-duplicate of the user's message does not merely add
+    noise, it *evicts* a real seed MU from the context that turn. It also
+    distorts credit assignment: an orphan carries no seed edges, so traversals
+    that reach it earn evidence on edges the experiment never intended to
+    train. With the harness now retrying transient failures, every retry would
+    compound both effects.
+
+    Never raises. A rollback failure is logged loudly and swallowed, because
+    this runs inside an exception handler and masking the original error would
+    replace a diagnosable Ollama fault with a confusing SQLite one.
+    """
+    if not created_mu_ids:
+        return
+    try:
+        result = await graph_store.delete_turn_artifacts(created_mu_ids, run_id=run_id)
+        logger.warning(
+            "orchestrator: rolled back failed turn run_id=%s — deleted %d MU(s), %d edge(s) "
+            "after %s: %s; mu_ids=%s",
+            run_id,
+            result.get("mus_deleted", 0),
+            result.get("edges_deleted", 0),
+            type(cause).__name__,
+            cause,
+            created_mu_ids,
+        )
+    except Exception as rollback_exc:
+        # Deliberately swallowed — see docstring. The ids are logged so the
+        # orphans left behind can be found and removed by hand.
+        logger.error(
+            "orchestrator: ROLLBACK FAILED for run_id=%s — %s. "
+            "These MUs are orphaned in the graph and will be retrievable: %s",
+            run_id, rollback_exc, created_mu_ids,
+        )
+
+
 async def run_interaction(
     message: str,
     series_id: str,
     attachments: Optional[list[AttachmentInput]] = None,
 ) -> InteractionResult:
     """
+    Run one user turn, rolling the graph back if the turn does not complete.
+
+    Thin wrapper around _run_interaction_inner. The rollback window opens at
+    the first MU write and closes when the inner call returns — which is after
+    capture_run, so a turn is either fully recorded (run row + MUs + edges) or
+    leaves no trace at all. Deliberately catches BaseException, not Exception:
+    the harness's own client can time out and drop the request, and a cancelled
+    turn strands MUs exactly like a failed one does.
+    """
+    run_id = str(uuid.uuid4())
+    created_mu_ids: list[str] = []
+    try:
+        return await _run_interaction_inner(
+            message=message,
+            series_id=series_id,
+            attachments=attachments,
+            run_id=run_id,
+            created_mu_ids=created_mu_ids,
+        )
+    except BaseException as exc:
+        await _rollback_failed_turn(created_mu_ids, run_id, exc)
+        raise
+
+
+async def _run_interaction_inner(
+    message: str,
+    series_id: str,
+    attachments: Optional[list[AttachmentInput]],
+    run_id: str,
+    created_mu_ids: list[str],
+) -> InteractionResult:
+    """
     Run the full agent pipeline for one user turn.
+
+    Every MU written here is appended to created_mu_ids so run_interaction can
+    undo the turn if it fails. Any new graph_store.create_mu call in this
+    function or its callees MUST record its id there too, or a failure will
+    strand it.
 
     Pipeline:
       sanitize_in -> gate attachments -> create input MU -> retrieve -> extract ->
@@ -261,7 +343,6 @@ async def run_interaction(
       capture_run -> take_snapshot -> return
     """
     start_time = time.monotonic()
-    run_id = str(uuid.uuid4())
     all_flags: list[str] = []
     tool_call_mu_ids: list[str] = []
 
@@ -320,6 +401,7 @@ async def run_interaction(
         series_id=series_id,
         experiment_id=EXPERIMENT_ID,
     )
+    created_mu_ids.append(input_um.mu_id)
     append_audit(input_um)
     logger.info(
         "orchestrator: input MU mu_id=%s series_id=%s experiment_id=%s",
@@ -403,6 +485,7 @@ async def run_interaction(
         series_id=series_id,
         experiment_id=EXPERIMENT_ID,
     )
+    created_mu_ids.append(prompt_um.mu_id)
 
     # Edge: prompt -> input MU
     await graph_store.create_edge(
@@ -441,6 +524,7 @@ async def run_interaction(
         series_id=series_id,
         tool_schemas=tool_schemas,
         all_flags=all_flags,
+        created_mu_ids=created_mu_ids,
     )
 
     # Substitute UI message for failure cases before any downstream processing.
@@ -485,6 +569,7 @@ async def run_interaction(
         series_id=series_id,
         experiment_id=EXPERIMENT_ID,
     )
+    created_mu_ids.append(output_um.mu_id)
 
     # Edge: input MU -> output MU
     await graph_store.create_edge(
@@ -651,10 +736,17 @@ async def _run_tool_loop(
     series_id: str,
     tool_schemas: list[dict],
     all_flags: list[str],
+    created_mu_ids: list[str],
 ) -> tuple[str, list[str], Optional[int], Optional[int], Optional[str]]:
     """
     Call Ollama with registered tools, dispatch any tool calls, and repeat
     until Ollama returns a text response or max_iterations is reached.
+
+    created_mu_ids is the caller's rollback tracker: tool_call and tool_result
+    MUs are appended to it as they are written, so a failure on a later
+    iteration undoes the MUs earlier iterations already committed. Ollama is
+    called once per iteration, so a multi-iteration turn has several chances to
+    fail after having written tool MUs.
 
     Returns (final_text_response, list_of_tool_call_mu_ids, tokens_in, tokens_out, failure_reason).
     failure_reason is None for normal completions; set to a FAILURE_REASON_* constant when
@@ -793,6 +885,7 @@ async def _run_tool_loop(
                 series_id=series_id,
                 experiment_id=EXPERIMENT_ID,
             )
+            created_mu_ids.append(tc_um.mu_id)
             tool_call_mu_ids.append(tc_um.mu_id)
             append_audit(tc_um)
             logger.info(
@@ -837,6 +930,7 @@ async def _run_tool_loop(
                 series_id=series_id,
                 experiment_id=EXPERIMENT_ID,
             )
+            created_mu_ids.append(tr_um.mu_id)
             tool_call_mu_ids.append(tr_um.mu_id)
             append_audit(tr_um)
             logger.info(

@@ -169,32 +169,26 @@ class BackendClient:
         POST one turn to /chat, retrying a *retry-safe* connectivity failure up
         to self._chat_max_retries times before giving up.
 
-        Which failures are retried is a correctness question, not a tuning one,
-        because /chat is not idempotent. backend/core/orchestrator.py persists
-        the input MU and the prompt MU *before* it calls Ollama, and its
-        httpx.HTTPStatusError path (orchestrator.py:692) re-raises without
-        rolling either one back. So a failed turn already leaves MUs in the
-        graph, and every additional attempt leaves one more set:
+        Which failures are retried is a correctness question, not a tuning one:
 
-          - ConnectError / NetworkError: the request never reached the backend,
-            so no MU was written. Retried.
-          - 5xx: the backend ran the turn, wrote both MUs, then failed. Retried
-            anyway — see the cost note below — because this is the self-healing
-            model-runner crash the retry budget exists for.
+          - ConnectError / NetworkError: the request never reached the backend.
+            Retried.
+          - 5xx: the backend ran the turn and failed. Retried — this is the
+            self-healing model-runner crash the retry budget exists for.
           - TimeoutException: NOT retried. The request may still be in flight
             server-side, so a retry races a turn that can still succeed and
-            would double-write on top of that. Timeouts stay a hard connectivity
+            would double-write on top of it. Timeouts stay a hard connectivity
             error and are governed by error_policy as before.
 
-        Cost of the 5xx retry, stated plainly: each retried attempt orphans one
-        extra user_input MU in the graph. source_type="prompt" is already
-        excluded from retrieval via retrieval_exclude_source_types, but
-        "user_input" is not, so an orphan is a retrievable near-duplicate of the
-        turn's message. That is a real but bounded contamination, and it is
-        strictly better than the alternative it replaces: hard_stop leaves the
-        very same orphan behind *and* loses the run. The clean fix belongs in
-        the orchestrator (roll back or mark MUs when the LLM call fails), not
-        here. Until then, prefer this over aborting a multi-hour run.
+        Retrying a 5xx is safe to do repeatedly because the backend now rolls
+        the turn back: run_interaction() undoes every MU and edge a failed turn
+        wrote, so an attempt that fails leaves the graph exactly as it was
+        (backend/core/orchestrator.py, _rollback_failed_turn). Before that
+        landed, each retried attempt stranded a retrievable user_input MU —
+        which, at K1=3 + K2=1, evicted a real seed MU from the next turn's
+        four-slot context window rather than merely adding noise. Do not raise
+        the retry budget for a failure class the orchestrator does not roll
+        back; check that first.
         """
         body: dict = {"message": message}
         if series_id:

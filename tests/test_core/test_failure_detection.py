@@ -73,6 +73,8 @@ async def _call_tool_loop(content: str, finish_reason):
             series_id="test-session",
             tool_schemas=[],
             all_flags=[],
+            # Rollback tracker — these cases write no tool MUs, so it stays empty.
+            created_mu_ids=[],
         )
 
 

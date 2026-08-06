@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from harness.checkpoint import JUDGE_ERROR_RECORDED_NONE
 from harness.judge import (
     EVIDENCE_ANSWER_TOKEN_ABSENT,
     EVIDENCE_DEMOTED_NO_QUOTE,
@@ -52,6 +53,14 @@ class CalibrationRecord:
     turns_confirmed: int = 0  # operator regraded and agreed with every criterion
     turns_verdict_overridden: int = 0  # direct verdict override, no per-criterion data
     turns_skipped: int = 0
+    # The judge produced no verdict at all and something else supplied one:
+    # the operator by hand, or the record_none policy. Added 2026-08-06 —
+    # the pass that day had one such turn, and because it matched no bucket
+    # the turn-level outcomes summed to 19 of 20 while claiming to account
+    # for the pass. A summary whose parts do not add up to its whole is one
+    # nobody can check.
+    turns_hand_graded: int = 0
+    turns_recorded_none: int = 0
 
     criteria_graded: int = 0
     criteria_agreed: int = 0
@@ -70,6 +79,29 @@ class CalibrationRecord:
     evidence_enforced_turns: int = 0
     evidence_unenforced_turns: int = 0
     flag_counts: dict = field(default_factory=dict)
+
+    @property
+    def turns_accounted(self) -> int:
+        """
+        Turns landing in one of the outcome buckets. Equals turns_judged when
+        the accounting is complete; the summary prints both so a future gap
+        announces itself instead of having to be found by subtraction.
+        """
+        return (
+            self.turns_regraded
+            + self.turns_confirmed
+            + self.turns_verdict_overridden
+            + self.turns_skipped
+            + self.turns_hand_graded
+            + self.turns_recorded_none
+        )
+
+    @property
+    def turns_judge_produced_no_verdict(self) -> int:
+        """Turns the judge-alone verdict mix cannot include, because there is
+        no judge verdict to count — its denominator is turns_judged minus
+        this."""
+        return self.turns_hand_graded + self.turns_recorded_none
 
     @property
     def criterion_agreement_rate(self) -> Optional[float]:
@@ -124,6 +156,18 @@ def collect_calibration_record(turns: list) -> CalibrationRecord:
         for flags in (getattr(turn, "evidence_flags", None) or []):
             for flag in flags:
                 record.flag_counts[flag] = record.flag_counts.get(flag, 0) + 1
+
+        # Turns the judge never graded, where a verdict was recorded anyway.
+        # Checked before the criterion comparison because both leave every
+        # checklist field None, so they would otherwise fall through every
+        # branch below and be counted nowhere.
+        judge_error = getattr(turn, "judge_error", None) or ""
+        if judge_verdict is None and verdict is not None:
+            if judge_error.startswith(JUDGE_ERROR_RECORDED_NONE):
+                record.turns_recorded_none += 1
+            else:
+                record.turns_hand_graded += 1
+            continue
 
         # Per-criterion agreement needs both checklists at equal length. A
         # direct verdict override leaves criteria_met untouched, so it
@@ -180,6 +224,9 @@ def render_calibration_summary(record: CalibrationRecord, run_id: str) -> str:
     shown with their raw counts — at a 20-turn pass every percentage here has
     a wide interval, and a bare percentage invites reading it as precise.
     """
+    flagged_total = record.flag_counts.get(EVIDENCE_UNVERIFIED_QUOTE, 0) + record.flag_counts.get(
+        EVIDENCE_ANSWER_TOKEN_ABSENT, 0
+    )
     lines = [
         f"# Judge calibration summary — `{run_id}`",
         "",
@@ -204,15 +251,27 @@ def render_calibration_summary(record: CalibrationRecord, run_id: str) -> str:
         f"- Confirmed as graded (regraded, no change): {record.turns_confirmed}",
         f"- Verdict overridden directly (no per-criterion data): {record.turns_verdict_overridden}",
         f"- Skipped by operator: {record.turns_skipped}",
+        f"- Hand-graded after an unparseable judge response: {record.turns_hand_graded}",
+        f"- Recorded as none after an unparseable judge response: {record.turns_recorded_none}",
+        f"- **Accounted: {record.turns_accounted} of {record.turns_judged} judged turn(s)**",
+        "",
+        "The last two are turns the judge never graded. Unattended they are the",
+        "`record_none` line, and their rate is the share of a real run's turns that carry",
+        "no judgment — worth watching on its own, since nothing else in this file",
+        "distinguishes them from turns that were graded and came out mixed.",
         "",
         "## Verdict mix",
         "",
         f"- Recorded (what the run stored): {_verdict_mix(record.recorded_verdicts)}",
         f"- Judge alone (what an unattended run would store): {_verdict_mix(record.judge_verdicts)}",
+        f"- Excluded from judge-alone (judge produced no verdict): "
+        f"{record.turns_judge_produced_no_verdict}",
         "",
         "\"Judge alone\" is measured after the host-side evidence checks below, because",
         "those run unattended too — it is the real no-operator number, not the model's raw",
-        "claim. The count of criteria forced false is what separates the two.",
+        "claim. The count of criteria forced false is what separates the two. Its",
+        "denominator is smaller than the recorded mix's by exactly the excluded count",
+        "above — compare the two as rates, never as counts.",
         "",
         "## Evidence checks",
         "",
@@ -226,9 +285,14 @@ def render_calibration_summary(record: CalibrationRecord, run_id: str) -> str:
         f"- Criteria flagged — required answer absent from the response: "
         f"{record.flag_counts.get(EVIDENCE_ANSWER_TOKEN_ABSENT, 0)}",
         "",
-        "The two flagged rows changed no judgment. They are heuristics over normalized",
-        "text, and this pass is what says whether they fire often enough, and cleanly",
-        "enough, to be worth promoting into enforcement.",
+        f"The last two rows are advisory: {flagged_total} criterion/criteria flagged, none",
+        "demoted. They are heuristics over normalized text, and this pass is what says",
+        "whether they fire often enough, and cleanly enough, to be worth promoting into",
+        "enforcement. On 2026-08-06 the answer was no — the single flag that fired was on",
+        "a criterion the operator confirmed met, so enforcing it would have flipped a",
+        "correct verdict; and it caught none of that pass's three real (lenient) errors,",
+        "whose quotes were genuinely present in the response and simply did not support",
+        "the criterion.",
         "",
     ]
     return "\n".join(lines)

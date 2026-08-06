@@ -452,9 +452,18 @@ aborting the run (`scripts/harness/client.py`). If it recurs:
 - Close other GPU consumers. LibreOffice held GPU memory during that run.
 - Reserve headroom with `OLLAMA_GPU_OVERHEAD` (bytes) if it still recurs.
 
-Note this leaves orphan MUs: the orchestrator persists the input and prompt MUs
-before calling Ollama and does not roll them back when the call fails, so a
-crashed turn (and each retry of it) leaves a retrievable `user_input` MU behind.
+A failed turn leaves no trace in the graph: `run_interaction()` rolls back every
+MU and edge the turn wrote before re-raising, so a crashed turn and each retry of
+it are undone (`backend/core/orchestrator.py`, `_rollback_failed_turn`). Look for
+the confirming log line, which lists the ids it removed:
+
+```
+orchestrator: rolled back failed turn run_id=... — deleted 2 MU(s), 1 edge(s) after ConnectError: ...
+```
+
+If instead you see `ROLLBACK FAILED`, the cleanup itself errored and the MU ids
+in that line are orphaned in the graph — they will be retrievable and need
+removing by hand (or by a wipe+reseed) before the next run.
 
 ### Admin UI shows no runs
 

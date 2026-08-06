@@ -21,7 +21,12 @@ from harness.calibration import (
     render_calibration_summary,
     write_calibration_summary,
 )
-from harness.checkpoint import STATUS_OK, TurnCheckpoint
+from harness.checkpoint import (
+    JUDGE_ERROR_HAND_GRADED,
+    JUDGE_ERROR_RECORDED_NONE,
+    STATUS_OK,
+    TurnCheckpoint,
+)
 from harness.judge import (
     EVIDENCE_ANSWER_TOKEN_ABSENT,
     EVIDENCE_DEMOTED_NO_QUOTE,
@@ -191,6 +196,75 @@ def test_evidence_flags_and_regimes_are_tallied():
     assert record.flag_counts[EVIDENCE_DEMOTED_NO_QUOTE] == 1
     assert record.flag_counts[EVIDENCE_ANSWER_TOKEN_ABSENT] == 1
     assert record.flag_counts[EVIDENCE_UNVERIFIED_QUOTE] == 1
+
+
+def test_turns_the_judge_never_graded_land_in_their_own_buckets():
+    """
+    The 2026-08-06 pass had one turn the judge could not grade and the
+    operator hand-graded. It matched no bucket — the verdict-override branch
+    needs both verdicts present — so the turn-level outcomes summed to 19 of
+    20 while presenting themselves as a complete accounting.
+    """
+    turns = [
+        _turn(judge_model_verdict=None, verdict="up",
+              judge_error=f"{JUDGE_ERROR_HAND_GRADED}: bad JSON"),
+        _turn(judge_model_verdict=None, verdict="none",
+              judge_error=f"{JUDGE_ERROR_RECORDED_NONE}: bad JSON"),
+        _turn(judge_model_verdict="up", verdict="up",
+              judge_model_criteria_met=[True], criteria_met=[True]),
+    ]
+
+    record = collect_calibration_record(turns)
+
+    assert record.turns_hand_graded == 1
+    assert record.turns_recorded_none == 1
+    assert record.turns_confirmed == 1
+    assert record.turns_verdict_overridden == 0
+    # Neither contributes a criterion observation — there is no judge
+    # checklist to compare against.
+    assert record.criteria_graded == 1
+    assert record.turns_accounted == record.turns_judged == 3
+
+
+def test_judge_alone_mix_excludes_turns_with_no_judge_verdict():
+    """
+    The judge-alone denominator is smaller than the recorded one by exactly
+    these turns. Reporting the two mixes side by side without saying so
+    invites reading them as counts over the same base.
+    """
+    turns = [
+        _turn(judge_model_verdict=None, verdict="up",
+              judge_error=f"{JUDGE_ERROR_HAND_GRADED}: bad JSON"),
+        _turn(judge_model_verdict="up", verdict="up",
+              judge_model_criteria_met=[True], criteria_met=[True]),
+    ]
+
+    record = collect_calibration_record(turns)
+
+    assert record.recorded_verdicts == {"up": 2}
+    assert record.judge_verdicts == {"up": 1}
+    assert record.turns_judge_produced_no_verdict == 1
+
+    text = render_calibration_summary(record, "run-gap")
+    assert "Excluded from judge-alone (judge produced no verdict): 1" in text
+    assert "Accounted: 2 of 2 judged turn(s)" in text
+
+
+def test_flag_prose_reports_the_actual_flag_count():
+    """
+    The sentence under the evidence checks used to assert "two flagged rows"
+    unconditionally — it rendered verbatim on a pass with zero flags. A
+    summary read months later cannot afford a hardcoded finding.
+    """
+    no_flags = render_calibration_summary(collect_calibration_record([]), "run-empty")
+    assert "0 criterion/criteria flagged" in no_flags
+
+    flagged = collect_calibration_record([
+        _turn(judge_model_verdict="up", verdict="up",
+              judge_model_criteria_met=[True], criteria_met=[True],
+              evidence_enforced=True, evidence_flags=[[EVIDENCE_UNVERIFIED_QUOTE]]),
+    ])
+    assert "1 criterion/criteria flagged" in render_calibration_summary(flagged, "run-one")
 
 
 def test_summary_reports_counts_alongside_every_rate():

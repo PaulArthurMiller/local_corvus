@@ -17,6 +17,8 @@ from typing import Any, Callable, Optional
 import yaml
 
 from harness.checkpoint import (
+    JUDGE_ERROR_HAND_GRADED,
+    JUDGE_ERROR_RECORDED_NONE,
     STATUS_OK,
     STATUS_SOFT_CONTINUE,
     CheckpointState,
@@ -69,7 +71,7 @@ from harness.manifest import (
 )
 from harness.notify import build_notification_payload, notify
 from harness.prompt_bank import PromptBank, PromptBankEntry, load_bank
-from harness.schema import DEFAULT_ERROR_POLICY, RunPlan
+from harness.schema import DEFAULT_ERROR_POLICY, ERROR_ACTION_RECORD_NONE, RunPlan
 from harness.turn_resolution import (
     TURN_TYPE_PROBE,
     assign_probe_schedule,
@@ -78,6 +80,12 @@ from harness.turn_resolution import (
 )
 
 logger = logging.getLogger("harness.runner")
+
+# Appended to judge_source when the record_none policy stores a verdict the
+# judge never produced (see _judge_and_post_verdict). Keeps the row
+# model-attributed — an unattended run is what it describes — while staying
+# greppable, so these are never silently pooled with real "none" grades.
+JUDGE_SOURCE_UNPARSEABLE_SUFFIX = ":unparseable"
 
 _CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
 
@@ -402,7 +410,7 @@ def _judge_and_post_verdict(
             response_text, plan.judge, turn_type,
         )
     except JudgeUnparseableError as exc:
-        policy = error_policy.get("judge_unparseable", "soft_continue")
+        policy = error_policy.get("judge_unparseable", DEFAULT_ERROR_POLICY["judge_unparseable"])
         if policy == "hard_stop":
             raise HardStopError(f"judge_unparseable: {exc}") from exc
         # In --interactive the operator is sitting right here with the prompt,
@@ -422,7 +430,39 @@ def _judge_and_post_verdict(
                     rationale=f"operator verdict after unparseable judge response: {exc}",
                     criterion_triggered=criterion_triggered,
                     judge_model_verdict=None,
+                    judge_error=f"{JUDGE_ERROR_HAND_GRADED}: {exc}",
                 )
+            # The operator was asked and declined. record_none exists to stop
+            # an *unattended* run losing the turn silently; overriding an
+            # explicit human skip with a stored verdict would be the tool
+            # second-guessing the person it just consulted.
+            print_fn(f"  judge verdict unparseable — skipped by operator, no verdict: {exc}")
+            logger.warning("runner: judge_unparseable (operator skipped): %s", exc)
+            return VerdictOutcome(judge_error=f"judge_unparseable (operator skipped): {exc}")
+        if policy == ERROR_ACTION_RECORD_NONE:
+            # A "none" verdict is the honest unattended outcome: the judge
+            # produced no usable signal, and "none" is this system's verdict
+            # for exactly that (M8 — absence of signal is an explicit
+            # observation). It triggers no weight update, so this records the
+            # turn without changing what the experiment learns from it.
+            #
+            # The judge_source suffix is what keeps the row separable. It is
+            # not "human", so store.get_verdict_tallies() attributes it to the
+            # judge — correct, since an unattended run is exactly what it
+            # describes — and the suffix lets any later analysis subtract
+            # these from a judge-alone rate rather than having to guess which
+            # "none"s were real partial grades.
+            print_fn(f"  judge verdict unparseable — recording verdict=none: {exc}")
+            logger.warning("runner: judge_unparseable (record_none): %s", exc)
+            return _post_verdict(
+                client, plan, condition, run_id, prompt_entry,
+                verdict="none",
+                judge_source=f"model:{plan.judge.model}{JUDGE_SOURCE_UNPARSEABLE_SUFFIX}",
+                rationale=f"judge response unparseable, no criteria graded: {exc}",
+                criterion_triggered=None,
+                judge_model_verdict=None,
+                judge_error=f"{JUDGE_ERROR_RECORDED_NONE}: {exc}",
+            )
         print_fn(f"  judge verdict unparseable — soft-continuing, no verdict recorded: {exc}")
         logger.warning("runner: judge_unparseable (soft_continue): %s", exc)
         return VerdictOutcome(judge_error=f"judge_unparseable: {exc}")
@@ -591,6 +631,7 @@ def _post_verdict(
     criteria_evidence: Optional[list] = None,
     evidence_flags: Optional[list] = None,
     evidence_enforced: Optional[bool] = None,
+    judge_error: Optional[str] = None,
 ) -> VerdictOutcome:
     """
     POST one verdict and shape the caller's VerdictOutcome. Shared by the
@@ -608,6 +649,12 @@ def _post_verdict(
     without them there was no way to state a judge-alone up-rate — the
     number that describes the real, unattended run — from a calibration
     run's own data.
+
+    judge_error is carried on a *successful* post for the two paths that
+    record a verdict the judge did not produce (hand-graded, and the
+    record_none policy). Nothing branches on it — it exists so the checkpoint
+    can tell those turns apart from turns the judge graded normally, which is
+    what the calibration summary needs to reconcile its turn counts.
     """
     apply_weight_update = condition == "learned" and verdict in ("up", "down")
     verdict_response = client.post_verdict(
@@ -628,6 +675,7 @@ def _post_verdict(
     return VerdictOutcome(
         verdict=verdict,
         feedback_event_id=verdict_response.get("feedback_event_id"),
+        judge_error=judge_error,
         judge_model_verdict=judge_model_verdict,
         criteria_met=criteria_met,
         judge_model_criteria_met=judge_model_criteria_met,

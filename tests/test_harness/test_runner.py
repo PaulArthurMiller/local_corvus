@@ -10,7 +10,15 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
-from harness.checkpoint import CheckpointState, STATUS_OK, STATUS_SOFT_CONTINUE, load_checkpoint, save_checkpoint
+from harness.checkpoint import (
+    JUDGE_ERROR_HAND_GRADED,
+    JUDGE_ERROR_RECORDED_NONE,
+    CheckpointState,
+    STATUS_OK,
+    STATUS_SOFT_CONTINUE,
+    load_checkpoint,
+    save_checkpoint,
+)
 from harness.client import BackendConnectivityError, BackendTurnError, ReportGenerationError
 from harness.docker_lifecycle import DockerLifecycleError
 from harness.manifest import compute_config_hash, compute_run_id, load_manifest
@@ -944,10 +952,11 @@ def test_no_judge_client_means_no_judging_happens(tmp_path):
 
 
 def test_unparseable_judge_soft_continues_and_checkpoint_notes_anomaly(tmp_path):
+    """soft_continue is no longer the default, but stays available explicitly."""
     bank_path = _write_bank_with_criteria(tmp_path / "banks")
     plan = _plan(
         dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
-        conditions=["learned"],
+        conditions=["learned"], error_policy={"judge_unparseable": "soft_continue"},
     )
     client = FakeBackendClient()
     judge_client = FakeOllamaJudgeClient(chat_json_fn=lambda model, temperature, prompt: "not json")
@@ -960,6 +969,43 @@ def test_unparseable_judge_soft_continues_and_checkpoint_notes_anomaly(tmp_path)
     assert outcome.checkpoint.turns[0].verdict is None
     assert outcome.checkpoint.turns[0].judge_error is not None
     assert "judge_unparseable" in outcome.checkpoint.turns[0].judge_error
+
+
+def test_unattended_unparseable_judge_records_none_by_default(tmp_path):
+    """
+    The 2026-08-06 default change. A dropped verdict is invisible in the data
+    — indistinguishable from a turn that never ran — and at exp0's scale the
+    observed 1-in-20 rate is ~50 silently absent turns. "none" is this
+    system's verdict for "no signal" (M8) and triggers no weight update, so
+    the record gains a row and the experiment learns exactly what it did
+    before.
+    """
+    bank_path = _write_bank_with_criteria(tmp_path / "banks")
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
+        conditions=["learned"],
+    )
+    client = FakeBackendClient()
+    judge_client = FakeOllamaJudgeClient(chat_json_fn=lambda model, temperature, prompt: "not json")
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print, judge_client=judge_client)
+
+    assert outcome.status == "complete"
+    assert len(client.verdict_calls) == 1
+    posted = client.verdict_calls[0]
+    assert posted["verdict"] == "none"
+    assert posted["apply_weight_update"] is False
+    assert posted["criterion_triggered"] is None
+    # Model-attributed (an unattended run is what this describes) but
+    # suffixed, so these are never pooled with real partial grades.
+    assert posted["judge_source"].endswith(":unparseable")
+    assert posted["judge_source"] != "human"
+
+    turn = outcome.checkpoint.turns[0]
+    assert turn.verdict == "none"
+    assert turn.judge_model_verdict is None
+    assert turn.criteria_met is None
+    assert turn.judge_error.startswith(JUDGE_ERROR_RECORDED_NONE)
 
 
 def test_judge_unparseable_hard_stop_when_policy_overridden(tmp_path):
@@ -1015,10 +1061,20 @@ def test_interactive_offers_manual_verdict_when_judge_unparseable(tmp_path):
     assert outcome.checkpoint.turns[0].verdict == "down"
     # No model verdict exists — the judge never produced a parseable one.
     assert outcome.checkpoint.turns[0].judge_model_verdict is None
-    assert outcome.checkpoint.turns[0].judge_error is None
+    # Marked so the calibration summary can bucket it. Every checklist field
+    # is None here exactly as on a turn nobody graded, and with nothing to
+    # tell them apart this turn fell through every bucket in the 2026-08-06
+    # summary — which then accounted for 19 of its 20 turns.
+    assert outcome.checkpoint.turns[0].judge_error.startswith(JUDGE_ERROR_HAND_GRADED)
 
 
 def test_interactive_manual_verdict_declined_falls_back_to_soft_continue(tmp_path):
+    """
+    An explicit operator skip is honored even under record_none. That policy
+    exists so an *unattended* run does not lose the turn silently; overriding
+    a human who was asked and declined would be the tool second-guessing the
+    person it just consulted.
+    """
     bank_path = _write_bank_with_criteria(tmp_path / "banks")
     plan = _plan(
         dry_run=True, dry_run_n=1, probe_ratio=0.0, prompt_bank_path=str(bank_path),
@@ -1034,7 +1090,8 @@ def test_interactive_manual_verdict_declined_falls_back_to_soft_continue(tmp_pat
 
     assert outcome.status == "complete"
     assert client.verdict_calls == []
-    assert "judge_unparseable" in outcome.checkpoint.turns[0].judge_error
+    assert outcome.checkpoint.turns[0].verdict is None
+    assert "operator skipped" in outcome.checkpoint.turns[0].judge_error
 
 
 def test_judge_unparseable_hard_stop_is_not_softened_by_interactive(tmp_path):

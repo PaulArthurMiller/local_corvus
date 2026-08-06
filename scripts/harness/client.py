@@ -7,9 +7,14 @@ Two exception types drive the error-handling policy:
   - BackendTurnError: a single ambiguous or malformed per-turn result
     (4xx response, unparseable body, missing expected field). Soft-continue
     by default.
+
+/chat retries retry-safe connectivity failures before either policy applies —
+see BackendClient.chat for which failures qualify and why the split is about
+idempotency rather than tuning.
 """
 
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -66,6 +71,25 @@ class BackendClient:
     # actually cost.
     DEFAULT_GRAPH_OP_TIMEOUT = 600.0
 
+    # Retry budget for /chat against a *server-side* failure (5xx). Two retries,
+    # three attempts total.
+    #
+    # Motivated by the 2026-08-06 abort: Ollama's llama-server hit a CUDA OOM
+    # while evicting a prompt-cache entry, died with 0xc0000409, and returned a
+    # bare 500 -> backend 502 -> connectivity hard_stop killed a 1050-turn run
+    # on turn ('learned', 0, 0), after the wipe and reseed had already been
+    # spent. That failure class is self-healing: Ollama logs "runtime OOM
+    # detected; expiring loaded models to clear memory before next request" and
+    # the next call reloads the model cleanly (measured: the immediately
+    # following /chat returned 200 in 16.5s). One retry would have sailed
+    # through it.
+    #
+    # Backoff is deliberately slow relative to the fault: the recovery path is
+    # a full cold model load (~15s measured for gemma4:e4b), so retrying after
+    # 1-2s just burns an attempt against a GPU that has not finished reloading.
+    DEFAULT_CHAT_MAX_RETRIES = 2
+    DEFAULT_CHAT_RETRY_BACKOFF = (5.0, 15.0)
+
     def __init__(
         self,
         base_url: str,
@@ -73,11 +97,19 @@ class BackendClient:
         chat_timeout: float = DEFAULT_CHAT_TIMEOUT,
         report_timeout: float = DEFAULT_REPORT_TIMEOUT,
         graph_op_timeout: float = DEFAULT_GRAPH_OP_TIMEOUT,
+        chat_max_retries: int = DEFAULT_CHAT_MAX_RETRIES,
+        chat_retry_backoff: tuple[float, ...] = DEFAULT_CHAT_RETRY_BACKOFF,
+        sleep_fn=time.sleep,
     ):
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._chat_timeout = chat_timeout
         self._report_timeout = report_timeout
         self._graph_op_timeout = graph_op_timeout
+        self._chat_max_retries = chat_max_retries
+        self._chat_retry_backoff = chat_retry_backoff
+        # Injectable so tests can assert on the backoff schedule without
+        # actually sleeping through it.
+        self._sleep = sleep_fn
 
     def close(self) -> None:
         self._client.close()
@@ -133,25 +165,92 @@ class BackendClient:
             raise BackendConnectivityError(f"graph/stats failed: {exc}") from exc
 
     def chat(self, message: str, series_id: Optional[str] = None) -> dict:
+        """
+        POST one turn to /chat, retrying a *retry-safe* connectivity failure up
+        to self._chat_max_retries times before giving up.
+
+        Which failures are retried is a correctness question, not a tuning one,
+        because /chat is not idempotent. backend/core/orchestrator.py persists
+        the input MU and the prompt MU *before* it calls Ollama, and its
+        httpx.HTTPStatusError path (orchestrator.py:692) re-raises without
+        rolling either one back. So a failed turn already leaves MUs in the
+        graph, and every additional attempt leaves one more set:
+
+          - ConnectError / NetworkError: the request never reached the backend,
+            so no MU was written. Retried.
+          - 5xx: the backend ran the turn, wrote both MUs, then failed. Retried
+            anyway — see the cost note below — because this is the self-healing
+            model-runner crash the retry budget exists for.
+          - TimeoutException: NOT retried. The request may still be in flight
+            server-side, so a retry races a turn that can still succeed and
+            would double-write on top of that. Timeouts stay a hard connectivity
+            error and are governed by error_policy as before.
+
+        Cost of the 5xx retry, stated plainly: each retried attempt orphans one
+        extra user_input MU in the graph. source_type="prompt" is already
+        excluded from retrieval via retrieval_exclude_source_types, but
+        "user_input" is not, so an orphan is a retrievable near-duplicate of the
+        turn's message. That is a real but bounded contamination, and it is
+        strictly better than the alternative it replaces: hard_stop leaves the
+        very same orphan behind *and* loses the run. The clean fix belongs in
+        the orchestrator (roll back or mark MUs when the LLM call fails), not
+        here. Until then, prefer this over aborting a multi-hour run.
+        """
         body: dict = {"message": message}
         if series_id:
             body["series_id"] = series_id
 
-        try:
-            resp = self._client.post("/chat", json=body, timeout=self._chat_timeout)
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
-            raise BackendConnectivityError(f"chat call failed (connectivity): {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise BackendConnectivityError(f"chat call failed: {exc}") from exc
+        last_error: Optional[BackendConnectivityError] = None
 
-        if resp.status_code >= 500:
-            raise BackendConnectivityError(
-                f"chat call failed with server error {resp.status_code}: {resp.text[:200]}"
+        for attempt in range(self._chat_max_retries + 1):
+            if attempt > 0:
+                # Index defensively: the backoff tuple may be shorter than the
+                # retry budget if either is overridden.
+                delay = self._chat_retry_backoff[
+                    min(attempt - 1, len(self._chat_retry_backoff) - 1)
+                ]
+                logger.warning(
+                    "client: retrying /chat after retry-safe failure "
+                    "(attempt %d/%d, backoff %.1fs): %s",
+                    attempt + 1, self._chat_max_retries + 1, delay, last_error,
+                )
+                self._sleep(delay)
+
+            try:
+                resp = self._client.post("/chat", json=body, timeout=self._chat_timeout)
+            except httpx.TimeoutException as exc:
+                # Deliberately not retried — the turn may still be in flight.
+                raise BackendConnectivityError(
+                    f"chat call failed (timeout, not retried): {exc}"
+                ) from exc
+            except (httpx.ConnectError, httpx.NetworkError) as exc:
+                last_error = BackendConnectivityError(
+                    f"chat call failed (connectivity): {exc}"
+                )
+                continue
+            except httpx.HTTPError as exc:
+                raise BackendConnectivityError(f"chat call failed: {exc}") from exc
+
+            if resp.status_code >= 500:
+                last_error = BackendConnectivityError(
+                    f"chat call failed with server error {resp.status_code}: {resp.text[:200]}"
+                )
+                continue
+            if resp.status_code >= 400:
+                raise BackendTurnError(
+                    f"chat call failed with client error {resp.status_code}: {resp.text[:200]}"
+                )
+            break
+        else:
+            # Budget exhausted — surface the last failure to error_policy.
+            logger.error(
+                "client: /chat still failing after %d attempts: %s",
+                self._chat_max_retries + 1, last_error,
             )
-        if resp.status_code >= 400:
-            raise BackendTurnError(
-                f"chat call failed with client error {resp.status_code}: {resp.text[:200]}"
-            )
+            raise last_error
+
+        if attempt > 0:
+            logger.info("client: /chat recovered on attempt %d", attempt + 1)
 
         try:
             data = resp.json()

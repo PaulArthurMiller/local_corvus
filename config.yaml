@@ -25,6 +25,21 @@ model:
   # Context window size in tokens for the loaded model.
   # Used by §5.8 of the series report to flag turns approaching the ceiling.
   # Gemma 4 E4B: 8192 tokens. Update if you switch models.
+  #
+  # MUST match the host's OLLAMA_CONTEXT_LENGTH. This value is only a reporting
+  # threshold — it does not configure Ollama, and nothing validates the two
+  # against each other at startup. Ollama's own default is VRAM-derived (it was
+  # serving n_ctx=4096 on this box until 2026-08-06), and when the two disagree
+  # in this direction llama.cpp silently truncates any prompt over the real
+  # ceiling while §5.8 reports the turn as comfortable — a quiet
+  # experiment-validity hole rather than a visible failure.
+  #
+  # Pinned on the host with: setx OLLAMA_CONTEXT_LENGTH 8192  (restart Ollama).
+  # Verify after a model load with:
+  #   grep "n_ctx  " %LOCALAPPDATA%\Ollama\server.log | tail -1
+  # Measured cost of 4096 -> 8192 on the RTX 5060 (8151 MiB): KV cache 104 ->
+  # 168 MiB, total VRAM 4302 -> 4370 MiB. Cheap because gemma4's sliding-window
+  # layers keep their own fixed-size buffer; only the full-attention half scales.
   context_window_tokens: 8192
 
 gate:

@@ -66,6 +66,7 @@ Install these on the host machine:
 - Docker and Docker Compose.
 - Ollama running natively on the host, reachable at `localhost:11434`.
 - The model configured in `config.yaml` pulled into Ollama. The default model name is `gemma4:e4b`.
+- `OLLAMA_CONTEXT_LENGTH` set to match `model.context_window_tokens` in `config.yaml` (8192). Ollama's own default is VRAM-derived and was serving 4096 on the reference machine, which silently truncates long prompts while §5.8 of the series report still calls them comfortable. Nothing validates the two at startup — see the note on `context_window_tokens` in `config.yaml`.
 
 Pull the default model if needed:
 
@@ -77,6 +78,18 @@ Verify Ollama responds:
 
 ```bash
 curl http://localhost:11434/api/tags
+```
+
+Pin the context length (Windows; restart Ollama afterwards so it takes effect):
+
+```powershell
+setx OLLAMA_CONTEXT_LENGTH 8192
+```
+
+Confirm it applied after the next model load — this must print `8192`, not `4096`:
+
+```powershell
+Select-String "n_ctx  " "$env:LOCALAPPDATA\Ollama\server.log" | Select-Object -Last 1
 ```
 
 > Docker services reach host Ollama through `host.docker.internal:11434`. The compose file also adds a Linux `host-gateway` mapping for that hostname.
@@ -414,6 +427,34 @@ npm run build
 - Confirm the configured model exists in Ollama.
 - Try a smaller model or increase `model.timeout_seconds` in `config.yaml`.
 - Check backend logs from `docker compose logs -f backend`.
+
+### `/chat` returns 502 with a 500 from `host.docker.internal:11434`
+
+Docker networking is fine here — the request reached Ollama and Ollama's model
+runner died mid-inference. Confirm in `%LOCALAPPDATA%\Ollama\server.log`
+(timestamps there are local time; backend logs are UTC):
+
+```
+CUDA error: out of memory
+level=ERROR msg="llama-server terminated" exit.hex=0xc0000409
+level=WARN  msg="runtime OOM detected; expiring loaded models..."
+```
+
+This is self-healing — Ollama expires the OOMed model and the next request
+reloads it — so the harness retries `/chat` twice with backoff rather than
+aborting the run (`scripts/harness/client.py`). If it recurs:
+
+- Restart Ollama before a long run. With `OLLAMA_KEEP_ALIVE=-1` the runner
+  never cycles, and its prompt cache (limit: 8192 MiB, larger than the whole
+  8 GB GPU) accumulates across days of uptime until an eviction has no VRAM
+  left to work in. The 2026-08-06 crash came from a runner that had been up
+  since 2026-08-04.
+- Close other GPU consumers. LibreOffice held GPU memory during that run.
+- Reserve headroom with `OLLAMA_GPU_OVERHEAD` (bytes) if it still recurs.
+
+Note this leaves orphan MUs: the orchestrator persists the input and prompt MUs
+before calling Ollama and does not roll them back when the call fails, so a
+crashed turn (and each retry of it) leaves a retrievable `user_input` MU behind.
 
 ### Admin UI shows no runs
 

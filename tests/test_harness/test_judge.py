@@ -257,6 +257,33 @@ def test_http_error_from_client_is_contained_by_retry_then_raises():
         judge_turn(client, "What is X?", ["mentions X"], "X is Y.", _judge_config(), TURN_TYPE_BULK)
 
 
+def test_reask_names_the_rejection_reason():
+    """
+    Judges run at temperature 0.0, so re-sending a byte-identical prompt is
+    close to asking the same deterministic question twice — the retry budget
+    existed but bought almost nothing. The 2026-08-06 calibration spent it on
+    1 turn in 20 and still lost the verdict.
+    """
+    client = FakeOllamaJudgeClient(["not json", _checklist_json([True])])
+
+    judge_turn(client, "What is X?", ["mentions X"], "X is Y.", _judge_config(), TURN_TYPE_BULK)
+
+    first, second = client.calls[0]["prompt"], client.calls[1]["prompt"]
+    assert "previous answer was rejected" not in first
+    assert "previous answer was rejected" in second
+    assert "not valid JSON" in second
+
+
+def test_http_failure_reask_is_not_treated_as_a_rejected_answer():
+    """A refused connection produced no answer to correct; telling the model
+    its answer was rejected would be describing something that never happened."""
+    client = FakeOllamaJudgeClient([httpx.ConnectError("refused"), _checklist_json([True])])
+
+    judge_turn(client, "What is X?", ["mentions X"], "X is Y.", _judge_config(), TURN_TYPE_BULK)
+
+    assert "previous answer was rejected" not in client.calls[1]["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # judge_turn — probe turn guard
 # ---------------------------------------------------------------------------
@@ -292,6 +319,28 @@ def test_prompt_asks_for_a_quote_bearing_checklist_in_order():
     assert prompt.index('"quote"') < prompt.index('"met"')
     # The old free-text protocol's field must not leak back in.
     assert "criterion_triggered" not in prompt
+
+
+def test_prompt_rules_out_naming_a_subject_as_evidence():
+    """
+    The 2026-08-06 recalibration's three lenient calls were one move: the
+    quote named the criterion's subject without asserting its content
+    ("K-1: Addresses field order." credited for "states fields must appear in
+    the fixed declared order"). The evidence checks cannot catch it — those
+    quotes really were in the response — so the standard has to.
+    """
+    from harness.judge import _build_judge_prompt
+
+    prompt = _build_judge_prompt("What is X?", ["mentions X"], "X is Y.")
+
+    assert "Naming a subject is not stating a fact about it" in prompt
+    assert "The quote by itself must satisfy the criterion" in prompt
+    # A worked example carries the rule for a 4B model better than the rule
+    # alone, but it must not be drawn from the fixtures the bank is built on
+    # — that would prime the judge on the very turns it grades.
+    assert "Worked example" in prompt
+    assert "Kestrel" not in prompt
+    assert "K-1" not in prompt
 
 
 def test_prompt_tags_exact_answer_criteria_differently_from_concept_criteria():

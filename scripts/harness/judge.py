@@ -223,7 +223,12 @@ class OllamaJudgeClient:
         return model in models or any((m or "").startswith(model) for m in models)
 
 
-def _build_judge_prompt(prompt_text: str, criteria: list[str], response_text: str) -> str:
+def _build_judge_prompt(
+    prompt_text: str,
+    criteria: list[str],
+    response_text: str,
+    parse_error: Optional[str] = None,
+) -> str:
     """
     Build the judge prompt: Milestone 31's per-criterion checklist, tightened
     for literal-match discipline in Milestone 37.
@@ -258,6 +263,35 @@ def _build_judge_prompt(prompt_text: str, criteria: list[str], response_text: st
     judge follows a handful of flat rules far more reliably than a precise
     but layered rubric. The response is placed before the criteria so the
     rules land last, closest to the generation.
+
+    The 2026-08-06 recalibration (attempt2, same 20-turn slice as M31) found
+    the three changes above had not moved the grading standard: judge-alone
+    "up" landed on 14 of 20 in both passes, and all three operator
+    corrections were again lenient, zero strict. Reading the judge's own
+    quotes, they were one failure mode, not three — the quote named the
+    *topic* of the criterion without asserting its *content*:
+
+      criterion "states fields must appear in the fixed declared order"
+        quoted "K-1: Addresses field order."             -> marked met
+      criterion "notes deviation invalidates parsing"
+        quoted "failure to comply will result in a P-fault" -> marked met
+      criterion "states fields must appear in declared spine order"
+        quoted "Every field must strictly conform to its designated
+                position ... defined by Rule K-1."       -> marked met
+
+    None of these were caught by the evidence checks: every quote really was
+    in the response, it just did not support the criterion. So the fix has to
+    be in the standard, not the verifier. Two more flat rules and one worked
+    example target that specific move — naming a subject is not stating a
+    fact about it, and the quote has to stand on its own rather than being
+    completed by the rest of the response. The example is deliberately
+    domain-neutral: an example drawn from the Kestrel fixtures the bank is
+    built on would prime the judge on the very turns it grades.
+
+    parse_error carries the previous attempt's rejection reason on a re-ask.
+    Without it the retry re-sent a byte-identical prompt at temperature 0.0,
+    which is very nearly a deterministic repeat of the failure — the retry
+    budget existed but bought almost nothing.
     """
     criteria_lines = "\n".join(
         f"{i}. [{_criterion_kind(c).upper()}] {c}" for i, c in enumerate(criteria, 1)
@@ -268,6 +302,25 @@ def _build_judge_prompt(prompt_text: str, criteria: list[str], response_text: st
     schema_example = (
         '{"checklist": [{"quote": "<exact words copied from the response, or an '
         'empty string>", "met": true or false}], "rationale": "<one or two sentences>"}'
+    )
+    # A structurally exact copy of the observed failure, in a subject the
+    # prompt bank never touches — the judge must learn the move, not the
+    # fixture.
+    worked_example = (
+        'Worked example. Criterion: "states the timeout must be set to 30 seconds".\n'
+        '  Quote "Section 4 covers the timeout setting." -> met: false. It names the '
+        "subject and never states the value.\n"
+        '  Quote "Set the timeout to 30 seconds." -> met: true. It states the thing the '
+        "criterion asks for."
+    )
+    correction = (
+        (
+            f"\n\nYour previous answer was rejected: {parse_error}\n"
+            "Return only the JSON object described above — no prose, no markdown fences, "
+            f"exactly {len(criteria)} checklist entries."
+        )
+        if parse_error
+        else ""
     )
     return (
         "You are grading an AI assistant's response against a fixed checklist of criteria.\n\n"
@@ -280,20 +333,28 @@ def _build_judge_prompt(prompt_text: str, criteria: list[str], response_text: st
         "- For each criterion, first copy the exact words from the response that satisfy it "
         'into "quote". If no words in the response satisfy it, "quote" must be an empty '
         'string and "met" must be false.\n'
+        "- Naming a subject is not stating a fact about it. A quote that only points at "
+        "what the criterion is about — a rule number, a heading, a label, or a sentence "
+        "saying the subject matters — does not meet a criterion asking the response to "
+        "state something specific about that subject.\n"
+        "- The quote by itself must satisfy the criterion. Do not use anything else in the "
+        "response to fill in what the quote leaves out.\n"
         "- [EXACT] criteria name a specific required answer. The response must state that "
         "answer itself. A different code, label, number, or term does not count, even if it "
         "looks similar or you believe it means the same thing. Never treat two different "
         "labels as synonyms.\n"
         "- [CONCEPT] criteria describe an idea. The response may word the idea differently, "
-        "but it must actually state the idea, not merely hint at it or leave it implied.\n"
+        "but it must actually state the idea, not merely hint at it or leave it implied. A "
+        "different claim about the same subject is not the idea.\n"
         "- A criterion that asks for more than one thing is met only if every part is present.\n"
         "- If you are unsure, answer false. False is the default.\n"
         "- Judge each criterion on its own. Do not give an overall pass/fail — that is "
         "derived from your answers, not by you.\n\n"
+        f"{worked_example}\n\n"
         f"Return ONLY a JSON object of this exact shape:\n{schema_example}\n\n"
         f'"checklist" must hold exactly {len(criteria)} objects, one per criterion, in the '
         "SAME order as the criteria listed above — no more, no fewer. No prose, no markdown "
-        "fences."
+        f"fences.{correction}"
     )
 
 
@@ -664,20 +725,31 @@ def judge_turn(
 
     The response text is passed to _parse_verdict as well as into the prompt
     (M37) — the judge's quoted evidence is checked against it host-side.
+
+    The re-ask names the reason the previous answer was rejected. Judges run
+    at temperature 0.0, so re-sending the identical prompt was close to
+    asking the same deterministic question twice: the 2026-08-06 calibration
+    spent its whole retry budget on 1 of 20 turns and still lost the verdict.
+    HTTP failures are the exception — there is no rejected answer to correct,
+    so those retry unchanged.
     """
     if turn_type == TURN_TYPE_PROBE:
         raise ProbeTurnJudgeError("judge_turn must never be called for a probe turn")
 
-    prompt = _build_judge_prompt(prompt_text, criteria, response_text)
-
     last_exc: Optional[Exception] = None
+    parse_error: Optional[str] = None
     for attempt in range(MAX_JUDGE_ATTEMPTS):
+        prompt = _build_judge_prompt(prompt_text, criteria, response_text, parse_error=parse_error)
         try:
             raw_text = client.chat_json(judge_config.model, judge_config.temperature, prompt)
             return _parse_verdict(raw_text, criteria, response_text)
-        except (ValueError, KeyError, httpx.HTTPError) as exc:
+        except (ValueError, KeyError) as exc:
             last_exc = exc
-            logger.warning("judge: parse/call failure (attempt %d/%d): %s", attempt + 1, MAX_JUDGE_ATTEMPTS, exc)
+            parse_error = str(exc)
+            logger.warning("judge: parse failure (attempt %d/%d): %s", attempt + 1, MAX_JUDGE_ATTEMPTS, exc)
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            logger.warning("judge: call failure (attempt %d/%d): %s", attempt + 1, MAX_JUDGE_ATTEMPTS, exc)
 
     raise JudgeUnparseableError(
         f"judge response unparseable after {MAX_JUDGE_ATTEMPTS} attempt(s) "

@@ -21,6 +21,15 @@ from harness.manifest import now_iso, run_dir_for
 STATUS_OK = "ok"
 STATUS_SOFT_CONTINUE = "error_soft_continue"
 
+# judge_error prefixes for the two paths that record a verdict the judge never
+# produced. Kept here, next to the field they are written into, so the runner
+# (writer) and calibration (reader) share one spelling instead of matching on
+# prose — the 2026-08-06 pass had one such turn and it landed in none of the
+# summary's buckets, because nothing distinguished it from an ordinary graded
+# turn except two fields being None.
+JUDGE_ERROR_HAND_GRADED = "judge_unparseable (hand-graded)"
+JUDGE_ERROR_RECORDED_NONE = "judge_unparseable (recorded none)"
+
 
 class TurnCheckpoint(BaseModel):
     condition: str

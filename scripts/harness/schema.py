@@ -36,13 +36,30 @@ _TRAINED_SPOKE_KEY_RE = re.compile(r"^[abcd]_spoke[1-7]$")
 # failing — defaults to soft_continue regardless of the "connectivity"
 # default, since a broken report is re-generatable later but an aborted
 # run (that otherwise succeeded) is not.
+#
+# "record_none" (2026-08-06) is judge_unparseable-only: post a "none" verdict
+# naming the parse failure instead of recording nothing at all. It replaces
+# soft_continue as that key's default. The 2026-08-06 calibration lost 1 turn
+# in 20 this way — at exp0's 1,050 turns that is ~50 turns silently absent
+# from the denominator, which is indistinguishable in the data from turns
+# that were never attempted. Both actions leave learning untouched (a "none"
+# verdict triggers no weight update, exactly like recording nothing), so the
+# change is to the record, not to the experiment.
+ERROR_ACTION_RECORD_NONE = "record_none"
 DEFAULT_ERROR_POLICY = {
     "connectivity": "hard_stop",
     "turn_ambiguous": "soft_continue",
-    "judge_unparseable": "soft_continue",
+    "judge_unparseable": ERROR_ACTION_RECORD_NONE,
     "report_generation": "soft_continue",
 }
 VALID_ERROR_ACTIONS = ("hard_stop", "soft_continue")
+# Per-key extensions to VALID_ERROR_ACTIONS. Kept a whitelist rather than
+# widening VALID_ERROR_ACTIONS for every key: "connectivity": "record_none"
+# has no meaning, and a plan asking for it should fail validation rather than
+# be quietly ignored at run time.
+VALID_ERROR_ACTIONS_BY_KEY = {
+    "judge_unparseable": VALID_ERROR_ACTIONS + (ERROR_ACTION_RECORD_NONE,),
+}
 
 
 class ConceptualFields(BaseModel):
@@ -246,11 +263,16 @@ class RunPlan(BaseModel):
     @field_validator("error_policy")
     @classmethod
     def _validate_error_policy(cls, v: dict[str, str]) -> dict[str, str]:
-        bad_actions = {k: a for k, a in v.items() if a not in VALID_ERROR_ACTIONS}
+        bad_actions = {
+            k: a for k, a in v.items()
+            if a not in VALID_ERROR_ACTIONS_BY_KEY.get(k, VALID_ERROR_ACTIONS)
+        }
         if bad_actions:
+            allowed = {
+                k: VALID_ERROR_ACTIONS_BY_KEY.get(k, VALID_ERROR_ACTIONS) for k in bad_actions
+            }
             raise ValueError(
-                f"error_policy has invalid action(s) {bad_actions}; "
-                f"each value must be one of {VALID_ERROR_ACTIONS}"
+                f"error_policy has invalid action(s) {bad_actions}; allowed per key: {allowed}"
             )
         return v
 

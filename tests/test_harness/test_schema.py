@@ -148,14 +148,35 @@ def test_judge_temperature_default_is_accepted():
 # M19 Phase 2 — judge_unparseable error policy key
 # ---------------------------------------------------------------------------
 
-def test_judge_unparseable_defaults_to_soft_continue():
+def test_judge_unparseable_defaults_to_record_none():
+    """
+    Changed from soft_continue on 2026-08-06. A dropped verdict is invisible
+    in the data — indistinguishable from a turn that never ran — and the
+    calibration pass that day lost one turn in twenty this way, which is ~50
+    turns across exp0. Recording "none" costs nothing: it triggers no weight
+    update, exactly like recording nothing did.
+    """
     from harness.schema import DEFAULT_ERROR_POLICY
-    assert DEFAULT_ERROR_POLICY["judge_unparseable"] == "soft_continue"
+    assert DEFAULT_ERROR_POLICY["judge_unparseable"] == "record_none"
 
 
 def test_judge_unparseable_error_policy_override_accepted():
     plan = RunPlan(**_base_kwargs(error_policy={"judge_unparseable": "hard_stop"}))
     assert plan.error_policy == {"judge_unparseable": "hard_stop"}
+
+
+def test_record_none_is_accepted_for_judge_unparseable_only():
+    """
+    record_none is meaningless for the other keys — there is no verdict to
+    record when the backend is unreachable — so a plan asking for it should
+    fail validation rather than be silently ignored at run time.
+    """
+    plan = RunPlan(**_base_kwargs(error_policy={"judge_unparseable": "record_none"}))
+    assert plan.error_policy == {"judge_unparseable": "record_none"}
+
+    with pytest.raises(ValidationError) as exc_info:
+        RunPlan(**_base_kwargs(error_policy={"connectivity": "record_none"}))
+    assert "error_policy" in format_validation_error(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

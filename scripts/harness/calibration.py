@@ -285,14 +285,14 @@ def render_calibration_summary(record: CalibrationRecord, run_id: str) -> str:
         f"- Criteria flagged — required answer absent from the response: "
         f"{record.flag_counts.get(EVIDENCE_ANSWER_TOKEN_ABSENT, 0)}",
         "",
-        f"The last two rows are advisory: {flagged_total} criterion/criteria flagged, none",
-        "demoted. They are heuristics over normalized text, and this pass is what says",
-        "whether they fire often enough, and cleanly enough, to be worth promoting into",
-        "enforcement. On 2026-08-06 the answer was no — the single flag that fired was on",
-        "a criterion the operator confirmed met, so enforcing it would have flipped a",
-        "correct verdict; and it caught none of that pass's three real (lenient) errors,",
-        "whose quotes were genuinely present in the response and simply did not support",
-        "the criterion.",
+        f"The last two rows are advisory: {flagged_total} criterion/criteria flagged, and",
+        "by design neither ever demotes. They are heuristics over normalized text, and this",
+        "pass is what says whether they fire often enough, and cleanly enough, to be worth",
+        "promoting into enforcement. Read them against the lenient/strict split above: a",
+        "flag on a criterion the operator confirmed met is a false positive that enforcement",
+        "would have turned into a wrong verdict, and a lenient error no flag caught is a",
+        "miss. This file reports the counts; record the read itself in PROGRESS.md, dated",
+        "and tied to this run_id.",
         "",
     ]
     return "\n".join(lines)

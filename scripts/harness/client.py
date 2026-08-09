@@ -396,17 +396,31 @@ class BackendClient:
             ) from exc
 
     def generate_experiment_report(
-        self, experiment_id: str, control_experiment_ids: Optional[dict] = None
+        self,
+        experiment_id: str,
+        control_experiment_ids: Optional[dict] = None,
+        trained_spokes: Optional[dict] = None,
+        seed_fixture_version: Optional[str] = None,
     ) -> dict:
         """POST /admin/reports/generate-experiment (M14-16). See generate_series_report
-        for why this raises ReportGenerationError rather than the generic categories."""
+        for why this raises ReportGenerationError rather than the generic categories.
+
+        trained_spokes/seed_fixture_version (M39): forwarded from the
+        RunPlan so the report's trained-probe/cluster-winner/trained-subset
+        sections resolve automatically at experiment close, instead of
+        requiring a manual admin call with those fields filled in by hand.
+        """
         try:
+            body = {
+                "experiment_id": experiment_id,
+                "control_experiment_ids": control_experiment_ids,
+                "trained_spokes": trained_spokes,
+            }
+            if seed_fixture_version is not None:
+                body["seed_fixture_version"] = seed_fixture_version
             resp = self._client.post(
                 "/admin/reports/generate-experiment",
-                json={
-                    "experiment_id": experiment_id,
-                    "control_experiment_ids": control_experiment_ids,
-                },
+                json=body,
                 timeout=self._report_timeout,
             )
             resp.raise_for_status()

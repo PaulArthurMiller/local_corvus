@@ -33,6 +33,9 @@ from analytics.reports.control_shadow import (
     _collect_probe_results_for_experiment,
     _compute_comparative_deltas,
     _compute_sample_pass_rate_comparison,
+    _compute_pin_adjusted_mean_deltas,
+    _compute_pinned_probes,
+    _compute_trained_subset_comparison,
 )
 
 
@@ -645,3 +648,147 @@ class TestCollectProbeResultsForExperiment:
             print(f"legacy fallback results: {len(results)}")
             assert len(results) == 1
             assert results[0]["gold_mu_rank"] == 2
+
+
+# ---------------------------------------------------------------------------
+# _compute_trained_subset_comparison — M39 §2 trained-subset comparison
+# ---------------------------------------------------------------------------
+
+
+class TestComputeTrainedSubsetComparison:
+    def _make_comparison(self, per_probe: list[dict]) -> dict:
+        return {"per_probe": per_probe, "by_phenomenon": {}}
+
+    def test_restricts_to_trained_probes_only(self):
+        cmp = self._make_comparison([
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": -0.5}, {"session_index": 4, "delta": -0.94}]},
+            {"probe_id": "vs_d6", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": 0.38}, {"session_index": 4, "delta": 0.72}]},
+        ])
+        result = _compute_trained_subset_comparison(cmp, trained_probe_ids={"vs_d5"})
+
+        assert result["matched_probe_count"] == 1
+        assert [p["probe_id"] for p in result["per_probe"]] == ["vs_d5"]
+        assert result["final_session_mean_delta"] == -0.94
+
+    def test_mean_delta_by_session_averages_across_trained_probes(self):
+        cmp = self._make_comparison([
+            {"probe_id": "vs_a1", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": -1.0}]},
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": -0.5}]},
+        ])
+        result = _compute_trained_subset_comparison(cmp, trained_probe_ids={"vs_a1", "vs_d5"})
+
+        assert result["mean_delta_by_session"] == [
+            {"session_index": 0, "mean_delta": -0.75, "probe_count": 2}
+        ]
+
+    def test_empty_trained_probe_ids_degrades_without_crashing(self):
+        """No trained_spokes supplied to generate_experiment_report — the
+        endpoint must render '—', never crash."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_a1", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": -1.0}]},
+        ])
+        result = _compute_trained_subset_comparison(cmp, trained_probe_ids=set())
+
+        assert result["trained_probe_count"] == 0
+        assert result["matched_probe_count"] == 0
+        assert result["per_probe"] == []
+        assert result["mean_delta_by_session"] == []
+        assert result["final_session_mean_delta"] is None
+
+    def test_none_deltas_excluded_from_the_mean(self):
+        cmp = self._make_comparison([
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": None}]},
+        ])
+        result = _compute_trained_subset_comparison(cmp, trained_probe_ids={"vs_d5"})
+        assert result["mean_delta_by_session"] == []
+        assert result["final_session_mean_delta"] is None
+
+
+# ---------------------------------------------------------------------------
+# _compute_pinned_probes — M39 §4 control-pinned classification
+# ---------------------------------------------------------------------------
+
+
+class TestComputePinnedProbes:
+    def _spr(self, probe_sessions: dict) -> dict:
+        per_probe = []
+        for probe_id, rates in probe_sessions.items():
+            per_probe.append({
+                "probe_id": probe_id,
+                "sessions": [{"session_index": i, "pass_rate": r} for i, r in enumerate(rates)],
+            })
+        return {"per_probe": per_probe}
+
+    def test_pinned_when_every_session_is_1_0(self):
+        spr = self._spr({"vs_a1": [1.0, 1.0, 1.0]})
+        assert _compute_pinned_probes(spr) == {"vs_a1"}
+
+    def test_not_pinned_when_only_one_session_hits_1_0(self):
+        """vs_b1-shaped case: a single 1.0 session must not qualify."""
+        spr = self._spr({"vs_b1": [0.2, 1.0, 0.4]})
+        assert _compute_pinned_probes(spr) == set()
+
+    def test_not_pinned_when_no_sessions(self):
+        spr = self._spr({"vs_x1": []})
+        assert _compute_pinned_probes(spr) == set()
+
+    def test_multiple_pinned_probes_all_caught(self):
+        """exp0b-shaped case: vs_a1/vs_c1/vs_d1 pinned under static_weight."""
+        spr = self._spr({
+            "vs_a1": [1.0, 1.0], "vs_c1": [1.0, 1.0], "vs_d1": [1.0, 1.0],
+            "vs_b1": [1.0, 0.2],
+        })
+        assert _compute_pinned_probes(spr) == {"vs_a1", "vs_c1", "vs_d1"}
+
+
+# ---------------------------------------------------------------------------
+# _compute_pin_adjusted_mean_deltas — M39 §4
+# ---------------------------------------------------------------------------
+
+
+class TestComputePinAdjustedMeanDeltas:
+    def _per_probe(self) -> list[dict]:
+        return [
+            {"probe_id": "vs_a1", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": -1.0}, {"session_index": 1, "delta": -0.88}]},
+            {"probe_id": "vs_d6", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": 0.38}, {"session_index": 1, "delta": 0.72}]},
+        ]
+
+    def test_all_probes_mean_is_unchanged_from_the_unrestricted_comparison(self):
+        """M34's rule: the existing all-probe mean is never silently
+        redefined — it must be the exact by_phenomenon dict passed in."""
+        from analytics.reports.control_shadow import _aggregate_deltas_by_phenomenon
+        per_probe = self._per_probe()
+        cmp = {"per_probe": per_probe, "by_phenomenon": _aggregate_deltas_by_phenomenon(per_probe)}
+
+        result = _compute_pin_adjusted_mean_deltas(cmp, pinned_probe_ids=set())
+        assert result["by_phenomenon_all_probes"] == cmp["by_phenomenon"]
+
+    def test_excluding_pinned_removes_pinned_probes_from_the_mean(self):
+        per_probe = self._per_probe()
+        from analytics.reports.control_shadow import _aggregate_deltas_by_phenomenon
+        cmp = {"per_probe": per_probe, "by_phenomenon": _aggregate_deltas_by_phenomenon(per_probe)}
+
+        result = _compute_pin_adjusted_mean_deltas(cmp, pinned_probe_ids={"vs_a1"})
+
+        # excluding vs_a1 leaves only vs_d6: mean = (0.38+0.72)/2 = 0.55
+        excl = result["by_phenomenon_excluding_pinned"]["spoke_retrieval"]
+        assert excl["mean_delta"] == 0.55
+        assert excl["probe_count"] == 1
+        assert result["pinned_probe_ids"] == ["vs_a1"]
+
+    def test_all_pinned_yields_empty_excluding_pinned_mean(self):
+        per_probe = self._per_probe()
+        from analytics.reports.control_shadow import _aggregate_deltas_by_phenomenon
+        cmp = {"per_probe": per_probe, "by_phenomenon": _aggregate_deltas_by_phenomenon(per_probe)}
+
+        result = _compute_pin_adjusted_mean_deltas(cmp, pinned_probe_ids={"vs_a1", "vs_d6"})
+
+        assert result["by_phenomenon_excluding_pinned"] == {}

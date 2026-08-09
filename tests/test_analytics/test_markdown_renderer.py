@@ -595,3 +595,124 @@ def test_s62_sample_pass_rate_comparison_absent_renders_message_not_crash():
 def test_s62_no_control_shadow_renders_not_computed():
     md = _render_s62(None)
     assert "Not computed" in md
+
+
+# ---------------------------------------------------------------------------
+# M39 — trained probes, cluster winner table, trained-subset comparison,
+# pin-adjusted mean deltas
+# ---------------------------------------------------------------------------
+
+
+def test_s61_renders_trained_probes_and_cluster_winner_table():
+    section = _base_s61_section({})
+    section["trained_probes"] = {
+        "cluster_a": {"spoke_key": "a_spoke1", "mu_id": "a0000002-aaaa-4aaa-8aaa-000000000002", "probe_id": "vs_a1"},
+        "cluster_b": {"spoke_key": "b_spoke1", "mu_id": "b0000002-bbbb-4bbb-8bbb-000000000002", "probe_id": None},
+    }
+    section["cluster_winner_table"] = {
+        "cluster_a": {
+            "sessions": [
+                {"session_index": 0, "winner_probe_id": "vs_a1", "winner_pass_rate": 0.9,
+                 "trained": True, "tied_with": []},
+            ],
+            "final_session_winner": {
+                "session_index": 0, "winner_probe_id": "vs_a1", "winner_pass_rate": 0.9,
+                "trained": True, "tied_with": [],
+            },
+        },
+    }
+
+    md = _render_s61(section)
+    print(f"§6.1 trained probes + cluster winner table:\n{md}")
+    assert "Trained Probes (M39)" in md
+    assert "a_spoke1" in md
+    assert "vs_a1" in md
+    assert "no matching probe" in md  # cluster_b's unresolved probe_id
+    assert "Per-Cluster Winner Table (M39)" in md
+    assert "✅ trained" in md
+
+
+def test_s61_trained_probes_absent_renders_without_crash():
+    """Pre-M39 stored report JSON has neither key — must render cleanly,
+    not crash (M32 backward-compat rule)."""
+    section = _base_s61_section({})
+    md = _render_s61(section)
+    assert "Trained Probes (M39)" not in md
+    assert "Per-Cluster Winner Table (M39)" not in md
+
+
+def test_s62_trained_subset_comparison_renders():
+    entry = _make_control_shadow_entry("static_weight", "static-weight")
+    entry["trained_subset_comparison"] = {
+        "trained_probe_count": 1,
+        "matched_probe_count": 1,
+        "per_probe": [],
+        "mean_delta_by_session": [
+            {"session_index": 0, "mean_delta": -0.75, "probe_count": 1},
+            {"session_index": 4, "mean_delta": -0.94, "probe_count": 1},
+        ],
+        "final_session_mean_delta": -0.94,
+    }
+    control_shadow = {"static_weight": entry}
+
+    md = _render_s62(control_shadow)
+    print(f"§6.2 trained-subset comparison:\n{md}")
+    assert "Trained-Subset Comparison" in md
+    assert "-0.94" in md
+
+
+def test_s62_trained_subset_comparison_absent_renders_message_not_crash():
+    control_shadow = {"static_weight": _make_control_shadow_entry("static_weight", "static-weight")}
+    md = _render_s62(control_shadow)
+    assert "no `trained_spokes` was supplied" in md
+
+
+def test_s62_pin_adjusted_mean_deltas_renders():
+    entry = _make_control_shadow_entry("static_weight", "static-weight")
+    entry["pin_adjusted_mean_deltas"] = {
+        "pinned_probe_ids": ["vs_a1", "vs_d5"],
+        "by_phenomenon_all_probes": {
+            "spoke_retrieval": {"probe_count": 4, "mean_delta": -0.2163, "final_session_mean_delta": -0.165},
+        },
+        "by_phenomenon_excluding_pinned": {
+            "spoke_retrieval": {"probe_count": 2, "mean_delta": 0.4125, "final_session_mean_delta": 0.61},
+        },
+    }
+    control_shadow = {"static_weight": entry}
+
+    md = _render_s62(control_shadow)
+    print(f"§6.2 pin-adjusted mean deltas:\n{md}")
+    assert "Pin-Adjusted Mean Deltas (M39)" in md
+    assert "vs_a1, vs_d5" in md
+    assert "0.4125" in md
+
+
+def test_s62_cluster_winner_table_control_side_renders():
+    entry = _make_control_shadow_entry("static_weight", "static-weight")
+    entry["learning_measures"] = {
+        "cluster_winner_table": {
+            "cluster_a": {
+                "sessions": [],
+                "final_session_winner": {
+                    "session_index": 4, "winner_probe_id": "vs_a1",
+                    "winner_pass_rate": 1.0, "trained": True, "tied_with": [],
+                },
+            },
+        },
+    }
+    control_shadow = {"static_weight": entry}
+
+    md = _render_s62(control_shadow)
+    print(f"§6.2 control-side cluster winner table:\n{md}")
+    assert "Per-Cluster Winner Table — static_weight (M39)" in md
+    assert "vs_a1" in md
+
+
+def test_s62_m39_sections_all_absent_render_without_crash():
+    """Pre-M39 control_shadow entries have none of trained_subset_comparison,
+    pin_adjusted_mean_deltas, or a cluster_winner_table under learning_measures.
+    The whole section must still render cleanly."""
+    control_shadow = {"static_weight": _make_control_shadow_entry("static_weight", "static-weight")}
+    md = _render_s62(control_shadow)
+    assert "Per-Cluster Winner Table — static_weight (M39)" not in md
+    assert "Pin-Adjusted Mean Deltas (M39)" not in md

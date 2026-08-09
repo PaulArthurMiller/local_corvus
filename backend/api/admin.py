@@ -489,6 +489,13 @@ async def generate_series_report_endpoint(body: GenerateSeriesReportRequest):
 class GenerateExperimentReportRequest(BaseModel):
     experiment_id: str
     control_experiment_ids: Optional[dict] = None
+    # M39 — RunPlan.trained_spokes ({"cluster_a": "a_spoke3", ...}) from the
+    # plan this experiment was run under. Not persisted anywhere reachable
+    # from the DB (see spoke_membership.py's module docstring), so the
+    # caller supplies it explicitly. Omit for a report with no trained-probe
+    # / cluster-winner data (degrades to "—" in the rendered Markdown).
+    trained_spokes: Optional[dict] = None
+    seed_fixture_version: str = "v3"
 
 
 @router.post("/reports/generate-experiment")
@@ -517,6 +524,8 @@ async def generate_experiment_report_endpoint(body: GenerateExperimentReportRequ
             experiment_id=body.experiment_id,
             store=graph_store,
             control_experiment_ids=body.control_experiment_ids or None,
+            trained_spokes=body.trained_spokes or None,
+            seed_fixture_version=body.seed_fixture_version,
         )
         json_path, md_path = await write_experiment_report(report)
     except Exception as exc:

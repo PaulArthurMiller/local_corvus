@@ -34,6 +34,7 @@ from analytics.reports.experiment_report import (
     _classify_probe_outcome,
     _cluster_from_prompt_id,
     _compute_bridge_mu_analysis,
+    _compute_cluster_winner_table,
     _compute_cross_series_probe_mus,
     _compute_edge_delta_ledger,
     _compute_mus_by_probe_outcome,
@@ -1029,3 +1030,97 @@ class TestGetAllRunsForExperiment:
             runs = run(store.get_all_runs_for_experiment("exp-2"))
             indices = [r["turn_index"] for r in runs]
             assert indices == sorted(indices)
+
+
+# ---------------------------------------------------------------------------
+# _compute_cluster_winner_table — M39 per-cluster argmax/alignment table
+# ---------------------------------------------------------------------------
+
+
+def _sample_pass_rates(probe_sessions: dict) -> dict:
+    """probe_sessions: {probe_id: [(session_index, pass_rate), ...]}"""
+    per_probe = []
+    for probe_id, sessions in probe_sessions.items():
+        per_probe.append({
+            "probe_id": probe_id,
+            "phenomenon_type": "spoke_retrieval",
+            "sessions": [
+                {"session_index": idx, "pass_rate": rate, "pass_count": 0,
+                 "fail_count": 0, "repeats_completed": 25, "partial_battery": False}
+                for idx, rate in sessions
+            ],
+        })
+    return {"per_probe": per_probe, "by_phenomenon": {}}
+
+
+_MEMBERSHIP = {
+    "vs_a1": {"spoke_key": "a_spoke1", "cluster_key": "cluster_a"},
+    "vs_a2": {"spoke_key": "a_spoke2", "cluster_key": "cluster_a"},
+    "vs_d5": {"spoke_key": "d_spoke5", "cluster_key": "cluster_d"},
+    "vs_d6": {"spoke_key": "d_spoke6", "cluster_key": "cluster_d"},
+}
+
+
+class TestComputeClusterWinnerTable:
+    def test_argmax_picks_highest_pass_rate(self):
+        """exp0b-shaped case: an untrained neighbor (vs_d6) climbs past the
+        trained spoke (vs_d5) — the table's winner must reflect that, not
+        the trained flag."""
+        spr = _sample_pass_rates({
+            "vs_d5": [(0, 0.5), (4, 0.0)],
+            "vs_d6": [(0, 0.48), (4, 0.84)],
+        })
+        table = _compute_cluster_winner_table(spr, _MEMBERSHIP, trained_probe_ids={"vs_d5"})
+
+        final = table["cluster_d"]["final_session_winner"]
+        assert final["winner_probe_id"] == "vs_d6"
+        assert final["winner_pass_rate"] == 0.84
+        assert final["trained"] is False
+
+    def test_trained_flag_true_when_trained_spoke_wins(self):
+        spr = _sample_pass_rates({
+            "vs_a1": [(0, 0.9)],
+            "vs_a2": [(0, 0.1)],
+        })
+        table = _compute_cluster_winner_table(spr, _MEMBERSHIP, trained_probe_ids={"vs_a1"})
+
+        winner = table["cluster_a"]["sessions"][0]
+        assert winner["winner_probe_id"] == "vs_a1"
+        assert winner["trained"] is True
+
+    def test_tie_recorded_and_broken_by_probe_id_ascending(self):
+        spr = _sample_pass_rates({
+            "vs_d6": [(0, 0.5)],
+            "vs_d5": [(0, 0.5)],
+        })
+        table = _compute_cluster_winner_table(spr, _MEMBERSHIP, trained_probe_ids=set())
+
+        row = table["cluster_d"]["sessions"][0]
+        assert row["winner_probe_id"] == "vs_d5"  # alphabetically first of the tie
+        assert row["tied_with"] == ["vs_d5", "vs_d6"]
+
+    def test_no_tie_leaves_tied_with_empty(self):
+        spr = _sample_pass_rates({"vs_a1": [(0, 0.5)], "vs_a2": [(0, 0.2)]})
+        table = _compute_cluster_winner_table(spr, _MEMBERSHIP, trained_probe_ids=set())
+        assert table["cluster_a"]["sessions"][0]["tied_with"] == []
+
+    def test_probes_with_no_membership_are_excluded(self):
+        """A probe whose gold MU doesn't resolve to a known spoke (e.g. a
+        bridge probe) plays no role in the cluster tables."""
+        spr = _sample_pass_rates({"vs_bridge1": [(0, 0.9)]})
+        table = _compute_cluster_winner_table(spr, probe_spoke_membership={}, trained_probe_ids=set())
+        assert table == {}
+
+    def test_sessions_with_none_pass_rate_are_skipped(self):
+        per_probe = [{
+            "probe_id": "vs_a1", "phenomenon_type": "spoke_retrieval",
+            "sessions": [{"session_index": 0, "pass_rate": None}],
+        }]
+        table = _compute_cluster_winner_table(
+            {"per_probe": per_probe}, _MEMBERSHIP, trained_probe_ids=set()
+        )
+        assert table == {}
+
+    def test_empty_sample_pass_rates_yields_empty_table(self):
+        table = _compute_cluster_winner_table({"per_probe": []}, _MEMBERSHIP, trained_probe_ids=set())
+        assert table == {}

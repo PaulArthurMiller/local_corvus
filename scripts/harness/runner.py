@@ -737,11 +737,20 @@ def _generate_experiment_report(
     print_fn: Callable[[str], None],
     experiment_id: str,
     control_experiment_ids: Optional[dict],
+    trained_spokes: Optional[dict] = None,
+    seed_fixture_version: Optional[str] = None,
 ) -> ExperimentReportRecord:
     """Call generate-experiment at experiment close. Same soft-continue-by-default
-    policy as _generate_series_report, via the same error_policy key."""
+    policy as _generate_series_report, via the same error_policy key.
+
+    trained_spokes/seed_fixture_version (M39): passed through from the
+    plan so the report's trained-probe/cluster-winner sections populate
+    automatically — see BackendClient.generate_experiment_report."""
     try:
-        result = client.generate_experiment_report(experiment_id, control_experiment_ids)
+        result = client.generate_experiment_report(
+            experiment_id, control_experiment_ids,
+            trained_spokes=trained_spokes, seed_fixture_version=seed_fixture_version,
+        )
     except ReportGenerationError as exc:
         policy = error_policy.get("report_generation", "soft_continue")
         message = f"experiment report generation failed (experiment_id={experiment_id}): {exc}"
@@ -1423,6 +1432,7 @@ def execute_run(
             try:
                 experiment_report_record = _generate_experiment_report(
                     client, error_policy, print_fn, learned_experiment_id, control_experiment_ids,
+                    trained_spokes=plan.trained_spokes, seed_fixture_version=plan.seed_fixture_version,
                 )
             except HardStopError as exc:
                 error_summary = str(exc)

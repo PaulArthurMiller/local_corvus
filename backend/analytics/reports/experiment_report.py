@@ -881,6 +881,74 @@ def _compute_sample_pass_rates(
     }
 
 
+def _compute_cluster_winner_table(
+    sample_pass_rates: dict,
+    probe_spoke_membership: dict[str, dict],
+    trained_probe_ids: set[str],
+) -> dict:
+    """
+    §6.1/§6.2 per-cluster winner table (M39) — for each cluster x session,
+    which spoke-retrieval probe has the highest sample-mode pass rate
+    (argmax), and whether that probe is the trained spoke.
+
+    Concentration ("the mechanism reinforces one spoke per cluster") and
+    alignment ("that spoke is the trained one") are different claims a flat
+    28-probe mean cannot separate (exp0-a's winner was vs_d4, exp0b's was
+    vs_d6 — same plan/seed/bank, different untrained neighbor each time).
+    This is the endpoint that answers alignment directly: one winner row per
+    cluster per session, computed identically for the learned condition and
+    for each control (a winner that also wins under static_weight is a
+    tie-break artifact, not learning — see the M39 milestone note).
+
+    Ties are recorded explicitly (`tied_with`) rather than hidden behind an
+    arbitrary winner pick — the winner itself still needs to be a single
+    probe_id for the summary line, so ties break on probe_id ascending for
+    determinism.
+    """
+    # cluster_key -> session_index -> [(probe_id, pass_rate), ...]
+    by_cluster_session: dict[str, dict[int, list[tuple[str, float]]]] = {}
+    for p in sample_pass_rates.get("per_probe") or []:
+        probe_id = p["probe_id"]
+        membership = probe_spoke_membership.get(probe_id)
+        if membership is None:
+            continue  # not a spoke-retrieval probe with known cluster membership
+        cluster_key = membership["cluster_key"]
+        for s in p.get("sessions") or []:
+            rate = s.get("pass_rate")
+            if rate is None:
+                continue
+            by_cluster_session.setdefault(cluster_key, {}).setdefault(
+                s["session_index"], []
+            ).append((probe_id, rate))
+
+    clusters: dict[str, dict] = {}
+    for cluster_key, sessions in sorted(by_cluster_session.items()):
+        session_rows = []
+        for session_index in sorted(sessions.keys()):
+            entries = sessions[session_index]
+            # argmax by pass_rate, probe_id ascending breaks ties deterministically
+            entries_sorted = sorted(entries, key=lambda e: (-e[1], e[0]))
+            winner_probe_id, winner_rate = entries_sorted[0]
+            tied = sorted(pid for pid, rate in entries if rate == winner_rate)
+            session_rows.append({
+                "session_index": session_index,
+                "winner_probe_id": winner_probe_id,
+                "winner_pass_rate": winner_rate,
+                "trained": winner_probe_id in trained_probe_ids,
+                "tied_with": tied if len(tied) > 1 else [],
+            })
+        clusters[cluster_key] = {
+            "sessions": session_rows,
+            "final_session_winner": session_rows[-1] if session_rows else None,
+        }
+
+    logger.info(
+        "experiment_report cluster_winner_table: clusters=%s",
+        {k: len(v["sessions"]) for k, v in clusters.items()},
+    )
+    return clusters
+
+
 def _compute_mus_by_probe_outcome(
     probes: list[dict],
     results_by_probe: dict[str, list[dict]],
@@ -1467,12 +1535,23 @@ async def _section_61_learning_measures(
     experiment_id: str,
     store: GraphStore,
     config: dict,
+    trained_spokes: Optional[dict[str, str]] = None,
+    seed_fixture_version: str = "v3",
 ) -> dict:
     """
     §6.1 — Full learning measures section.
 
     Requires the experiment to have probe results and feedback-signal runs.
     If no probe results exist, the section still generates with empty data.
+
+    trained_spokes (M39): a RunPlan.trained_spokes-shaped dict
+    ({"cluster_a": "a_spoke3", ...}, schema.py) identifying which spoke each
+    cluster trained. It has no persisted home in the DB (checked: no run
+    manifest or analytics table stores it — see spoke_membership.py's module
+    docstring), so the caller supplies it explicitly, e.g. read from the
+    plan file used for the run. When omitted, trained_probes/cluster_winner_table
+    still compute — every probe is simply "trained": False, and the M39
+    sections degrade to "—" rather than failing (M32 backward-compat rule).
     """
     reporting_cfg = config.get("reporting", {})
     pass_rank_threshold = reporting_cfg.get("pass_rank_threshold", 3)
@@ -1612,6 +1691,26 @@ async def _section_61_learning_measures(
         configured_repeats, phenomenon_thresholds,
     )
 
+    # Trained-probe derivation + per-cluster winner table (M39). Restricted
+    # to `probes` (the already-filtered, has-results-for-this-experiment
+    # list) so a probe from a battery this experiment never ran doesn't
+    # inflate the cluster tables with insufficient_data noise — same
+    # rationale as the `probes` filter above.
+    from analytics.reports.spoke_membership import (
+        resolve_probe_spoke_membership,
+        resolve_trained_probe_ids,
+        trained_probe_id_set,
+    )
+    probe_spoke_membership = resolve_probe_spoke_membership(probes, seed_fixture_version)
+    resolved_trained_spokes = (
+        resolve_trained_probe_ids(trained_spokes, probes, seed_fixture_version)
+        if trained_spokes else {}
+    )
+    trained_probe_ids = trained_probe_id_set(resolved_trained_spokes)
+    cluster_winner_table = _compute_cluster_winner_table(
+        sample_pass_rates, probe_spoke_membership, trained_probe_ids
+    )
+
     # Per-probe pass rate: fraction of non-flagged sessions where the probe passed.
     # Derived from state_transitions so it stays in sync with pass/fail classification.
     probe_pass_rates: dict[str, Optional[float]] = {}
@@ -1642,6 +1741,8 @@ async def _section_61_learning_measures(
         "saturation_analysis": saturation_analysis,
         "sample_battery_repeats_configured": configured_repeats,
         "sample_pass_rates": sample_pass_rates,
+        "trained_probes": resolved_trained_spokes,
+        "cluster_winner_table": cluster_winner_table,
     }
 
 
@@ -1649,6 +1750,8 @@ async def generate_experiment_report(
     experiment_id: str,
     store: GraphStore,
     control_experiment_ids: Optional[dict[str, str]] = None,
+    trained_spokes: Optional[dict[str, str]] = None,
+    seed_fixture_version: str = "v3",
 ) -> dict:
     """
     Generate an Experiment Report for the given experiment_id.
@@ -1657,8 +1760,18 @@ async def generate_experiment_report(
     - §5 aggregated across all series in the experiment
     - §6.3 data-integrity / confound checks
     - §6.4 statistical caveat (static text embedded in Markdown)
-    - §6.1 learning measures
-    - §6.2 control shadow (when control_experiment_ids is provided)
+    - §6.1 learning measures (M39: trained-probe derivation + per-cluster
+      winner table, when trained_spokes is supplied)
+    - §6.2 control shadow (when control_experiment_ids is provided; M39:
+      trained-subset comparison + pin-adjusted mean deltas)
+
+    trained_spokes: the RunPlan.trained_spokes dict from the plan this
+    experiment was run under ({"cluster_a": "a_spoke3", ...}, schema.py).
+    Not persisted anywhere reachable from the DB (checked — see
+    spoke_membership.py's module docstring), so the caller supplies it
+    explicitly. Omit to generate a report with no trained-probe/cluster-
+    winner data (degrades to "—" in the rendered Markdown, never fails —
+    M32 backward-compat rule).
 
     Returns the report as a dict (caller writes JSON + Markdown to disk).
     """
@@ -1734,7 +1847,10 @@ async def generate_experiment_report(
     integrity_checks = await _section_63_integrity_checks(experiment_id, store)
 
     # §6.1 learning measures
-    learning_measures = await _section_61_learning_measures(experiment_id, store, config)
+    learning_measures = await _section_61_learning_measures(
+        experiment_id, store, config,
+        trained_spokes=trained_spokes, seed_fixture_version=seed_fixture_version,
+    )
 
     # §6.2 control shadow (optional — only when control_experiment_ids is provided)
     control_shadow = None
@@ -1747,6 +1863,8 @@ async def generate_experiment_report(
             control_experiment_ids=control_experiment_ids,
             store=store,
             config=config,
+            trained_spokes=trained_spokes,
+            seed_fixture_version=seed_fixture_version,
         )
         logger.info(
             "experiment_report: control_shadow computed for %d conditions",

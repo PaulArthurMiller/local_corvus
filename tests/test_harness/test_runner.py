@@ -116,8 +116,13 @@ class FakeBackendClient:
             "run_count": 5,
         }
 
-    def generate_experiment_report(self, experiment_id, control_experiment_ids=None):
-        self.experiment_report_calls.append((experiment_id, control_experiment_ids))
+    def generate_experiment_report(
+        self, experiment_id, control_experiment_ids=None,
+        trained_spokes=None, seed_fixture_version=None,
+    ):
+        self.experiment_report_calls.append(
+            (experiment_id, control_experiment_ids, trained_spokes, seed_fixture_version)
+        )
         if self.experiment_report_error:
             raise self.experiment_report_error
         idx = len(self.experiment_report_calls)
@@ -1609,7 +1614,12 @@ def test_experiment_close_calls_generate_experiment_with_control_ids(tmp_path):
 
     assert outcome.status == "complete"
     assert client.experiment_report_calls == [
-        ("p1_learned", {"static_weight": "p1_static_weight", "random_weight": "p1_random_weight"})
+        (
+            "p1_learned",
+            {"static_weight": "p1_static_weight", "random_weight": "p1_random_weight"},
+            plan.trained_spokes,
+            plan.seed_fixture_version,
+        )
     ]
     assert outcome.checkpoint.experiment_report.status == STATUS_OK
     assert outcome.checkpoint.experiment_report.md_path == "/reports/experiment-1.md"

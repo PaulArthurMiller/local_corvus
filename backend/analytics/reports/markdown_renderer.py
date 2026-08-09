@@ -304,6 +304,60 @@ def _render_s61(section: dict) -> str:
                 f"|{flag} |"
             )
 
+    # Trained probes + per-cluster winner table (M39). A pre-M39 stored
+    # report JSON has neither key — both default to {} and render the
+    # "no data" line rather than crashing (M32 backward-compat rule).
+    trained_probes = section.get("trained_probes") or {}
+    if trained_probes:
+        lines += [
+            "\n### Trained Probes (M39)\n",
+            "| cluster | trained spoke | mu_id | probe_id |",
+            "|---|---|---|---|",
+        ]
+        for cluster_key in sorted(trained_probes.keys()):
+            info = trained_probes[cluster_key]
+            mu_id = info.get("mu_id")
+            probe_id = info.get("probe_id")
+            lines.append(
+                f"| {cluster_key} | {info.get('spoke_key', '—')} "
+                f"| {(str(mu_id)[:8] + '…') if mu_id else '—'} "
+                f"| {probe_id or '— (no matching probe)'} |"
+            )
+
+    cluster_winners = section.get("cluster_winner_table") or {}
+    if cluster_winners:
+        lines += [
+            "\n### Per-Cluster Winner Table (M39)\n",
+            "_Argmax sample-mode probe per cluster per session — concentration "
+            "vs. alignment: a winner that is also the trained spoke is "
+            "alignment, any other winner is concentration without alignment._\n",
+            "| cluster | session | winner probe | winner pass_rate | trained? | tied with |",
+            "|---|---|---|---|---|---|",
+        ]
+        for cluster_key in sorted(cluster_winners.keys()):
+            for row in cluster_winners[cluster_key].get("sessions") or []:
+                tied = ", ".join(row.get("tied_with") or []) or "—"
+                lines.append(
+                    f"| {cluster_key} | {row.get('session_index', '—')} "
+                    f"| {row.get('winner_probe_id', '—')} "
+                    f"| {row.get('winner_pass_rate', 0.0):.4f} "
+                    f"| {'✅ trained' if row.get('trained') else '—'} "
+                    f"| {tied} |"
+                )
+        lines.append("\n#### Final-Session Cluster Winners\n")
+        lines.append("| cluster | winner probe | pass_rate | trained? |")
+        lines.append("|---|---|---|---|")
+        for cluster_key in sorted(cluster_winners.keys()):
+            final = cluster_winners[cluster_key].get("final_session_winner")
+            if not final:
+                lines.append(f"| {cluster_key} | — | — | — |")
+                continue
+            lines.append(
+                f"| {cluster_key} | {final.get('winner_probe_id', '—')} "
+                f"| {final.get('winner_pass_rate', 0.0):.4f} "
+                f"| {'✅ trained' if final.get('trained') else '—'} |"
+            )
+
     # Edge delta ledger
     ledger = section.get("edge_delta_ledger") or {}
     orphan_count = ledger.get("orphan_update_count", 0)
@@ -581,6 +635,88 @@ def _render_s62(control_shadow: Optional[dict]) -> str:
                 "data for this experiment (pre-M30) or no matching probes "
                 "between conditions._\n"
             )
+
+        # Trained-subset comparison (M39 §2) — the primary config-comparison
+        # endpoint: did learning move the TRAINED spokes, restricted from
+        # the 28-probe by-phenomenon mean above to just the trained subset.
+        trained_cmp = cs.get("trained_subset_comparison") or {}
+        if trained_cmp.get("trained_probe_count"):
+            final_delta = trained_cmp.get("final_session_mean_delta")
+            lines += [
+                "#### Trained-Subset Comparison — `weight_mode=sample` (learned − control) (M39)\n",
+                f"**Trained probes:** {trained_cmp.get('trained_probe_count', 0)} "
+                f"({trained_cmp.get('matched_probe_count', 0)} with matching data)  ",
+                f"**Final-session trained-subset mean Δ:** {_s62_value_str(final_delta)}\n",
+                "| Session | Mean Δ | Probes |",
+                "|---|---|---|",
+            ]
+            for row in trained_cmp.get("mean_delta_by_session") or []:
+                lines.append(
+                    f"| {row.get('session_index', '—')} "
+                    f"| {_s62_value_str(row.get('mean_delta'))} "
+                    f"| {row.get('probe_count', 0)} |"
+                )
+            lines.append("")
+        else:
+            lines.append(
+                "_Trained-subset comparison unavailable — no `trained_spokes` "
+                "was supplied when generating this report._\n"
+            )
+
+        # Pin-adjusted mean deltas (M39 §4) — the same by-phenomenon mean Δ
+        # computed a second way with control-pinned probes (pass rate 1.0 in
+        # every session for this control) excluded. Both are always shown —
+        # by_phenomenon_all_probes is the unmodified existing number (M34's
+        # never-silently-redefine rule).
+        pin_adjusted = cs.get("pin_adjusted_mean_deltas") or {}
+        pinned_ids = pin_adjusted.get("pinned_probe_ids") or []
+        if pin_adjusted:
+            lines += [
+                "#### Pin-Adjusted Mean Deltas (M39)\n",
+                f"**Control-pinned probes** (pass_rate 1.0 in every session under "
+                f"this control): {', '.join(pinned_ids) if pinned_ids else 'none'}\n",
+                "| Phenomenon | Mean Δ (all probes) | Mean Δ (excl. pinned) "
+                "| Final Δ (all probes) | Final Δ (excl. pinned) |",
+                "|---|---|---|---|---|",
+            ]
+            all_by_phenom = pin_adjusted.get("by_phenomenon_all_probes") or {}
+            excl_by_phenom = pin_adjusted.get("by_phenomenon_excluding_pinned") or {}
+            for phenomenon in sorted(set(all_by_phenom) | set(excl_by_phenom)):
+                all_stats = all_by_phenom.get(phenomenon) or {}
+                excl_stats = excl_by_phenom.get(phenomenon) or {}
+                lines.append(
+                    f"| {phenomenon} "
+                    f"| {_s62_value_str(all_stats.get('mean_delta'))} "
+                    f"| {_s62_value_str(excl_stats.get('mean_delta'))} "
+                    f"| {_s62_value_str(all_stats.get('final_session_mean_delta'))} "
+                    f"| {_s62_value_str(excl_stats.get('final_session_mean_delta'))} |"
+                )
+            lines.append("")
+
+        # Cluster winner table, control side (M39 §3) — the control's own
+        # per-cluster argmax, computed identically to the learned §6.1 table.
+        # A winner that also wins under this control is a tie-break
+        # artifact, not learning.
+        control_cluster_winners = (
+            (cs.get("learning_measures") or {}).get("cluster_winner_table") or {}
+        )
+        if control_cluster_winners:
+            lines += [
+                f"#### Per-Cluster Winner Table — {control_name} (M39)\n",
+                "| cluster | final-session winner | pass_rate | trained? |",
+                "|---|---|---|---|",
+            ]
+            for cluster_key in sorted(control_cluster_winners.keys()):
+                final = control_cluster_winners[cluster_key].get("final_session_winner")
+                if not final:
+                    lines.append(f"| {cluster_key} | — | — | — |")
+                    continue
+                lines.append(
+                    f"| {cluster_key} | {final.get('winner_probe_id', '—')} "
+                    f"| {final.get('winner_pass_rate', 0.0):.4f} "
+                    f"| {'✅ trained' if final.get('trained') else '—'} |"
+                )
+            lines.append("")
 
     # Comparison table (cross-condition, if multiple controls)
     if len(control_shadow) >= 1:

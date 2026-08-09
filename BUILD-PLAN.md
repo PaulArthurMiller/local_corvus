@@ -5633,6 +5633,169 @@ exp0b.
 
 ---
 
+*(Numbering note: "Milestone 38" is the judge-leniency + unparseable-accounting
+work of 2026-08-06 — branch `claude-judge-leniency-and-unparseable-accounting`,
+PR #65. It grew out of reading the M37 attempt2 calibration rather than a
+planned section here, and is documented in the PROGRESS.md 2026-08-06 (c)
+session entry. The exp0b plan_name already refers to it as M38, so that
+number stays taken.)*
+
+---
+
+## Config-Comparison Endpoints: Trained-Spoke Alignment + Concentration + Pin-Adjusted Deltas — Milestone 39
+
+**Status: PLANNED (drafted 2026-08-09, from the exp0b baseline read).**
+
+**Goal:** exp0b confirmed the aggregate learned-vs-control comparison is
+null while the per-probe data holds real, replicated structure the current
+endpoints cannot express. Three specific blind spots, each observed on real
+data:
+
+- **The trained spokes are invisible as a group.** The question every config
+  round asks — "did learning move the *trained* spokes?" — has no number.
+  In exp0b the four trained probes (vs_a1, vs_b3, vs_c1, vs_d5) sit at ~0–12%
+  by the final session while untrained neighbors (vs_a2, vs_d6) climb; in
+  exp0-a a different untrained neighbor (vs_d4) climbed. Nobody computed
+  "trained-subset delta" because no section owns it.
+- **Concentration and alignment are conflated.** The mechanism demonstrably
+  concentrates sample mass on one spoke per cluster, but *which* spoke won
+  moved between exp0-a (d_spoke4) and exp0b (d_spoke6) under an identical
+  plan/seed/bank. "Concentrates on the trained spoke" vs. "concentrates on
+  a stochastic neighbor" vs. "doesn't concentrate" are three different
+  results that a 28-probe mean collapses into one number.
+- **The §6.2 mean delta is polluted by control tie-break pins.** Static
+  weights deterministically pin vs_a1/vs_c1/vs_d1 at pass rate 1.0 in every
+  session (and random_weight happened to pin vs_d5). Learned's real gains
+  elsewhere are cancelled in the mean by −0.92..−1.0 deltas against those
+  degenerate ceilings, which is how exp0b's sample-mode mean Δ reads ~0.00
+  over data containing a 0→84% climb.
+
+**Scope:**
+
+1. **Trained-probe derivation, at report time — no schema change.** Map
+   `RunPlan.trained_spokes` (threaded by M29) to probe ids via each probe's
+   `gold_mu_ids` → seed-fixture spoke membership (the report layer already
+   resolves seed MU clusters for M33's edge classification; this extends the
+   same lookup one level, MU → spoke key). If the plan's `trained_spokes`
+   isn't reachable from stored report inputs, accept it as an explicit
+   report-generation parameter rather than guessing — but check the run
+   manifest first; M28/M29 persist plan fields there.
+2. **§6.2 trained-subset comparison (the primary config endpoint).** The
+   existing sample-mode learned−control table, restricted to the trained
+   probes: per-probe per-session learned and control pass rates and deltas,
+   plus a trained-subset mean Δ per session and for the final session.
+   This is the number a "working" config should move and the baseline's is
+   ~0/negative — state it even when (especially when) it is zero.
+3. **Per-cluster winner table (concentration vs. alignment).** For each
+   cluster × session under `learned`: the argmax-by-sample-pass-rate probe,
+   its pass rate, and a `trained?` flag; plus a final-session summary line
+   per cluster (winner identity is what Round 1's replicates compare).
+   Include the same table for controls — a winner that also wins under
+   `static_weight` is a tie-break artifact, not learning.
+4. **Pin-adjusted mean deltas.** Classify a probe **control-pinned** for a
+   given control when that control's sample pass rate is 1.0 in *every*
+   session (catches vs_a1/vs_c1/vs_d1 under static and vs_d5 under random
+   on exp0b; vs_b1's single 1.0 session correctly does not qualify).
+   Render the pinned list explicitly, and report the mean Δ both ways —
+   all probes (unchanged, backward compatible) and excluding pinned —
+   per M34's rule: never silently redefine an existing measure.
+5. **Markdown + JSON rendering** for all of the above
+   (`backend/analytics/reports/control_shadow.py`,
+   `experiment_report.py`, `markdown_renderer.py`). Pre-M39 stored JSONs
+   render `—`, never fail (the M32 backward-compat rule).
+6. **Live verification doubles as the baseline read:** regenerate exp0-a
+   and exp0b experiment reports and record in PROGRESS.md: both runs'
+   trained-subset deltas, per-cluster winners, and pinned sets. Expected
+   from the hand analysis: exp0b winners a_spoke2 / (b: none stable) /
+   c_spoke3-decaying / d_spoke6, none trained; if the new sections say
+   otherwise, the implementation is wrong — that's the done-criterion.
+7. **Tests:** mapping derivation (trained spoke → probe, including a
+   trained spoke with no probe → rendered as such, not dropped);
+   winner/argmax arithmetic incl. ties; pinned classification (all-session
+   1.0 yes; one-session 1.0 no; pinned in one control only); trained-subset
+   mean over a missing-session probe; pre-M39 JSON compat; experiment_id
+   scoping (same pattern as §6.1 scoping tests).
+
+**Out of scope:** any change to learning, retrieval, judging, or wiping —
+measurement only, same rule as M32. No new phenomenon types, no bank or
+probe-set changes (`content_hash` survives). Embedding-based retrieval
+stays a future upgrade per the 2026-08-06 decision.
+
+**Estimate:** 1 session — three report-layer files plus tests.
+
+---
+
+## Experiment Round 1: Baseline Seed Replicates — Milestone 40
+
+**Status: PLANNED (drafted 2026-08-09). Artifacts (plans + queue) committed
+with this section; no code to build. Run + read is the milestone.**
+
+**Goal: establish the noise floor before any config knob is turned.**
+exp0-a and exp0b ran the identical plan, seed, bank, and trained spokes —
+the only changes were the judge scheme and harness fixes — and the
+per-cluster winner *moved* (d_spoke4 → d_spoke6). Winner identity is
+therefore path-dependent on early stochastic feedback, not determined by
+content. A single run of any future config cannot distinguish "the config
+moved the outcome" from "the dice landed differently." Round 1 measures
+replicate-to-replicate variance of the baseline config itself; every
+config round after it is judged against that spread.
+
+**Design:**
+
+- **Three replicates of the exp0b config.** exp0b (`random_seed` 20260726)
+  is replicate 1 as-run; two new plans differ from it *only* in
+  `plan_id`/`plan_name`/`random_seed`/`conditions`:
+  - `plans/exp0b-rep2_2026-08-09.json` — seed 20260809
+  - `plans/exp0b-rep3_2026-08-09.json` — seed 20260810
+- **Conditions: `learned` + `static_weight` only.** `random_weight` has
+  twice served its purpose (proving feedback-uncorrelated weight motion
+  produces no coherent trajectory) and costs ~1/3 of each run's ~3.5 h
+  wall clock. exp0b retains the full three-condition record; replicates
+  need the learning arm and the tie-break-revealing control. If a config
+  round later shows a surprising positive, re-attach `random_weight` for
+  the confirmation run.
+- **Same bank** (`prompt_bank_e2adf796…`), same fixture, same shape
+  (5×70 @ 0.4), same judge. The seed changes prompt→turn assignment and
+  probe placement (`turn_resolution.py`); response-level stochasticity
+  does the rest. Distinct seeds ⇒ distinct `config_hash` ⇒ distinct run
+  dirs and report namespaces, and the queue preflight enforces exactly
+  this ("replicates need distinct random_seed values" — the M26 check,
+  finally exercised for its intended purpose).
+- **Queue:** `queues/exp0b_replicates_2026-08-09.json`, `on_plan_failure:
+  continue`. Run: `python scripts/run_experiment_queue.py
+  queues/exp0b_replicates_2026-08-09.json`. Restart Ollama first (the
+  2026-08-06 prompt-cache OOM lesson). Expected wall clock ≈ 2 plans ×
+  2 conditions × ~70 min ≈ 4.5–5 h — an overnight queue.
+
+**Pre-registered read (decided now, before the data exists):** for each of
+the three replicates, record —
+
+1. Per-cluster final-session winner probe under `learned`, and whether it
+   is the trained spoke (M39 §3 table).
+2. Trained-subset final-session mean Δ vs. `static_weight` (M39 §2).
+3. Seed-share at s0 and s4, and the bulk up-rate trajectory (M32).
+
+And answer three questions: (a) does any replicate's winner land on a
+trained spoke, ever; (b) is winner identity stable across replicates
+(exp0-a/exp0b predict: no); (c) what is the replicate spread of the
+trained-subset delta — that spread is the minimum effect a config round
+must exceed to claim anything.
+
+**Sequencing:** the runs may execute before M39 merges (reports regenerate
+retroactively from stored data — the M33/M34/M35 precedent), but the read
+happens only through M39's sections. Judge caveat carried from the exp0b
+known issues: never compare arms on up-rate alone; report judge-alone
+rates with the residual-leniency limitation attached.
+
+**Out of scope:** any config change (that is Round 2+), any new metrics
+beyond M39's, any judge work. If a replicate run fails mid-queue, resume
+via the M27 machinery rather than rerunning — a partially-run replicate
+that wiped and reseeded is not a fresh replicate.
+
+**Estimate:** one overnight queue run + one read/analysis session.
+
+---
+
 ## Status
 
 ```

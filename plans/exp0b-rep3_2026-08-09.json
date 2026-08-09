@@ -1,0 +1,43 @@
+{
+  "plan_id": "exp0b-rep3-2026-08-09",
+  "plan_name": "Experiment Round 1 replicate 3 — identical to exp0b-2026-08-06 (same bank, fixture, shape, trained_spokes, judge) except random_seed, to measure replicate-to-replicate variance of the baseline config. Conditions reduced to learned + static_weight per the M40 design (random_weight has twice served its purpose; exp0b retains the full 3-condition record). See exp0b-rep2 for the design rationale; the two replicate plans differ only in plan_id/plan_name/random_seed.",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 5,
+  "turns_per_series": 70,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
+  "difficulty": {
+    "hop_distance_levels": [0, 1]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": ["learned", "static_weight"],
+  "condition_order": ["learned", "static_weight"],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": 25.0,
+  "prompt_gen": {
+    "model": "claude-sonnet-5",
+    "max_retries": 2
+  },
+  "dry_run": false,
+  "dry_run_n": 2,
+  "random_seed": 20260810,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
+}

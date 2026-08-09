@@ -1766,3 +1766,168 @@ def test_experiment_report_recomputes_when_stored_report_unreadable():
     # Recomputed from the live graph (no activated MUs → 0 retrieved), and
     # generation completed without raising.
     assert per[series_id]["total_retrieved"] == 0
+
+
+# ---------------------------------------------------------------------------
+# M39 — trained-probe derivation + cluster winner table end-to-end,
+# threaded through _section_61_learning_measures and generate_experiment_report
+# ---------------------------------------------------------------------------
+
+
+def _sync_spoke_probes(store, probe_specs: list[tuple]):
+    """probe_specs: [(probe_id, gold_mu_id), ...]. Syncs each as a
+    spoke_retrieval probe, matching the real probe_set_v3.yaml shape."""
+    run(store.sync_probes([
+        {
+            "probe_id": pid, "probe_set_version": "v3",
+            "phenomenon_type": "spoke_retrieval", "prompt_text": "test probe",
+            "gold_mu_ids": [gold_mu_id], "is_bridge_probe": False, "bridge_pair_id": None,
+        }
+        for pid, gold_mu_id in probe_specs
+    ]))
+
+
+def test_section_61_resolves_trained_probes_and_cluster_winner_table():
+    """End-to-end: trained_spokes -> resolved probe -> cluster_winner_table,
+    against real sample-mode probe rows (battery_mode='sample')."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+    with TempDB() as store:
+        experiment_id = "exp-trained"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        _sync_spoke_probes(store, [
+            ("vs_a1", "a0000002-aaaa-4aaa-8aaa-000000000002"),  # a_spoke1
+            ("vs_a2", "a0000003-aaaa-4aaa-8aaa-000000000003"),  # a_spoke2
+        ])
+        # vs_a1 (trained) starts strong then loses ground; vs_a2 (untrained)
+        # climbs and wins the final session -- the exp0b-shaped pattern.
+        for repeat in range(4):
+            gold_a1 = 1 if repeat < 3 else None  # 3/4 pass at session 0
+            _insert_probe_row(store, "vs_a1", 0, "learned", experiment_id=experiment_id,
+                               gold_mu_rank=gold_a1, battery_mode="sample", battery_repeat_index=repeat)
+            _insert_probe_row(store, "vs_a1", 1, "learned", experiment_id=experiment_id,
+                               gold_mu_rank=None, battery_mode="sample", battery_repeat_index=repeat)
+            _insert_probe_row(store, "vs_a2", 0, "learned", experiment_id=experiment_id,
+                               gold_mu_rank=None, battery_mode="sample", battery_repeat_index=repeat)
+            gold_a2 = 1 if repeat < 3 else None  # 3/4 pass at session 1
+            _insert_probe_row(store, "vs_a2", 1, "learned", experiment_id=experiment_id,
+                               gold_mu_rank=gold_a2, battery_mode="sample", battery_repeat_index=repeat)
+
+        measures = run(_section_61_learning_measures(
+            experiment_id, store, _CONFIG,
+            trained_spokes={"cluster_a": "a_spoke1", "cluster_b": "b_spoke1",
+                             "cluster_c": "c_spoke1", "cluster_d": "d_spoke1"},
+        ))
+
+        trained_probes = measures["trained_probes"]
+        print(f"trained_probes: {trained_probes}")
+        assert trained_probes["cluster_a"]["probe_id"] == "vs_a1"
+        # cluster_b/c/d trained spokes have no synced probe in this test -- must
+        # still appear, with probe_id None (not dropped).
+        assert trained_probes["cluster_b"]["probe_id"] is None
+
+        final_winner = measures["cluster_winner_table"]["cluster_a"]["final_session_winner"]
+        print(f"final_session_winner: {final_winner}")
+        assert final_winner["winner_probe_id"] == "vs_a2"
+        assert final_winner["trained"] is False
+
+
+def test_section_61_no_trained_spokes_degrades_cleanly():
+    """Omitting trained_spokes must not crash -- trained_probes is empty and
+    every cluster winner is simply untrained."""
+    from analytics.reports.experiment_report import _section_61_learning_measures
+    with TempDB() as store:
+        experiment_id = "exp-no-trained"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+        _sync_spoke_probes(store, [("vs_a1", "a0000002-aaaa-4aaa-8aaa-000000000002")])
+        _insert_probe_row(store, "vs_a1", 0, "learned", experiment_id=experiment_id,
+                           gold_mu_rank=1, battery_mode="sample", battery_repeat_index=0)
+
+        measures = run(_section_61_learning_measures(experiment_id, store, _CONFIG))
+
+        assert measures["trained_probes"] == {}
+        winner = measures["cluster_winner_table"]["cluster_a"]["final_session_winner"]
+        assert winner["trained"] is False
+
+
+def test_generate_experiment_report_threads_trained_spokes_into_control_shadow():
+    """End-to-end through the public entry point: trained_spokes reaches
+    both the learned §6.1 section and each control's §6.2 trained-subset
+    comparison / pin-adjusted mean deltas."""
+    with TempDB() as store:
+        learned_id, control_id = "exp-ts-learned", "exp-ts-static"
+        for eid, cond in [(learned_id, "learned"), (control_id, "static_weight")]:
+            run(store.insert_run(_make_minimal_run(
+                series_id="series-A", experiment_id=eid,
+                condition_label=cond, turn_index=1,
+            )))
+        _sync_spoke_probes(store, [("vs_a1", "a0000002-aaaa-4aaa-8aaa-000000000002")])
+
+        # Learned: vs_a1 climbs 0.0 -> 1.0. Control (static): pinned at 1.0.
+        for repeat in range(2):
+            _insert_probe_row(store, "vs_a1", 0, "learned", experiment_id=learned_id,
+                               gold_mu_rank=None, battery_mode="sample", battery_repeat_index=repeat)
+            _insert_probe_row(store, "vs_a1", 1, "learned", experiment_id=learned_id,
+                               gold_mu_rank=1, battery_mode="sample", battery_repeat_index=repeat)
+            _insert_probe_row(store, "vs_a1", 0, "static_weight", experiment_id=control_id,
+                               gold_mu_rank=1, battery_mode="sample", battery_repeat_index=repeat)
+            _insert_probe_row(store, "vs_a1", 1, "static_weight", experiment_id=control_id,
+                               gold_mu_rank=1, battery_mode="sample", battery_repeat_index=repeat)
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report(
+                learned_id, store,
+                control_experiment_ids={"static_weight": control_id},
+                trained_spokes={"cluster_a": "a_spoke1", "cluster_b": "b_spoke1",
+                                 "cluster_c": "c_spoke1", "cluster_d": "d_spoke1"},
+            ))
+
+        learned_trained = report["learning_measures"]["trained_probes"]
+        assert learned_trained["cluster_a"]["probe_id"] == "vs_a1"
+
+        cs = report["control_shadow"]["static_weight"]
+        trained_cmp = cs["trained_subset_comparison"]
+        print(f"trained_subset_comparison: {trained_cmp}")
+        assert trained_cmp["matched_probe_count"] == 1
+        # learned goes 0.0 -> 1.0, control stays 1.0 -> 1.0: final delta 0.0
+        assert trained_cmp["final_session_mean_delta"] == 0.0
+
+        pin_adjusted = cs["pin_adjusted_mean_deltas"]
+        print(f"pin_adjusted_mean_deltas: {pin_adjusted}")
+        assert pin_adjusted["pinned_probe_ids"] == ["vs_a1"]
+        # vs_a1 is the only probe and it's pinned -> excluding-pinned mean is empty
+        assert pin_adjusted["by_phenomenon_excluding_pinned"] == {}
+
+        # Markdown renders without crashing and surfaces the M39 sections.
+        md = render_experiment_report_markdown(report)
+        assert "Trained Probes (M39)" in md
+        assert "Trained-Subset Comparison" in md
+        assert "Pin-Adjusted Mean Deltas (M39)" in md
+
+
+def test_generate_experiment_report_pre_m39_call_omits_trained_spokes_cleanly():
+    """Backward compat: a caller that doesn't pass trained_spokes (every
+    pre-M39 call site) still generates a valid report and renders cleanly."""
+    with TempDB() as store:
+        experiment_id = "exp-pre-m39"
+        run(store.insert_run(_make_minimal_run(
+            series_id="series-A", experiment_id=experiment_id,
+            condition_label="learned", turn_index=1,
+        )))
+
+        with mock.patch(
+            "analytics.reports.experiment_report._load_config", return_value=_CONFIG
+        ):
+            report = run(generate_experiment_report(experiment_id, store))
+
+        assert report["learning_measures"]["trained_probes"] == {}
+        assert report["learning_measures"]["cluster_winner_table"] == {}
+        md = render_experiment_report_markdown(report)
+        assert "Trained Probes (M39)" not in md

@@ -667,6 +667,98 @@ def test_s62_trained_subset_comparison_absent_renders_message_not_crash():
     assert "no `trained_spokes` was supplied" in md
 
 
+# ---------------------------------------------------------------------------
+# M41 — pin-adjusted trained-subset delta rendering
+# ---------------------------------------------------------------------------
+
+
+def test_s62_trained_subset_pin_adjustment_renders_side_by_side():
+    """The rep3-shaped case: two trained probes, one control-pinned -- both
+    the raw and excluding-pinned means render, each with its own probe
+    count, and the block is retitled (M39/M41)."""
+    entry = _make_control_shadow_entry("static_weight", "static-weight")
+    entry["trained_subset_comparison"] = {
+        "trained_probe_count": 2,
+        "matched_probe_count": 2,
+        "per_probe": [],
+        "mean_delta_by_session": [
+            {"session_index": 4, "mean_delta": -0.1, "probe_count": 2},
+        ],
+        "final_session_mean_delta": -0.1,
+        "pinned_trained_probe_ids": ["vs_a1"],
+        "matched_probe_count_excluding_pinned": 1,
+        "mean_delta_by_session_excluding_pinned": [
+            {"session_index": 4, "mean_delta": 0.76, "probe_count": 1},
+        ],
+        "final_session_mean_delta_excluding_pinned": 0.76,
+    }
+    control_shadow = {"static_weight": entry}
+
+    md = _render_s62(control_shadow)
+    print(f"§6.2 trained-subset pin-adjustment:\n{md}")
+    assert "(M39/M41)" in md
+    assert "vs_a1" in md
+    assert "-0.1000" in md
+    assert "0.7600" in md
+    assert "(n=2)" in md
+    assert "(n=1)" in md
+
+
+def test_s62_trained_subset_all_pinned_renders_dash_and_note_not_zero():
+    """The all-pinned hazard: '-' plus the explicit note, never '0.0000'
+    (which would misread as 'no effect')."""
+    entry = _make_control_shadow_entry("static_weight", "static-weight")
+    entry["trained_subset_comparison"] = {
+        "trained_probe_count": 2,
+        "matched_probe_count": 2,
+        "per_probe": [],
+        "mean_delta_by_session": [
+            {"session_index": 4, "mean_delta": -0.96, "probe_count": 2},
+        ],
+        "final_session_mean_delta": -0.96,
+        "pinned_trained_probe_ids": ["vs_a1", "vs_c1"],
+        "matched_probe_count_excluding_pinned": 0,
+        "mean_delta_by_session_excluding_pinned": [],
+        "final_session_mean_delta_excluding_pinned": None,
+    }
+    control_shadow = {"static_weight": entry}
+
+    md = _render_s62(control_shadow)
+    print(f"§6.2 trained-subset all-pinned:\n{md}")
+    assert "all trained probes" in md.lower()
+    assert "control-pinned" in md.lower()
+    assert "0.0000" not in md
+    # the excl-pinned headline figure renders as the dash, not a fabricated 0
+    assert "excl. pinned:** —" in md
+
+
+def test_s62_trained_subset_pre_m41_data_omits_pinned_line_no_false_note():
+    """Backward compat (M32 rule): a pre-M41 trained_subset_comparison dict
+    (M39 shape, no pin-adjustment keys) must render '-' in the new columns,
+    omit the pinned-probes line entirely, and must NOT trigger the
+    all-pinned note just because the defaulted excluding-pinned count is 0."""
+    entry = _make_control_shadow_entry("static_weight", "static-weight")
+    entry["trained_subset_comparison"] = {
+        "trained_probe_count": 1,
+        "matched_probe_count": 1,
+        "per_probe": [],
+        "mean_delta_by_session": [
+            {"session_index": 4, "mean_delta": -0.94, "probe_count": 1},
+        ],
+        "final_session_mean_delta": -0.94,
+        # no pinned_trained_probe_ids / matched_probe_count_excluding_pinned /
+        # mean_delta_by_session_excluding_pinned / final_session_mean_delta_excluding_pinned
+    }
+    control_shadow = {"static_weight": entry}
+
+    md = _render_s62(control_shadow)
+    print(f"§6.2 pre-M41 trained-subset data:\n{md}")
+    assert "Control-pinned trained probes" not in md
+    assert "all trained probes" not in md.lower()
+    assert "-0.9400" in md
+    assert "excl. pinned:** —" in md
+
+
 def test_s62_pin_adjusted_mean_deltas_renders():
     entry = _make_control_shadow_entry("static_weight", "static-weight")
     entry["pin_adjusted_mean_deltas"] = {

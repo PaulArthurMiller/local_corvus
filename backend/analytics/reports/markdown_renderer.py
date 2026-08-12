@@ -636,25 +636,72 @@ def _render_s62(control_shadow: Optional[dict]) -> str:
                 "between conditions._\n"
             )
 
-        # Trained-subset comparison (M39 §2) — the primary config-comparison
-        # endpoint: did learning move the TRAINED spokes, restricted from
-        # the 28-probe by-phenomenon mean above to just the trained subset.
+        # Trained-subset comparison (M39 §2 / M41 pin-adjustment) — the
+        # primary config-comparison endpoint: did learning move the TRAINED
+        # spokes, restricted from the 28-probe by-phenomenon mean above to
+        # just the trained subset. M41 adds a second reading excluding any
+        # trained probe that is control-pinned at a degenerate 1.0 tie-break
+        # ceiling under this control — the raw mean can cancel genuine
+        # trained-spoke wins against those ceilings (Round 1 rep3: raw
+        # −0.12 vs. +0.72 excluding {vs_a1, vs_c1}). Both means always
+        # render with their probe counts (an n=2 mean is high-variance and
+        # the reader must see that at a glance, not infer it).
         trained_cmp = cs.get("trained_subset_comparison") or {}
         if trained_cmp.get("trained_probe_count"):
+            # Pre-M41 stored reports have `trained_subset_comparison` (M39)
+            # but none of the pin-adjustment keys — detect that by presence,
+            # not by a defaulted 0, so a legacy report never gets falsely
+            # flagged as "all trained probes control-pinned" (M32 backward-
+            # compat rule: omit what wasn't computed, never fabricate it).
+            m41_present = "pinned_trained_probe_ids" in trained_cmp
             final_delta = trained_cmp.get("final_session_mean_delta")
+            final_delta_excl = trained_cmp.get("final_session_mean_delta_excluding_pinned")
+            matched = trained_cmp.get("matched_probe_count", 0)
+            matched_excl = trained_cmp.get("matched_probe_count_excluding_pinned", 0)
+            pinned_trained = trained_cmp.get("pinned_trained_probe_ids") or []
             lines += [
-                "#### Trained-Subset Comparison — `weight_mode=sample` (learned − control) (M39)\n",
+                "#### Trained-Subset Comparison — `weight_mode=sample` (learned − control) (M39/M41)\n",
                 f"**Trained probes:** {trained_cmp.get('trained_probe_count', 0)} "
-                f"({trained_cmp.get('matched_probe_count', 0)} with matching data)  ",
-                f"**Final-session trained-subset mean Δ:** {_s62_value_str(final_delta)}\n",
-                "| Session | Mean Δ | Probes |",
-                "|---|---|---|",
+                f"({matched} with matching data)  ",
             ]
-            for row in trained_cmp.get("mean_delta_by_session") or []:
+            if m41_present:
                 lines.append(
-                    f"| {row.get('session_index', '—')} "
+                    f"**Control-pinned trained probes** (pass_rate 1.0 in every "
+                    f"session under this control): "
+                    f"{', '.join(pinned_trained) if pinned_trained else 'none'}  "
+                )
+            lines += [
+                f"**Final-session trained-subset mean Δ:** "
+                f"{_s62_value_str(final_delta)} (n={matched})  ",
+                f"**Final-session trained-subset mean Δ, excl. pinned:** "
+                f"{_s62_value_str(final_delta_excl)} (n={matched_excl})\n",
+            ]
+            if m41_present and matched > 0 and matched_excl == 0:
+                # M41 all-pinned hazard: `—` here means "nothing left to
+                # average," never "no effect" — a 0.0 would be indistinguish-
+                # able from a real null, which is the worst possible misread.
+                lines.append(
+                    "_All trained probes with matching data are control-pinned "
+                    "under this control — the excluding-pinned mean has no "
+                    "probes to average and is reported as `—`, not `0.0`._\n"
+                )
+            lines += [
+                "| Session | Mean Δ | Probes | Mean Δ (excl. pinned) | Probes (excl. pinned) |",
+                "|---|---|---|---|---|",
+            ]
+            excl_by_session = {
+                row.get("session_index"): row
+                for row in trained_cmp.get("mean_delta_by_session_excluding_pinned") or []
+            }
+            for row in trained_cmp.get("mean_delta_by_session") or []:
+                idx = row.get("session_index")
+                excl_row = excl_by_session.get(idx) or {}
+                lines.append(
+                    f"| {idx if idx is not None else '—'} "
                     f"| {_s62_value_str(row.get('mean_delta'))} "
-                    f"| {row.get('probe_count', 0)} |"
+                    f"| {row.get('probe_count', 0)} "
+                    f"| {_s62_value_str(excl_row.get('mean_delta'))} "
+                    f"| {excl_row.get('probe_count', 0)} |"
                 )
             lines.append("")
         else:

@@ -1899,16 +1899,26 @@ def test_generate_experiment_report_threads_trained_spokes_into_control_shadow()
         # learned goes 0.0 -> 1.0, control stays 1.0 -> 1.0: final delta 0.0
         assert trained_cmp["final_session_mean_delta"] == 0.0
 
+        # M41: control (static_weight) sits at 1.0 in both sessions -- vs_a1
+        # is control-pinned, and it's the only trained probe with data, so
+        # this is the all-trained-probes-pinned hazard case: None, not 0.0.
+        assert trained_cmp["pinned_trained_probe_ids"] == ["vs_a1"]
+        assert trained_cmp["matched_probe_count_excluding_pinned"] == 0
+        assert trained_cmp["final_session_mean_delta_excluding_pinned"] is None
+
         pin_adjusted = cs["pin_adjusted_mean_deltas"]
         print(f"pin_adjusted_mean_deltas: {pin_adjusted}")
         assert pin_adjusted["pinned_probe_ids"] == ["vs_a1"]
         # vs_a1 is the only probe and it's pinned -> excluding-pinned mean is empty
         assert pin_adjusted["by_phenomenon_excluding_pinned"] == {}
 
-        # Markdown renders without crashing and surfaces the M39 sections.
+        # Markdown renders without crashing and surfaces the M39/M41 sections,
+        # including the all-pinned note (never a fabricated 0.0000).
         md = render_experiment_report_markdown(report)
         assert "Trained Probes (M39)" in md
         assert "Trained-Subset Comparison" in md
+        assert "(M39/M41)" in md
+        assert "all trained probes" in md.lower()
         assert "Pin-Adjusted Mean Deltas (M39)" in md
 
 

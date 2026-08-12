@@ -457,12 +457,61 @@ def _compute_sample_pass_rate_comparison(
 # ---------------------------------------------------------------------------
 
 
+def _compute_session_mean_deltas(
+    per_probe: list[dict],
+) -> tuple[list[dict], Optional[float]]:
+    """
+    Shared arithmetic (M41) for turning a `per_probe` delta list (the shape
+    `_compute_sample_pass_rate_comparison`/`_compute_trained_subset_comparison`
+    both produce) into a per-session mean delta and a final-session mean
+    delta.
+
+    Extracted so `_compute_trained_subset_comparison()`'s raw mean and its
+    excluding-pinned mean run through identical code — the same rationale as
+    M39's `_aggregate_deltas_by_phenomenon` extraction: two slightly
+    different definitions of "trained-subset mean delta" must not be able to
+    coexist in the same report.
+
+    Returns `(mean_delta_by_session, final_session_mean_delta)`.
+    `final_session_mean_delta` is `None` (never `0.0`) when `per_probe` is
+    empty or has no final-session deltas — an empty input (e.g. every
+    trained probe control-pinned) must read as "nothing to average," not as
+    "averaged to zero."
+    """
+    session_deltas: dict[int, list[float]] = {}
+    for p in per_probe:
+        for s in p.get("sessions") or []:
+            if s.get("delta") is not None:
+                session_deltas.setdefault(s["session_index"], []).append(s["delta"])
+
+    mean_delta_by_session = [
+        {
+            "session_index": idx,
+            "mean_delta": round(sum(deltas) / len(deltas), 4),
+            "probe_count": len(deltas),
+        }
+        for idx, deltas in sorted(session_deltas.items())
+    ]
+
+    final_session_deltas = [
+        p["sessions"][-1]["delta"]
+        for p in per_probe
+        if p.get("sessions") and p["sessions"][-1].get("delta") is not None
+    ]
+    final_session_mean_delta = (
+        round(sum(final_session_deltas) / len(final_session_deltas), 4)
+        if final_session_deltas else None
+    )
+    return mean_delta_by_session, final_session_mean_delta
+
+
 def _compute_trained_subset_comparison(
     sample_pass_rate_comparison: dict,
     trained_probe_ids: set[str],
+    pinned_probe_ids: Optional[set[str]] = None,
 ) -> dict:
     """
-    §6.2 trained-subset comparison (M39) — the primary config-comparison
+    §6.2 trained-subset comparison (M39/M41) — the primary config-comparison
     endpoint. Restricts the sample-mode learned/control comparison
     (`_compute_sample_pass_rate_comparison`'s per_probe output) to just the
     trained probes, and reports a trained-subset mean delta per session and
@@ -479,39 +528,51 @@ def _compute_trained_subset_comparison(
     Degrades to an empty comparison, not a crash, when trained_probe_ids is
     empty (no trained_spokes supplied to generate_experiment_report) or none
     of the trained probes have sample-mode data.
+
+    M41: `pinned_probe_ids` (control-specific, from `_compute_pinned_probes`)
+    adds a second mean computed over the trained probes EXCLUDING any that
+    are control-pinned at a degenerate 1.0 tie-break ceiling the mechanism
+    can never move. The raw mean above cancels genuine trained-spoke wins
+    against those ceilings — Round 1 rep3's real data: raw final Δ = −0.12
+    (two +0.7-ish trained wins cancelled by two −0.96 pinned ceilings) vs.
+    +0.72 excluding {vs_a1, vs_c1}. Defaults to an empty set, so every
+    pre-M41 call site is unaffected and the raw mean/keys are untouched
+    (M34's never-silently-redefine rule) — the new keys are purely additive.
     """
+    pinned_probe_ids = pinned_probe_ids or set()
     all_per_probe = sample_pass_rate_comparison.get("per_probe") or []
-    trained_per_probe = [p for p in all_per_probe if p["probe_id"] in trained_probe_ids]
-
-    session_deltas: dict[int, list[float]] = {}
-    for p in trained_per_probe:
-        for s in p.get("sessions") or []:
-            if s.get("delta") is not None:
-                session_deltas.setdefault(s["session_index"], []).append(s["delta"])
-
-    mean_delta_by_session = [
-        {
-            "session_index": idx,
-            "mean_delta": round(sum(deltas) / len(deltas), 4),
-            "probe_count": len(deltas),
-        }
-        for idx, deltas in sorted(session_deltas.items())
+    # Shallow-copy each matched probe's dict rather than mutating the shared
+    # `all_per_probe` list in place — that list is also consumed elsewhere
+    # (e.g. `_compute_pin_adjusted_mean_deltas`), and tagging it with a
+    # trained-subset-only `control_pinned` flag would leak this function's
+    # bookkeeping into an unrelated caller's data.
+    trained_per_probe = [
+        {**p, "control_pinned": p["probe_id"] in pinned_probe_ids}
+        for p in all_per_probe
+        if p["probe_id"] in trained_probe_ids
     ]
-
-    final_session_deltas = [
-        p["sessions"][-1]["delta"]
-        for p in trained_per_probe
-        if p.get("sessions") and p["sessions"][-1].get("delta") is not None
+    unpinned_trained_per_probe = [
+        p for p in trained_per_probe if not p["control_pinned"]
     ]
-    final_session_mean_delta = (
-        round(sum(final_session_deltas) / len(final_session_deltas), 4)
-        if final_session_deltas else None
+    pinned_trained_probe_ids = sorted(
+        p["probe_id"] for p in trained_per_probe if p["control_pinned"]
     )
+
+    mean_delta_by_session, final_session_mean_delta = _compute_session_mean_deltas(
+        trained_per_probe
+    )
+    (
+        mean_delta_by_session_excluding_pinned,
+        final_session_mean_delta_excluding_pinned,
+    ) = _compute_session_mean_deltas(unpinned_trained_per_probe)
 
     logger.info(
         "control_shadow trained_subset_comparison: trained_probes=%d matched=%d "
-        "final_session_mean_delta=%s",
-        len(trained_probe_ids), len(trained_per_probe), final_session_mean_delta,
+        "pinned=%d matched_excluding_pinned=%d final_session_mean_delta=%s "
+        "final_session_mean_delta_excluding_pinned=%s",
+        len(trained_probe_ids), len(trained_per_probe), len(pinned_trained_probe_ids),
+        len(unpinned_trained_per_probe), final_session_mean_delta,
+        final_session_mean_delta_excluding_pinned,
     )
     return {
         "trained_probe_count": len(trained_probe_ids),
@@ -519,6 +580,10 @@ def _compute_trained_subset_comparison(
         "per_probe": trained_per_probe,
         "mean_delta_by_session": mean_delta_by_session,
         "final_session_mean_delta": final_session_mean_delta,
+        "pinned_trained_probe_ids": pinned_trained_probe_ids,
+        "matched_probe_count_excluding_pinned": len(unpinned_trained_per_probe),
+        "mean_delta_by_session_excluding_pinned": mean_delta_by_session_excluding_pinned,
+        "final_session_mean_delta_excluding_pinned": final_session_mean_delta_excluding_pinned,
     }
 
 
@@ -631,8 +696,9 @@ async def generate_control_shadow(
     1. Run §6.1 learning measures analysis on the control experiment.
     2. Run control-specific sanity checks.
     3. Compute comparative deltas against the learned condition.
-    4. (M39) Compute the trained-subset comparison, control-pinned probe
-       set, and pin-adjusted mean deltas against the learned condition.
+    4. (M39/M41) Compute the control-pinned probe set, then the trained-subset
+       comparison (pin-adjusted, M41) and the all-probe pin-adjusted mean
+       deltas (M39), both against the learned condition.
 
     trained_spokes/seed_fixture_version: forwarded to the control
     experiment's own `_section_61_learning_measures` call so its
@@ -725,20 +791,27 @@ async def generate_control_shadow(
             control_measures=control_measures,
         )
 
-        # Trained-subset comparison (M39 §2) — trained_probes resolves
-        # identically off learned_measures or control_measures (same
+        # Control-pinned probe set (M39 §4 / M41) — pinned status is
+        # control-specific (static_weight and random_weight pin different
+        # probes), and is computed *before* the trained-subset comparison
+        # below (M41) so that call can carry the pin-adjustment: a probe
+        # pinned at a degenerate 1.0 ceiling under this control feeds both
+        # the all-probe pin-adjusted mean (M39) and the trained-subset
+        # pin-adjusted mean (M41) from the same computation.
+        pinned_probe_ids = _compute_pinned_probes(control_measures.get("sample_pass_rates") or {})
+
+        # Trained-subset comparison (M39 §2, pin-adjusted M41) — trained_probes
+        # resolves identically off learned_measures or control_measures (same
         # trained_spokes/seed_fixture_version passed to both); using
         # learned_measures here since it's always computed, control-
         # independent of which control is currently being processed.
         from analytics.reports.spoke_membership import trained_probe_id_set
         trained_probe_ids = trained_probe_id_set(learned_measures.get("trained_probes") or {})
         trained_subset_comparison = _compute_trained_subset_comparison(
-            sample_pass_rate_comparison, trained_probe_ids
+            sample_pass_rate_comparison, trained_probe_ids, pinned_probe_ids=pinned_probe_ids
         )
 
-        # Pin-adjusted mean deltas (M39 §4) — pinned status is control-
-        # specific (static_weight and random_weight pin different probes).
-        pinned_probe_ids = _compute_pinned_probes(control_measures.get("sample_pass_rates") or {})
+        # Pin-adjusted mean deltas (M39 §4) — all-probe by-phenomenon version.
         pin_adjusted_mean_deltas = _compute_pin_adjusted_mean_deltas(
             sample_pass_rate_comparison, pinned_probe_ids
         )

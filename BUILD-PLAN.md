@@ -5799,6 +5799,219 @@ that wiped and reseeded is not a fresh replicate.
 
 ---
 
+## Pin-Adjusted Trained-Subset Δ — Milestone 41
+
+**Status: COMPLETE (built and live-verified 2026-08-12).** Report-layer code
+milestone — `control_shadow.py` + `markdown_renderer.py` + tests, 10 new
+tests (1093 total, no regressions). Live-verified against the real
+`memory/graph.db` by regenerating exp0-a, exp0b, and both Round 1
+replicates. See PROGRESS.md for the full read, including a correction the
+live regeneration surfaced in the hand-computed table below (`vs_a1`'s true
+pin count across the three replicates is 1, not 3 — see the note under the
+table).
+
+**Goal: remove a structural negative bias from the primary
+config-comparison number.** M39 §4 built pin-adjustment for the *all-probe*
+by-phenomenon mean and M39 §2 built the trained-subset comparison — but the
+two were never connected. The trained-subset Δ, which is the number every
+Round 2+ decision rule keys off, is still computed over **all** trained
+probes including those whose control sits at a degenerate 1.0 tie-break
+ceiling. The 2026-08-11 Round 1 read found this on real data:
+
+```
+rep3 trained subset, final session, learned − static_weight
+───────────────────────────────────────────────────────────
+ probe    learned   control      Δ       control-pinned?
+ vs_b3     0.76      0.00     +0.76      no
+ vs_d5     0.68      0.00     +0.68      no
+ vs_a1     0.04      1.00     −0.96      no (1.0 only in 3 of 5 sessions —
+                                             see correction below)
+ vs_c1     0.04      1.00     −0.96      YES (1.0 in every session)
+                             ───────
+ raw mean       (M39, n=4)    −0.12   ← what Round 1 recorded
+ excl. pinned   (M41, n=3)    +0.16   ← what the data actually says
+```
+
+**Correction, recorded during the build (2026-08-12):** this table was
+originally hand-drafted with `vs_a1` marked pinned too (n=2 excl., +0.72),
+on the assumption that its 1.0 final-session control value under
+`static_weight` held for every session in rep3. The live build-verification
+(scope §8) found `vs_a1`'s control pass rate is actually 0.0 in 2 of rep3's
+5 sessions — it only *looks* pinned from the final session alone. Only
+`vs_c1` qualifies under the (unchanged, verbatim-reused) "1.0 in every
+session" rule. The corrected table above is what the built code actually
+returns; the finding stands regardless — a genuine trained-spoke win is
+still cancelled by a pinned ceiling in the raw mean, just one probe's worth
+instead of two. See PROGRESS.md for the full three-replicate pin count
+(`vs_a1`: 1 of 3, not 3 of 3; `vs_c1`: 2 of 3, as originally recorded) and
+the corrected pin-adjusted envelope.
+
+A decisive trained-spoke win — the *first* alignment ever observed — is
+cancelled in the raw mean by a ceiling the mechanism can never move. The
+per-probe rows to hand-compute the correction are already in every report;
+doing that by hand across 4 experiments × 2 controls × 5 sessions is
+exactly the error surface this milestone removes — as this correction
+itself demonstrates.
+
+**Where it plugs in — this is one missing wire, not new machinery:**
+
+```
+§6.2 control shadow, per control condition
+──────────────────────────────────────────
+  learned sample_pass_rates ─┐
+                             ├─▶ _compute_sample_pass_rate_comparison()
+  control sample_pass_rates ─┘         per_probe: 28 probes × sessions
+                                      │
+                 ┌────────────────────┼────────────────────┐
+                 ▼                    ▼                    ▼
+      trained_probe_ids        pinned_probe_ids       (all probes)
+      (spoke_membership)       (_compute_pinned_           │
+                 │              probes, M39)               │
+                 ▼                    │                    ▼
+   _compute_trained_subset_           │       _compute_pin_adjusted_
+        comparison()  ◀───M41─────────┘            mean_deltas()
+                 │        adds this edge                   │
+                 ▼                                         ▼
+   raw Δ + Δ excl. pinned                    all-probe Δ + Δ excl. pinned
+     (M41 — side by side)                      (M39 — already paired)
+```
+
+Both inputs already exist and are already computed per control. Note the
+ordering in `generate_control_shadow()` (`control_shadow.py:735-744`):
+`pinned_probe_ids` is computed *after* the trained-subset call, so part of
+this change is moving that computation up.
+
+**Scope:**
+
+1. **Pin the trained subset with M39's existing rule — do not define a
+   second one.** Reuse `_compute_pinned_probes()` verbatim (control sample
+   pass rate 1.0 in *every* session). Two pin definitions in one report is
+   the failure mode M39 avoided by extracting `_aggregate_deltas_by_phenomenon`;
+   hold the same line here. Pinned status stays **control-specific** —
+   `static_weight` and `random_weight` pin different probes (exp0b pinned
+   `vs_d5` under random only), so the adjusted trained-subset Δ is computed
+   independently for each control.
+2. **Extend `_compute_trained_subset_comparison()` to emit both means, side
+   by side.** New optional `pinned_probe_ids: set[str]` parameter (defaulting
+   to empty, so every existing call site keeps working). Added output keys,
+   alongside — never replacing — the existing ones:
+   - `pinned_trained_probe_ids` — sorted, explicitly rendered even when empty
+   - `matched_probe_count_excluding_pinned`
+   - `mean_delta_by_session_excluding_pinned` — same row shape as the raw
+     `mean_delta_by_session`, including its `probe_count`
+   - `final_session_mean_delta_excluding_pinned`
+   - a `control_pinned: bool` flag on each `per_probe` row, so a reader can
+     see *which* trained probe was dropped and why without cross-referencing
+     the M39 §4 pinned list
+   The existing `mean_delta_by_session` / `final_session_mean_delta` keep
+   their exact current values and names (M34's never-silently-redefine rule).
+3. **Compute both means through one code path.** Extract the session-mean
+   arithmetic currently inline in `_compute_trained_subset_comparison()` into
+   a helper that takes a per-probe list and returns
+   `(mean_delta_by_session, final_session_mean_delta)`; call it twice, once
+   on the full trained list and once on the unpinned list. Same rationale as
+   M39's `_aggregate_deltas_by_phenomenon` extraction — two slightly different
+   definitions of "trained-subset mean Δ" must not be able to coexist.
+4. **`None`, never `0.0`, when everything is pinned.** With only 4 trained
+   probes, all-pinned is reachable (2 of 4 already pin routinely). The
+   excluding-pinned mean must be `None` with `matched_probe_count_excluding_pinned:
+   0`, and the Markdown must render `—` plus an explicit "all trained probes
+   control-pinned under this control" note. A `0.0` here would read as "no
+   effect" — the worst possible misreport, since it is indistinguishable from
+   a real null.
+5. **Markdown rendering** (`markdown_renderer.py`, the existing
+   `#### Trained-Subset Comparison … (M39)` block at ~line 639): add a
+   pinned-trained-probes line under the existing header lines, a second
+   headline figure for the excluding-pinned final Δ, and two columns to the
+   per-session table (`Mean Δ (excl. pinned)`, `Probes (excl. pinned)`).
+   Retitle the block to `(M39/M41)`. **Both numbers always visible with
+   their probe counts** — an n=2 mean is high-variance and the reader must
+   be able to see that at a glance, not infer it.
+6. **Backward compatibility (M32 rule).** Pre-M41 stored report JSONs lack
+   every new key: the renderer shows `—` in the new columns and omits the
+   pinned line, and never raises. Calls to
+   `generate_experiment_report()` / `generate_control_shadow()` are unchanged
+   at the signature level — the new parameter is internal to
+   `control_shadow.py`.
+7. **Recompute the Round 1 baseline envelope on the adjusted metric — and
+   amend M42.** This is the part that is easy to miss and would quietly
+   invalidate the exp01 read: M42's pre-registered decision rule cites the
+   trained-subset Δ envelope **[−0.46, −0.12]**, which is the *raw* envelope
+   from three replicates. Comparing an exp01 pin-adjusted Δ against a raw
+   envelope is an apples-to-oranges error. After the code is built,
+   regenerate the three Round 1 replicate reports, record the pin-adjusted
+   trained-subset Δ envelope in PROGRESS.md, and update M42's decision rule
+   to name **both** envelopes with which metric each governs.
+8. **Live verification doubles as the done-criterion.** Regenerate exp0-a,
+   exp0b, and the three Round 1 replicates. The hand-computed rep3 value
+   above is the check: **pinned trained probes = {vs_a1, vs_c1}, raw final
+   Δ = −0.12 (unchanged from the stored report), excluding-pinned final
+   Δ = +0.72.** If the raw number moves, or the adjusted number disagrees
+   with the per-probe rows, the implementation is wrong. Also confirm the
+   M39 §4 all-probe pin-adjusted finals still read +0.096 / +0.007 / +0.039
+   (rep1/rep2/rep3) — proof this milestone touched nothing it shouldn't.
+   **Build outcome (2026-08-12):** the raw number did NOT move (rep3 raw
+   final Δ confirmed exactly −0.12, and rep1/rep2's raw finals confirmed
+   exactly −0.46/−0.20 against the pre-M41 stored values), and the M39
+   all-probe finals were confirmed exactly unchanged — the implementation
+   passes its own done-criterion. The one number that came back different
+   from this section's hand-computed prediction is `pinned trained probes`
+   itself: rep3's real per-session data pins only `vs_c1`, not `vs_a1`
+   (`vs_a1`'s static control reads 0.0 in sessions 3–4, not 1.0 throughout),
+   giving excluding-pinned final Δ = **+0.16** (n=3), not the predicted
+   +0.72 (n=2). This is not a code defect — `_compute_pinned_probes()` is
+   reused verbatim and applies the same "1.0 in every session" rule the
+   arithmetic self-consistency check confirms is working correctly; the
+   prediction in this section was itself a hand-read approximation made
+   before the code existed to check it precisely, which is exactly the
+   error surface this milestone exists to remove. See PROGRESS.md and the
+   corrected worked example above for the full detail.
+9. **Tests** (`tests/test_analytics/`, mirroring the M39 test placement in
+   `test_experiment_report.py` / `test_markdown_renderer.py`):
+   - no trained probe pinned → adjusted output **equals** raw output exactly
+     (assert equality, not just "close" — this is what catches two divergent
+     mean definitions)
+   - one of two trained probes pinned → adjusted mean is the surviving
+     probe's Δ, `matched_probe_count_excluding_pinned == 1`
+   - **all** trained probes pinned → `None` and count 0, renderer emits `—`
+     and the explanatory note, no crash, no `0.0`
+   - same probe pinned under one control and not the other → the two
+     controls' adjusted Δs differ (the exp0b `vs_d5` case)
+   - trained probe missing a session → per-session denominators differ
+     across sessions and each row's `probe_count` reflects its own session
+   - pre-M41 stored JSON (new keys absent) → renders `—`, never raises
+   - a trained spoke that resolves to no probe stays counted in
+     `trained_probe_count` but not in either mean (M39's existing behavior,
+     re-asserted so this change can't silently drop it)
+
+**Out of scope:** any change to learning, retrieval, judging, or wiping —
+measurement only, same rule as M32/M39. No change to the pin *definition*
+(if "1.0 in every session" ever needs revisiting, that is its own milestone
+with its own live read). No change to the M39 all-probe pin-adjusted
+section beyond leaving it exactly as-is. No new probe/bank/fixture work.
+
+**Risks & open questions:**
+
+- ⚠ **Small-n after exclusion.** Adjusted means over 2 trained probes are
+  noisy; the metric can swing hard on one probe. Plan: always render the
+  probe count beside the mean (scope §5), and let the winner-alignment table
+  remain co-primary in the read rather than promoting the adjusted Δ to sole
+  authority.
+- ⚠ **The recomputed envelope may be wide enough to make exp01 unfalsifiable
+  on this metric.** Possible — Round 1's adjusted values are computed from
+  n=2..4 subsets. If so, that is itself the finding: say so explicitly in
+  PROGRESS.md and let M42's alignment rule (≥4/8 slots) carry the decision,
+  which was always the intent of "winner-alignment table primary."
+- ? **Does any Round 1 replicate hit the all-pinned degenerate case?** rep1
+  pinned `vs_a1` + `vs_c1` per the read; whether rep1/rep2 pinned more is
+  unverified from the session notes. Resolve by reading the regenerated
+  reports during scope §7, not by assuming.
+
+**Estimate:** 1 session — one function extended in `control_shadow.py`, one
+Markdown block extended, tests, plus the regeneration/envelope read.
+
+---
+
 ## Experiment Round 2: exp01 — Early-Feedback Alignment Configs — Milestone 42
 
 **Status: PLANNED (drafted 2026-08-12). Artifacts (4 plans + 2 queues)
@@ -5931,19 +6144,37 @@ And the pre-registered decision rules, against Round 1's floor
   replicates): ≥ 4/8 = clear positive signal; 3/8 = suggestive — extend
   that config with a third replicate before concluding; ≤ 2/8 = null.**
 - Trained-subset Δ: a config claims movement only outside the Round 1
-  envelope; inside it is noise regardless of sign.
+  envelope; inside it is noise regardless of sign. **Metric-matching rule
+  (M41, both envelopes now recorded):** the raw trained-subset Δ envelope
+  is **[−0.46, −0.12]** (rep1/rep2/rep3: −0.46 / −0.20 / −0.12) — compare a
+  config's *raw* trained-subset Δ against this one. The **pin-adjusted**
+  (excluding-pinned) trained-subset Δ envelope, computed live 2026-08-12
+  against the same three replicates, is **[−0.20, +0.16]** (rep1/rep2/rep3:
+  0.0 / −0.20 / +0.16) — compare a config's *pin-adjusted* trained-subset Δ
+  against this one, never against the raw envelope. Never compare a raw
+  value to the pin-adjusted envelope or vice versa.
 - cfgA's "too slow" signature (see above) is a finding, not a failure —
   it redirects Round 3 rather than closing the direction.
 
-**Sequencing with M41.** M41 (pin-adjusted trained-subset Δ — restrict the
-M39 pin-exclusion to the trained subset in `control_shadow.py`, both raw and
-adjusted always rendered side by side per the M34 rule) is recommended
-**before the exp01 read session** but does not block the runs: reports
-regenerate retroactively from stored data (M33–35 precedent). Static pins
-landed on trained probes in every Round 1 replicate (vs_a1 3/3, vs_c1 2/3),
-so exp01's primary comparison number inherits a structural negative bias
-until M41 exists — hand-computable from the per-probe rows, but doing that
-across 4 experiments × 2 controls is exactly the error surface M41 removes.
+**Sequencing with M41.** M41 (pin-adjusted trained-subset Δ) is **built and
+live-verified against real data (2026-08-12)** — see the M41 section above
+for the implementation and PROGRESS.md for the full read. Static pins
+landed on a trained probe in every Round 1 replicate, so exp01's primary
+comparison number inherited a structural negative bias, which M41 removes.
+**Correction to the pre-M41 hand-tally cited in earlier drafts of this
+section:** the live regeneration found `vs_c1` pinned in 2 of 3 replicates
+(rep1, rep3) as expected, but `vs_a1` pinned in only **1 of 3** (rep1/exp0b
+only — it dips to 0.0 under static in two of rep3's five sessions, so the
+"1.0 in every session" rule correctly does not pin it there), not 3 of 3 as
+earlier session notes assumed. That earlier claim was a hand-read
+generalization from exp0b's genuinely-pinned `vs_a1` to all three
+replicates without individually checking rep2/rep3's per-session control
+values — exactly the error class M41 exists to remove by computing it
+instead of eyeballing it. The raw trained-subset Δ (the number that does
+NOT depend on this correction) is confirmed byte-for-byte unchanged from
+the pre-M41 stored reports for all three replicates (−0.46 / −0.20 /
+−0.12), and the M39 all-probe pin-adjusted finals are confirmed unchanged
+(+0.096 / +0.007 / +0.039) — proof M41 touched nothing outside its scope.
 
 **Out of scope:** any judge/bank/fixture change, any third knob, any
 harness/backend code change (including RunPlan hyperparameter overrides —
@@ -6433,3 +6664,5 @@ Last updated: 2026-08-02
 
 
 **Milestone 39:** Complete — report-layer only, no schema change. New `backend/analytics/reports/spoke_membership.py`: a duplicated (never imported — `scripts/` isn't mounted into the backend container) spoke_key -> mu_id table mirroring `generate_seed_v3.py`'s `MU_IDS`, cross-checked in tests against the real frozen `seed_fixtures/seed_v3.json.gz` and `probes/probe_set_v3.yaml` on disk so the duplication can't silently drift. `resolve_trained_probe_ids()` maps `RunPlan.trained_spokes` to probe ids (a trained spoke with no matching probe renders as such, never dropped); `experiment_report.py._compute_cluster_winner_table()` computes the per-cluster argmax-by-sample-pass-rate table (ties recorded explicitly) for both the learned condition and every control; `control_shadow.py` adds `_compute_trained_subset_comparison()` (the primary config-comparison number — trained-probe-only sample-mode mean Δ, all sessions + final) and `_compute_pin_adjusted_mean_deltas()`/`_compute_pinned_probes()` (control-pinned = pass_rate 1.0 in *every* session; both the unmodified all-probe mean and the excluding-pinned mean are always shown side by side, per M34's never-silently-redefine rule). `trained_spokes`/`seed_fixture_version` threaded as new optional params through `generate_experiment_report()` → `_section_61_learning_measures()`/`generate_control_shadow()` → the admin `POST /reports/generate-experiment` request body → `scripts/harness/client.py`/`runner.py` (so future harness runs populate these sections automatically from the plan, not just on-demand admin calls). Markdown rendering added to both §6.1 and §6.2; every new block degrades to —/an explanatory line rather than crashing when the underlying key is absent (verified against a report dict with none of the M39 keys). 91 new tests (new `test_spoke_membership.py` plus additions to `test_learning_measures.py`, `test_control_shadow.py`, `test_experiment_report.py`, `test_markdown_renderer.py`, `test_runner.py`), 1083 total, no regressions. **Live verification (the milestone's own done-criterion) run against the real `memory/graph.db` via the real `POST /admin/reports/generate-experiment` endpoint, Docker backend up:** regenerated `experiment_report_exp0-2026-07-26_learned` and `experiment_report_exp0b-2026-08-06_learned` with `trained_spokes={cluster_a: a_spoke1, cluster_b: b_spoke3, cluster_c: c_spoke1, cluster_d: d_spoke5}`. exp0b's per-cluster final-session winners came back **a_spoke2 / b: no stable winner (all 7 tied at 0.0) / c_spoke3 / d_spoke6, none trained** — an exact match to the pre-registered hand-analysis in the milestone's own §6 note. Pinned-probe classification caught **exactly** the worked example: `vs_a1`/`vs_c1`/`vs_d1` under `static_weight`, `vs_d5` under `random_weight` (both from real exp0b data, not a synthetic check). Pin-adjustment moved the static-weight sample-mode mean Δ from ~0.002 (all probes) to +0.118 (excluding pinned) — confirming the milestone's central claim that control tie-break pins were cancelling learned's real gains in the old all-probe mean. Trained-subset final-session mean Δ came back negative against both controls (static −0.46, random −0.21 on exp0b) — the trained spokes did not win their own clusters, the central open question M40's Round 1 now measures the noise floor for. See PROGRESS.md 2026-08-09 (b) entry for the full read. Branch: `milestone-39-config-comparison-endpoints`.
+
+**Milestone 41:** Complete — report-layer only, no schema change, restricted to `backend/analytics/reports/control_shadow.py` + `markdown_renderer.py`. `_compute_session_mean_deltas()` extracted (shared session-mean/final-session-mean arithmetic) so `_compute_trained_subset_comparison()`'s new optional `pinned_probe_ids` param computes the raw mean and an excluding-pinned mean through the identical code path — the same M39 `_aggregate_deltas_by_phenomenon` rationale, applied to the trained-subset number this time. New output keys are purely additive (`pinned_trained_probe_ids`, `matched_probe_count_excluding_pinned`, `mean_delta_by_session_excluding_pinned`, `final_session_mean_delta_excluding_pinned`, `control_pinned` per per_probe row); the existing raw keys are untouched, verified both by unit test (equality assertion, not closeness) and by live regeneration. `generate_control_shadow()` reordered so `pinned_probe_ids` is computed before the trained-subset call, feeding both M39's all-probe pin-adjustment and M41's trained-subset pin-adjustment from one computation. All-pinned degrades to `None`/count-0, never `0.0` (verified by dedicated test — the all-pinned hazard the milestone called out explicitly). Markdown block retitled `(M39/M41)`, gains a control-pinned-trained-probes line and a second headline figure (both means always shown with their probe counts), and an explicit all-pinned note gated on M41-key *presence* (not a defaulted zero) so a pre-M41 stored report can never trigger a false "all pinned" note — the one subtlety the backward-compat tests exist to catch. 10 new tests (1093 total, no regressions) across `test_control_shadow.py`/`test_markdown_renderer.py`, plus the existing M39 end-to-end `generate_experiment_report` test in `test_experiment_report.py` extended (its `vs_a1` fixture — control pinned at 1.0 both sessions, the only trained probe with data — already is the all-pinned case). **Live verification (done-criterion) regenerated exp0-a, exp0b, and both Round 1 replicates against the real `memory/graph.db`.** Confirmed unchanged, exactly: raw trained-subset final Δ (−0.46/−0.20/−0.12 for rep1/rep2/rep3) and the M39 all-probe pin-adjusted finals (+0.096/+0.007/+0.039) — proof this milestone touched nothing outside its scope. **One correction the live run surfaced against the milestone's own pre-build hand-worked example:** rep3 pins only `vs_c1`, not `vs_a1` as the planning-time table assumed (`vs_a1`'s static control reads 0.0 in 2 of rep3's 5 sessions, so the unchanged "1.0 in every session" rule correctly excludes it — the table's author had eyeballed only the final session). Across all three Round 1 replicates, real pin counts are `vs_a1`: 1/3 (exp0b/rep1 only), `vs_c1`: 2/3 (rep1, rep3) — the earlier "`vs_a1` 3/3" claim carried in PROGRESS.md/BUILD-PLAN was a hand-read generalization error, corrected here rather than propagated. **Recomputed pin-adjusted trained-subset Δ envelope across the three replicates: [−0.20, +0.16]** (rep1 0.0, rep2 −0.20 — nothing pinned that replicate — rep3 +0.16), recorded alongside the existing raw envelope [−0.46, −0.12] in M42's decision rule, which now names both and which metric each governs. See PROGRESS.md 2026-08-12 entry for the full read including per-probe detail. Branch: `milestone-41-pin-adjusted-trained-subset-delta`.

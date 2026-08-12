@@ -709,6 +709,137 @@ class TestComputeTrainedSubsetComparison:
         assert result["mean_delta_by_session"] == []
         assert result["final_session_mean_delta"] is None
 
+    def test_trained_spoke_with_no_matching_probe_counted_but_excluded_from_means(self):
+        """M39 behavior, re-asserted post-M41: a trained_probe_id with no
+        sample-mode data stays in trained_probe_count but never enters
+        matched_probe_count or either mean (raw or excluding-pinned)."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": 0.5}]},
+        ])
+        # vs_z9 is "trained" but has no probe results at all.
+        result = _compute_trained_subset_comparison(
+            cmp, trained_probe_ids={"vs_d5", "vs_z9"}, pinned_probe_ids=set()
+        )
+        assert result["trained_probe_count"] == 2
+        assert result["matched_probe_count"] == 1
+        assert result["matched_probe_count_excluding_pinned"] == 1
+        assert [p["probe_id"] for p in result["per_probe"]] == ["vs_d5"]
+
+    # -- M41: pin-adjustment --------------------------------------------
+
+    def test_no_trained_probe_pinned_adjusted_equals_raw_exactly(self):
+        """Scope §9: with nothing pinned, the excluding-pinned output must
+        equal the raw output exactly (assert equality, not closeness) --
+        this is what catches two divergent mean definitions."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_b3", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": 0.2}, {"session_index": 4, "delta": 0.76}]},
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": 0.1}, {"session_index": 4, "delta": 0.68}]},
+        ])
+        result = _compute_trained_subset_comparison(
+            cmp, trained_probe_ids={"vs_b3", "vs_d5"}, pinned_probe_ids=set()
+        )
+        assert result["pinned_trained_probe_ids"] == []
+        assert result["matched_probe_count_excluding_pinned"] == result["matched_probe_count"]
+        assert result["mean_delta_by_session_excluding_pinned"] == result["mean_delta_by_session"]
+        assert result["final_session_mean_delta_excluding_pinned"] == result["final_session_mean_delta"]
+
+    def test_one_of_two_trained_probes_pinned_adjusted_mean_is_survivor(self):
+        """The rep3-shaped case: two trained probes, one control-pinned --
+        the excluding-pinned mean is exactly the surviving probe's delta."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_a1", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 4, "delta": -0.96}]},
+            {"probe_id": "vs_b3", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 4, "delta": 0.76}]},
+        ])
+        result = _compute_trained_subset_comparison(
+            cmp, trained_probe_ids={"vs_a1", "vs_b3"}, pinned_probe_ids={"vs_a1"}
+        )
+        assert result["pinned_trained_probe_ids"] == ["vs_a1"]
+        assert result["matched_probe_count_excluding_pinned"] == 1
+        assert result["final_session_mean_delta_excluding_pinned"] == 0.76
+        # raw mean is unchanged and still averages both probes
+        assert result["final_session_mean_delta"] == -0.1
+
+    def test_all_trained_probes_pinned_yields_none_never_zero(self):
+        """The all-pinned hazard: None + count 0, never 0.0 (0.0 would read
+        as 'no effect,' indistinguishable from a real null), no crash."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_a1", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 4, "delta": -0.96}]},
+            {"probe_id": "vs_c1", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 4, "delta": -0.96}]},
+        ])
+        result = _compute_trained_subset_comparison(
+            cmp, trained_probe_ids={"vs_a1", "vs_c1"}, pinned_probe_ids={"vs_a1", "vs_c1"}
+        )
+        assert result["pinned_trained_probe_ids"] == ["vs_a1", "vs_c1"]
+        assert result["matched_probe_count_excluding_pinned"] == 0
+        assert result["mean_delta_by_session_excluding_pinned"] == []
+        assert result["final_session_mean_delta_excluding_pinned"] is None
+        # raw mean is untouched by the all-pinned condition
+        assert result["final_session_mean_delta"] == -0.96
+
+    def test_same_probe_pinned_under_one_control_not_the_other(self):
+        """exp0b's vs_d5-shaped case: pinned status is control-specific --
+        the same per_probe input produces different adjusted deltas
+        depending on which control's pinned set is supplied."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 4, "delta": 0.68}]},
+            {"probe_id": "vs_b3", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 4, "delta": 0.76}]},
+        ])
+        under_static = _compute_trained_subset_comparison(
+            cmp, trained_probe_ids={"vs_d5", "vs_b3"}, pinned_probe_ids=set()
+        )
+        under_random = _compute_trained_subset_comparison(
+            cmp, trained_probe_ids={"vs_d5", "vs_b3"}, pinned_probe_ids={"vs_d5"}
+        )
+        assert under_static["final_session_mean_delta_excluding_pinned"] == 0.72
+        assert under_random["final_session_mean_delta_excluding_pinned"] == 0.76
+        assert under_static["final_session_mean_delta_excluding_pinned"] != (
+            under_random["final_session_mean_delta_excluding_pinned"]
+        )
+
+    def test_missing_session_gives_each_row_its_own_denominator(self):
+        """A trained probe missing one session must not distort that
+        session's mean -- probe_count differs per session row, both raw and
+        excluding-pinned."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_b3", "phenomenon_type": "spoke_retrieval",
+             "sessions": [
+                 {"session_index": 0, "delta": 0.2},
+                 {"session_index": 4, "delta": 0.76},
+             ]},
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             # vs_d5 has no session_index=0 result at all.
+             "sessions": [{"session_index": 4, "delta": 0.68}]},
+        ])
+        result = _compute_trained_subset_comparison(
+            cmp, trained_probe_ids={"vs_b3", "vs_d5"}, pinned_probe_ids=set()
+        )
+        by_session = {row["session_index"]: row for row in result["mean_delta_by_session"]}
+        assert by_session[0]["probe_count"] == 1
+        assert by_session[0]["mean_delta"] == 0.2
+        assert by_session[4]["probe_count"] == 2
+        assert by_session[4]["mean_delta"] == 0.72
+
+    def test_no_pinned_probe_ids_argument_defaults_to_unpinned(self):
+        """Every pre-M41 call site omits pinned_probe_ids -- the new keys
+        must still appear with sane empty-pin values, not raise."""
+        cmp = self._make_comparison([
+            {"probe_id": "vs_d5", "phenomenon_type": "spoke_retrieval",
+             "sessions": [{"session_index": 0, "delta": 0.5}]},
+        ])
+        result = _compute_trained_subset_comparison(cmp, trained_probe_ids={"vs_d5"})
+        assert result["pinned_trained_probe_ids"] == []
+        assert result["matched_probe_count_excluding_pinned"] == 1
+        assert result["final_session_mean_delta_excluding_pinned"] == 0.5
+
 
 # ---------------------------------------------------------------------------
 # _compute_pinned_probes — M39 §4 control-pinned classification

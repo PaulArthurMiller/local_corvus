@@ -1,0 +1,10 @@
+{
+  "queue_id": "exp01_cfgA_slow_evidence_priors",
+  "on_plan_failure": "continue",
+  "max_total_budget_usd": 50.0,
+  "notification": { "enabled": true, "channel": "log" },
+  "plans": [
+    { "plan_path": "../plans/exp01-cfgA-rep1_2026-08-12.json" },
+    { "plan_path": "../plans/exp01-cfgA-rep2_2026-08-12.json" }
+  ]
+}

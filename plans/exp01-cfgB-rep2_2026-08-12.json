@@ -1,0 +1,43 @@
+{
+  "plan_id": "exp01-cfgB-rep2-2026-08-12",
+  "plan_name": "Experiment Round 2 (exp01) config B replicate 2 — wider K2 exploration. Identical to exp01-cfgB-rep1-2026-08-12 except random_seed. REQUIRES config.yaml state: hyperparameters.retrieval_level2_top_k: 2 AND reporting.pass_rank_thresholds.spoke_retrieval: 5, all else baseline — see the M42 protocol (BUILD-PLAN.md); analytics.full_config_snapshot is the provenance record. Same measurement note as rep1: pass-rate levels not comparable across configs, only within-run learned-vs-static and winner/alignment tables. random_seed 20260810 reuses Round 1 rep3's seed (quasi-paired comparison at the turn sequence where trained spokes won under baseline).",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 5,
+  "turns_per_series": 70,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
+  "difficulty": {
+    "hop_distance_levels": [0, 1]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": ["learned", "static_weight"],
+  "condition_order": ["learned", "static_weight"],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": 25.0,
+  "prompt_gen": {
+    "model": "claude-sonnet-5",
+    "max_retries": 2
+  },
+  "dry_run": false,
+  "dry_run_n": 2,
+  "random_seed": 20260810,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
+}

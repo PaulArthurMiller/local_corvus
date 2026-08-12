@@ -5799,6 +5799,163 @@ that wiped and reseeded is not a fresh replicate.
 
 ---
 
+## Experiment Round 2: exp01 — Early-Feedback Alignment Configs — Milestone 42
+
+**Status: PLANNED (drafted 2026-08-12). Artifacts (4 plans + 2 queues)
+committed with this section; no code to build. Config-switch + run + read is
+the milestone. Milestone 41 (pin-adjusted trained-subset Δ in
+`control_shadow.py`) is reserved and recommended before the read session —
+see "Sequencing with M41" below.**
+
+**Goal.** Round 1 established: the mechanism concentrates reliably, winner
+selection is early-feedback chance amplified rich-get-richer, and baseline
+alignment (trained spoke wins its own cluster, final session) is **2/12
+cluster-slots** across three replicates. The 2026-08-12 d_spoke6 check
+confirmed selection carries no structural bias — it really is the dice.
+exp01 asks the sharpest question that read produced: **can a config make
+early feedback land on the trained spoke and stick?** Two configs, each
+attacking a different stage of the selection loop, 2 replicates per config.
+
+**Why these two knobs (and why not others).** The selection loop has two
+stages: *exposure* (winner-take-all K2 picks one spoke per turn to retrieve)
+and *evidence* (the retrieved edge's Beta posterior moves on the verdict,
+biasing the next pick). Config B widens exposure; config A slows evidence.
+Knobs considered and rejected: `credit_lambda` and `negative_scope` are
+**inert under current single-hop retrieval** (every credited path is a
+single edge at hop_k=0 — verified in `edge_update.py` 2026-08-12);
+`credit_scale` down-scaling is arithmetically near-equivalent to config A;
+`evidence_cap` prevents late lock-in rather than improving early selection
+(a Round 3 candidate if A/B both null); asymmetric up/down credit requires
+code. Conversation-MU accumulation knobs are excluded on principle
+(Paul 2026-08-02: measure, never control).
+
+**Config A — slow-evidence seed priors.**
+`edge_update.seed_prior_alpha: 3.0`, `edge_update.seed_prior_beta: 3.0`
+(baseline 1.0/1.0; the seed-specific knob exists precisely for this — conv
+edges keep Beta(1,1)). Same 0.5 prior mean, 3× the evidence mass: one up
+moves a seed edge's mean to 4/7 ≈ 0.571 instead of 2/3 ≈ 0.667, Thompson
+draws across the 7 hub↔spoke edges overlap longer, exploration survives
+deeper into each series. The trained spoke is the only spoke whose retrieval
+systematically produces judge-verifiable answers (the bank's criteria are
+built from its content), so its up-signal is the most *consistent* — a
+slower evidence filter favors consistency over early variance.
+**Pre-registered failure signature, informative either way:** if 5 sessions
+is too short for the slowed accumulation to separate anyone (no cluster
+develops a champion at the baseline 0.44–0.84 level, alignment noisier),
+that itself says lock-in speed is load-bearing for concentration, and Round
+3 should try 2.0/2.0 rather than abandoning the direction.
+
+**Config B — wider K2 exploration.**
+`hyperparameters.retrieval_level2_top_k: 2` (baseline 1) **plus**
+`reporting.pass_rank_thresholds.spoke_retrieval: 5` (baseline 4 — a spoke
+gold reached via K2 now occupies rank 4 *or* 5; config.yaml's own threshold
+comment mandates adjusting with K1/K2). Two spokes surface per traversal:
+the trained spoke enters the retrieved set roughly twice as often early, and
+two hub↔spoke edges earn evidence per verdict instead of one. Note the
+credit on a turn is *shared* by both retrieved spokes' edges — the config
+raises the rate of informative turns (trained-in vs. trained-out contrast),
+not per-turn discrimination. **Measurement consequences, pre-registered:**
+(1) pass-rate *levels* under cfgB are not comparable to baseline or cfgA
+(different retrieved-set geometry and threshold) — only within-run
+learned-vs-static comparisons and the per-cluster winner/alignment tables
+are cross-config comparable; (2) retrieved set grows 4 → 5 MUs per turn —
+check §5.8 context pressure in the read (Round 1 was 0 pressure turns
+throughout; expected fine against `context_token_budget: 2048`).
+
+**Design:**
+
+- 2 plans per config, differing only in `random_seed`:
+  - `plans/exp01-cfgA-rep1_2026-08-12.json` — seed 20260809
+  - `plans/exp01-cfgA-rep2_2026-08-12.json` — seed 20260810
+  - `plans/exp01-cfgB-rep1_2026-08-12.json` — seed 20260809
+  - `plans/exp01-cfgB-rep2_2026-08-12.json` — seed 20260810
+- **Seeds deliberately reuse Round 1's replicate seeds** (rep2 = 20260809,
+  rep3 = 20260810): same prompt→turn assignment and probe placement as the
+  baseline replicates gives a quasi-paired secondary comparison — at matched
+  turn sequence, did the config change the winner identity? (Response-level
+  stochasticity and the edge-RNG stream — derived from experiment_id — still
+  differ, so this is variance reduction, not true pairing.) Rep2-of-each
+  runs the seed where baseline produced its only trained-spoke wins
+  (vs_b3/vs_d5): does the config preserve or disrupt them?
+- Conditions: `learned` + `static_weight` (M40 rationale). Same bank
+  (`prompt_bank_e2adf796…`), fixture (v3), shape (5×70 @ 0.4),
+  trained_spokes (a1/b3/c1/d5), judge. Nothing paid — the bank exists.
+- Queues: `queues/exp01_cfgA_2026-08-12.json`,
+  `queues/exp01_cfgB_2026-08-12.json` (2 plans each, `on_plan_failure:
+  continue`; per-queue distinct seeds satisfy the M26 preflight).
+
+**Config-switch protocol (the part RunPlan cannot express).** RunPlan has no
+hyperparameter overrides; configs live in `config.yaml`, which is
+bind-mounted into the backend container (`docker-compose.yml`). Per config,
+in order:
+
+1. Working tree clean; `config.yaml` at baseline (committed state).
+2. Edit `config.yaml` — exactly the lines listed for that config above.
+3. `docker compose restart backend` (mounted file, restart applies it).
+4. Restart Ollama (the 2026-08-06 prompt-cache OOM lesson).
+5. **Verify the live config before burning a wipe+seed:**
+   `docker compose exec backend python -c "import yaml; c = yaml.safe_load(open('/app/config.yaml')); print('seed_priors', c['edge_update']['seed_prior_alpha'], c['edge_update']['seed_prior_beta'], '| k2', c['hyperparameters']['retrieval_level2_top_k'], '| spoke_thresh', c['reporting']['pass_rank_thresholds']['spoke_retrieval'])"`
+   — must print the intended values for the config about to run.
+6. `python scripts/run_experiment_queue.py queues/exp01_cfg<X>_2026-08-12.json`
+7. After the queue: `git checkout -- config.yaml`, restart backend —
+   **never leave a config experiment's values as the working state.**
+
+Two nights: cfgA night 1, cfgB night 2 (each ≈ 2 plans × ~2.6 h ≈ 5.5 h).
+**Provenance rule for the read:** the plan's `config_hash` covers only the
+plan file — the proof of what config was live is
+`analytics.full_config_snapshot`, stamped on every run row
+(`orchestrator.py`). The read session's first act per experiment: pull one
+run row and confirm the snapshot shows that config's values. A mismatch
+voids the experiment — rerun, do not reinterpret.
+
+**Pre-registered read (decided now, before the data exists).** Through
+M39's sections (+ M41's if merged). Per experiment (4 learned arms):
+
+1. Per-cluster final-session winner + trained? flag, and the per-session
+   winner table (cfgA prediction: later, less extreme convergence; cfgB
+   prediction: trained spoke appears as winner in earlier sessions).
+2. Trained-subset final-session Δ vs. own static control (raw, with the pin
+   caveat; pin-adjusted if M41 is merged before the read).
+3. Seed-share s0/s4 and up-rate trajectory (config side-effects on the
+   environment drift — cfgB especially, since a 5-MU retrieved set changes
+   what the agent sees every turn).
+4. §5.8 context pressure (cfgB).
+5. Quasi-paired: at matched seed, winner identity vs. the Round 1 baseline
+   replicate.
+
+And the pre-registered decision rules, against Round 1's floor
+(alignment 2/12 ≈ 0.17/slot; trained-subset final Δ envelope
+[−0.46, −0.12]):
+
+- **Alignment per config (8 final-session cluster-slots across its 2
+  replicates): ≥ 4/8 = clear positive signal; 3/8 = suggestive — extend
+  that config with a third replicate before concluding; ≤ 2/8 = null.**
+- Trained-subset Δ: a config claims movement only outside the Round 1
+  envelope; inside it is noise regardless of sign.
+- cfgA's "too slow" signature (see above) is a finding, not a failure —
+  it redirects Round 3 rather than closing the direction.
+
+**Sequencing with M41.** M41 (pin-adjusted trained-subset Δ — restrict the
+M39 pin-exclusion to the trained subset in `control_shadow.py`, both raw and
+adjusted always rendered side by side per the M34 rule) is recommended
+**before the exp01 read session** but does not block the runs: reports
+regenerate retroactively from stored data (M33–35 precedent). Static pins
+landed on trained probes in every Round 1 replicate (vs_a1 3/3, vs_c1 2/3),
+so exp01's primary comparison number inherits a structural negative bias
+until M41 exists — hand-computable from the per-probe rows, but doing that
+across 4 experiments × 2 controls is exactly the error surface M41 removes.
+
+**Out of scope:** any judge/bank/fixture change, any third knob, any
+harness/backend code change (including RunPlan hyperparameter overrides —
+worth considering as a milestone if config rounds continue past Round 3,
+but two hand-switched queues do not justify it yet), `random_weight`
+(re-attach only to confirm a surprising positive, per M40).
+
+**Estimate:** two overnight queue runs (one per config) + one read/analysis
+session.
+
+---
+
 ## Status
 
 ```

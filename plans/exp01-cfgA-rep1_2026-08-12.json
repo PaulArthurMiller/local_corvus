@@ -1,0 +1,43 @@
+{
+  "plan_id": "exp01-cfgA-rep1-2026-08-12",
+  "plan_name": "Experiment Round 2 (exp01) config A replicate 1 — slow-evidence seed priors. Identical to the Round 1 baseline replicates (same bank, fixture, shape, trained_spokes, judge, conditions) except plan_id/plan_name. REQUIRES config.yaml state: edge_update.seed_prior_alpha: 3.0 and edge_update.seed_prior_beta: 3.0 (baseline 1.0/1.0), all else baseline — RunPlan cannot express hyperparameters, so the config lives in config.yaml per the M42 protocol (BUILD-PLAN.md); analytics.full_config_snapshot on every run row is the provenance record. random_seed 20260809 deliberately reuses Round 1 rep2's seed for a quasi-paired winner-identity comparison at matched turn/probe sequence. Question under test: does 3x seed-edge prior mass keep Thompson exploration alive long enough for the trained spoke's consistent correct-answer signal to beat early stochastic feedback (Round 1 baseline alignment: 2/12 cluster-slots).",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 5,
+  "turns_per_series": 70,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
+  "difficulty": {
+    "hop_distance_levels": [0, 1]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": ["learned", "static_weight"],
+  "condition_order": ["learned", "static_weight"],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": 25.0,
+  "prompt_gen": {
+    "model": "claude-sonnet-5",
+    "max_retries": 2
+  },
+  "dry_run": false,
+  "dry_run_n": 2,
+  "random_seed": 20260809,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
+}

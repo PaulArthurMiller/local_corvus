@@ -36,7 +36,12 @@ from harness.client import (
     BackendTurnError,
     ReportGenerationError,
 )
-from harness.config_assert import find_config_mismatches, format_config_mismatches
+from harness.config_assert import (
+    find_config_mismatches,
+    find_dotted_key_collisions,
+    format_config_mismatches,
+    format_dotted_key_collisions,
+)
 from harness.cost import (
     JUDGE_COST_PER_CALL_USD,
     BudgetExceededError,
@@ -892,14 +897,27 @@ def check_and_record_effective_config(
             f"connectivity during effective-config check for condition={condition}: {exc}"
         ) from exc
 
+    live_config = effective.get("config") or {}
     manifest.runtime_config_hash = effective.get("runtime_config_hash")
-    manifest.resolved_config_snapshot = effective.get("config")
+    manifest.resolved_config_snapshot = live_config
     save_manifest(manifest, run_base_dir)
+
+    # M43 open question, now closed: a live-config key containing a literal
+    # "." makes every dotted path in this plan ambiguous. Checked against
+    # the live config (not a static assumption about config.yaml's shape)
+    # on the call we already make, and only for a plan that actually uses
+    # dotted paths — a plan with neither field is unaffected.
+    if plan.expected_config or plan.config_overrides:
+        collisions = find_dotted_key_collisions(live_config)
+        if collisions:
+            raise HardStopError(
+                f"{format_dotted_key_collisions(collisions)} (condition={condition})"
+            )
 
     if not plan.expected_config:
         return
 
-    mismatches = find_config_mismatches(plan.expected_config, effective.get("config") or {})
+    mismatches = find_config_mismatches(plan.expected_config, live_config)
     if mismatches:
         raise HardStopError(
             f"{format_config_mismatches(mismatches)} (condition={condition}) — "
@@ -1135,6 +1153,28 @@ def execute_run(
                 f"probe battery required: the resolved sequence contains probe "
                 f"turns but no probe set was loaded (probe_set_version="
                 f"{plan.probe_set_version!r})"
+            )
+            raise HardStopError(error_summary)
+
+        # M43 Phase 2 — config_overrides is delivered ONLY by the
+        # per-condition docker restart below (as CONFIG_OVERRIDES_JSON), so
+        # docker_project_root=None (--no-docker-restart) means the plan's
+        # overrides silently never reach the backend. Unconditional hard
+        # stop, same class as the probe-battery check above and for the same
+        # reason: a plan that declares config_overrides and no
+        # expected_config would otherwise run to completion against the
+        # un-overridden config.yaml with nothing to detect it — the exact
+        # silent-wrong-config failure this milestone exists to eliminate.
+        # (A plan that also declares expected_config would be caught by the
+        # per-condition assertion, but relying on that would make the
+        # supply-without-asserting case schema.py explicitly allows unsafe.)
+        if plan.config_overrides and docker_project_root is None:
+            error_summary = (
+                f"plan declares config_overrides ({sorted(plan.config_overrides)}) but the "
+                f"backend restart is disabled (--no-docker-restart / docker_project_root=None) "
+                f"— overrides ride the per-condition restart as CONFIG_OVERRIDES_JSON, so they "
+                f"would never reach the backend and the run would silently use config.yaml's "
+                f"committed values"
             )
             raise HardStopError(error_summary)
 

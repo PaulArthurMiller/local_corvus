@@ -2306,3 +2306,90 @@ def test_config_overrides_threaded_into_restart_env_as_json(tmp_path):
     assert json.loads(restart_calls[0]["CONFIG_OVERRIDES_JSON"]) == {
         "edge_update.seed_prior_alpha": 3.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# M43 follow-up (review) — config_overrides requires the docker restart, and
+# a live config with a literal-dot key breaks the dotted-path scheme
+# ---------------------------------------------------------------------------
+
+def test_config_overrides_without_docker_restart_hard_stops(tmp_path):
+    """config_overrides ride the per-condition restart, so --no-docker-restart
+    (docker_project_root=None) would deliver none of them. Must hard-stop
+    rather than silently run against config.yaml's committed values — the
+    plan may declare overrides with no expected_config to catch it."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        config_overrides={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "config_overrides" in outcome.error_summary
+    assert "no-docker-restart" in outcome.error_summary
+    # Hard stop lands before any graph mutation, like every other
+    # unconditional preflight in this class.
+    assert client.wipe_calls == []
+
+
+def test_config_overrides_with_docker_restart_enabled_runs(tmp_path):
+    """The same plan is fine the moment restarts are enabled — the guard is
+    about delivery, not about overrides being suspect."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        config_overrides={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient()
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        docker_project_root=Path("/fake/project"),
+        restart_backend_fn=lambda root, env: None,
+    )
+
+    assert outcome.status == "complete"
+
+
+def test_no_config_overrides_still_runs_without_docker_restart(tmp_path):
+    """Every pre-M43 plan (config_overrides={}) is unaffected by the guard."""
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+
+
+def test_live_config_with_a_literal_dot_key_hard_stops(tmp_path):
+    """A live config key containing "." makes every dotted path ambiguous —
+    hard-stop instead of silently resolving the wrong leaf."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update.seed_prior_alpha": 3.0},  # flat key, not nested
+        "runtime_config_hash": "h-dotted",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "literal '.'" in outcome.error_summary
+    assert client.wipe_calls == []
+
+
+def test_dotted_key_collision_ignored_for_a_plan_using_neither_field(tmp_path):
+    """A plan with no dotted paths has nothing to be ambiguous about — the
+    collision check must not fail runs that predate M43."""
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update.seed_prior_alpha": 3.0},
+        "runtime_config_hash": "h-dotted",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"

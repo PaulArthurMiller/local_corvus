@@ -3,10 +3,17 @@ GET /admin/effective-config comparison (M43 Phase 1)."""
 
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 
-from harness.config_assert import find_config_mismatches, format_config_mismatches, get_dotted
+from harness.config_assert import (
+    find_config_mismatches,
+    find_dotted_key_collisions,
+    format_config_mismatches,
+    format_dotted_key_collisions,
+    get_dotted,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -91,3 +98,45 @@ def test_format_config_mismatches_joins_with_semicolons():
     assert "a: expected=1 actual=2" in formatted
     assert "b: expected=3 actual=4" in formatted
     assert "expected_config mismatch" in formatted
+
+
+# ---------------------------------------------------------------------------
+# M43 open question, now closed — dotted-key collision detection
+# ---------------------------------------------------------------------------
+
+def test_no_collisions_in_a_normal_nested_config():
+    config = {"edge_update": {"seed_prior_alpha": 3.0}, "reporting": {"thresholds": {"a": 1}}}
+    assert find_dotted_key_collisions(config) == []
+
+
+def test_top_level_key_containing_a_literal_dot_is_reported():
+    config = {"edge_update.seed_prior_alpha": 3.0, "model": {"name": "gemma4:e4b"}}
+    assert find_dotted_key_collisions(config) == ["edge_update.seed_prior_alpha"]
+
+
+def test_nested_key_containing_a_literal_dot_reports_its_full_path():
+    config = {"reporting": {"pass_rank.thresholds": {"spoke_retrieval": 4}}}
+    assert find_dotted_key_collisions(config) == ["reporting.pass_rank.thresholds"]
+
+
+def test_multiple_collisions_all_reported():
+    config = {"a.b": 1, "c": {"d.e": 2}}
+    assert sorted(find_dotted_key_collisions(config)) == ["a.b", "c.d.e"]
+
+
+def test_real_config_yaml_has_no_dotted_keys():
+    """The premise the whole dotted-path scheme rests on, asserted against
+    the committed config.yaml rather than assumed — if someone ever adds a
+    key with a dot in it, this fails here instead of silently resolving the
+    wrong leaf at run time."""
+    import yaml
+    config_path = Path(__file__).resolve().parents[2] / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert find_dotted_key_collisions(config) == []
+
+
+def test_format_dotted_key_collisions_names_every_offender():
+    formatted = format_dotted_key_collisions(["a.b", "c.d.e"])
+    assert "'a.b'" in formatted
+    assert "'c.d.e'" in formatted
+    assert "literal '.'" in formatted

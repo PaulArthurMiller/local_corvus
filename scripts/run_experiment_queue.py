@@ -103,6 +103,9 @@ def main() -> None:
                 resolution = run_preflight(
                     queue_file, Path(args.queue), client, judge_client,
                     SEED_FIXTURES_DIR, PROMPT_BANKS_DIR, PROJECT_ROOT,
+                    # M43 — an override-carrying plan is unrunnable with
+                    # restarts disabled; preflight says so at minute zero.
+                    docker_restart_enabled=docker_project_root is not None,
                 )
             except QueuePreflightError as exc:
                 print(f"ERROR: preflight failed: {exc}")
@@ -155,6 +158,9 @@ def main() -> None:
                 resolution = run_preflight(
                     queue_file, Path(args.queue), client, judge_client,
                     SEED_FIXTURES_DIR, PROMPT_BANKS_DIR, PROJECT_ROOT,
+                    # M43 — an override-carrying plan is unrunnable with
+                    # restarts disabled; preflight says so at minute zero.
+                    docker_restart_enabled=docker_project_root is not None,
                 )
             except QueuePreflightError as exc:
                 print(f"ERROR: preflight failed: {exc}")

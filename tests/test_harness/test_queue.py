@@ -661,3 +661,84 @@ def test_preflight_effective_config_connectivity_failure_hard_stops(tmp_path):
 
     with pytest.raises(QueuePreflightError, match="effective-config"):
         run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# M43 follow-up (review) — snapshot provenance, restart-required guard,
+# dotted-key collision
+# ---------------------------------------------------------------------------
+
+def test_preflight_records_resolved_config_snapshot_per_plan(tmp_path):
+    """BUILD-PLAN M43 Phase 1 step 5 asks for the hash *and* the snapshot in
+    the queue manifest, so the launch directory alone answers "what was the
+    backend running when this queue resolved?"."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(tmp_path / "planA.json", prompt_bank_path=str(bank_path))
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    live = {"edge_update": {"seed_prior_alpha": 1.0}, "model": {"name": "gemma4:e4b"}}
+    client = FakeBackendClient(effective_config_response={
+        "config": live, "runtime_config_hash": "h-snap",
+    })
+    judge = FakeJudgeClient()
+
+    resolution = run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+
+    assert resolution.manifest.plans[0].resolved_config_snapshot == live
+
+
+def test_preflight_hard_stops_when_overrides_present_but_restarts_disabled(tmp_path):
+    """config_overrides are delivered only by the per-condition restart, so a
+    queue containing an override-carrying plan is unrunnable with
+    --no-docker-restart. Fails at minute zero, not hours in."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", prompt_bank_path=str(bank_path),
+        config_overrides={"edge_update.seed_prior_alpha": 3.0},
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient()
+    judge = FakeJudgeClient()
+
+    with pytest.raises(QueuePreflightError, match="no-docker-restart"):
+        run_preflight(
+            qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path,
+            docker_restart_enabled=False,
+        )
+    # Fails before the backend is even consulted for its config.
+    assert client.effective_config_calls == 0
+
+
+def test_preflight_allows_disabled_restarts_when_no_plan_has_overrides(tmp_path):
+    """--no-docker-restart stays legal for every pre-M43 plan."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(tmp_path / "planA.json", prompt_bank_path=str(bank_path))
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient()
+    judge = FakeJudgeClient()
+
+    resolution = run_preflight(
+        qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path,
+        docker_restart_enabled=False,
+    )
+    assert resolution.manifest.plans[0].status == MANIFEST_STATUS_RESOLVED
+
+
+def test_preflight_hard_stops_on_live_config_key_containing_a_dot(tmp_path):
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", prompt_bank_path=str(bank_path),
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update.seed_prior_alpha": 3.0},  # flat key, not nested
+        "runtime_config_hash": "h-dotted",
+    })
+    judge = FakeJudgeClient()
+
+    with pytest.raises(QueuePreflightError, match="literal"):
+        run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)

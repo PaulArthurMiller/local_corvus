@@ -26,7 +26,12 @@ from typing import Callable, Optional
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from harness.client import BackendConnectivityError
-from harness.config_assert import find_config_mismatches, format_config_mismatches
+from harness.config_assert import (
+    find_config_mismatches,
+    find_dotted_key_collisions,
+    format_config_mismatches,
+    format_dotted_key_collisions,
+)
 from harness.cost import JUDGE_COST_PER_CALL_USD, estimate_prerun_cost
 from harness.manifest import compute_config_hash, compute_run_id, now_iso
 from harness.prompt_bank import bank_path_for_hash, compute_bank_hash, load_bank
@@ -149,6 +154,14 @@ class QueuePlanManifestEntry(BaseModel):
     # a plan with config_overrides doesn't get its expected_config enforced
     # here). None for a disabled plan, or if preflight never reached step 5.
     runtime_config_hash: Optional[str] = None
+    # The full resolved config behind that hash, recorded per plan so the
+    # queue manifest alone answers "what was the backend actually running
+    # when this queue was resolved?" without opening each plan's own run
+    # manifest. Same value for every plan in one launch (there is exactly
+    # one live backend at preflight time) — stored per entry anyway so an
+    # entry stays self-describing if a future preflight ever resolves plans
+    # against different backends.
+    resolved_config_snapshot: Optional[dict] = None
 
 
 class QueueManifest(BaseModel):
@@ -361,6 +374,7 @@ def run_preflight(
     print_fn: Callable[[str], None] = print,
     disk_usage_fn: Callable[[str], "shutil._ntuple_diskusage"] = shutil.disk_usage,
     judge_cost_per_call: float = JUDGE_COST_PER_CALL_USD,
+    docker_restart_enabled: bool = True,
 ) -> PreflightResolution:
     """
     Run the full 7-step preflight protocol. Raises QueuePreflightError on
@@ -369,6 +383,13 @@ def run_preflight(
     (M43); `judge_client` needs .model_available(model). Both are
     duck-typed exactly like execute_run()'s own injected dependencies, so
     tests can pass fakes.
+
+    docker_restart_enabled mirrors the invoking CLI's --no-docker-restart
+    flag (M43): config_overrides can only be delivered by the per-condition
+    backend restart, so a queue containing an override-carrying plan is
+    unrunnable with restarts disabled and must fail at minute zero rather
+    than hours in. Defaults True — the normal invocation, and what every
+    pre-M43 test call site assumes.
 
     judge_cost_per_call defaults to $0 (today's local Ollama judge) —
     injectable, same pattern as execute_run()'s own parameter, so a test
@@ -418,6 +439,27 @@ def run_preflight(
     except BackendConnectivityError as exc:
         raise QueuePreflightError(f"backend health check failed: {exc}") from exc
 
+    # M43 Phase 2 — a plan's config_overrides ride the per-condition backend
+    # restart, so --no-docker-restart makes an override-carrying plan
+    # unrunnable as declared. Caught here at minute zero (the queue layer's
+    # whole reason for existing) rather than when execute_run() reaches that
+    # plan hours into an overnight queue; runner.py carries the same guard
+    # for the single-plan CLI. Ahead of the effective-config call below
+    # because it needs no backend at all — a contradiction between the plan
+    # and this invocation's own flags, not between the plan and the backend.
+    if not docker_restart_enabled:
+        override_plans = [
+            item["entry"].plan_path for item in loaded if item["plan"].config_overrides
+        ]
+        if override_plans:
+            raise QueuePreflightError(
+                f"{len(override_plans)} plan(s) declare config_overrides but the backend "
+                f"restart is disabled (--no-docker-restart): {override_plans} — overrides "
+                f"ride the per-condition restart as CONFIG_OVERRIDES_JSON, so they would "
+                f"never reach the backend and those plans would silently run against "
+                f"config.yaml's committed values"
+            )
+
     # M43 Phase 1 — one GET /admin/effective-config call, shared by every
     # loaded plan (there is exactly one live backend at preflight time,
     # before any plan's own execute_run() has restarted it for its own
@@ -439,8 +481,17 @@ def run_preflight(
     runtime_config_hash = effective.get("runtime_config_hash")
     live_config = effective.get("config") or {}
 
+    # M43 open question, now closed — a live-config key with a literal "."
+    # in its name makes every dotted path ambiguous. Checked once per
+    # preflight, and only when some plan actually uses dotted paths.
+    if any(item["plan"].expected_config or item["plan"].config_overrides for item in loaded):
+        collisions = find_dotted_key_collisions(live_config)
+        if collisions:
+            raise QueuePreflightError(format_dotted_key_collisions(collisions))
+
     for item in loaded:
         item["runtime_config_hash"] = runtime_config_hash
+        item["resolved_config_snapshot"] = live_config
         plan = item["plan"]
         if plan.expected_config and not plan.config_overrides:
             mismatches = find_config_mismatches(plan.expected_config, live_config)
@@ -514,6 +565,7 @@ def run_preflight(
             plan_id=plan.plan_id, config_hash=final_hash, expected_run_id=expected_run_id,
             bank_path=plan.prompt_bank_path, conditions=plan.condition_order,
             runtime_config_hash=item.get("runtime_config_hash"),
+            resolved_config_snapshot=item.get("resolved_config_snapshot"),
         )
         checkpoint_by_path[plan_path_label] = QueuePlanCheckpointEntry(
             plan_path=plan_path_label, plan_id=plan.plan_id, config_hash=final_hash,

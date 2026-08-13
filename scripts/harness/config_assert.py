@@ -61,3 +61,40 @@ def format_config_mismatches(mismatches: list[str]) -> str:
     """Render find_config_mismatches()'s output as one hard-stop message."""
     detail = "; ".join(mismatches)
     return f"expected_config mismatch — {detail}"
+
+
+def find_dotted_key_collisions(live_config: dict, _prefix: str = "") -> list[str]:
+    """
+    Return the dotted paths of any live-config key that contains a literal
+    "." in its own name — the one input that breaks the dotted-path scheme
+    silently.
+
+    BUILD-PLAN.md Milestone 43 flagged this as an open question: no
+    config.yaml key contains a dot today (57 leaves, verified 2026-08-13),
+    but if one is ever added, "a.b" becomes ambiguous between the nested
+    path a→b and the flat key "a.b", and both expected_config and
+    config_overrides would silently resolve the wrong one. Cheap to assert,
+    impossible to debug from the symptom — so runner.py and queue.py both
+    check it against the *live* config on the same call they already make,
+    rather than assuming config.yaml never changes shape.
+
+    Returns the offending paths (empty list = the scheme is unambiguous).
+    """
+    offenders: list[str] = []
+    for key, value in live_config.items():
+        path = f"{_prefix}{key}"
+        if "." in str(key):
+            offenders.append(path)
+        if isinstance(value, dict):
+            offenders.extend(find_dotted_key_collisions(value, f"{path}."))
+    return offenders
+
+
+def format_dotted_key_collisions(offenders: list[str]) -> str:
+    """Render find_dotted_key_collisions()'s output as one hard-stop message."""
+    detail = ", ".join(repr(o) for o in offenders)
+    return (
+        f"config.yaml contains {len(offenders)} key(s) with a literal '.' in the "
+        f"key name ({detail}) — this makes every dotted expected_config/"
+        f"config_overrides path ambiguous. Rename the key(s) before running."
+    )

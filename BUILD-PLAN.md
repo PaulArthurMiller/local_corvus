@@ -6187,6 +6187,288 @@ session.
 
 ---
 
+## Plan-Declared Config State — Milestone 43
+
+**Status:** Planned 2026-08-13 (/planner, no code). Two phases; both land
+before exp01 runs (Paul's sequencing decision — see "Why now" below).
+
+### The defect
+
+`RunPlan` has no hyperparameter fields, so a config sweep's knobs live in
+`config.yaml` and are switched by hand between runs (the M42 config-switch
+protocol). Nothing in the harness reads `config.yaml`. Therefore:
+
+**A forgotten config edit produces a clean run.** The plan validates, the
+queue preflight passes, all turns execute, reports generate, and every
+§6.2/§6.3 integrity and sanity check passes — while the run is silently a
+replicate of the *previous* config. `compute_config_hash()` covers the plan
+file only, and exp01's cfgA and cfgB plans are byte-identical except
+`plan_id`/`plan_name`, so every identity the harness computes is blind to
+which config was live.
+
+The failure is invisible until the read session, by which point the night is
+spent. This is not hypothetical bookkeeping: exp01 is exactly two
+hand-switched configs whose plans differ in nothing the harness checks.
+
+### Why now, when M42 explicitly declined it
+
+M42's non-goals say: *"including RunPlan hyperparameter overrides — worth
+considering as a milestone if config rounds continue past Round 3, but two
+hand-switched queues do not justify it yet."* That judgment was made on
+**cost of repetition** — two manual switches are cheap, so automating them
+does not pay.
+
+The answer flips on information M42 did not have: the cost that matters is
+not the switching, it is that **a mistake is undetectable before it has
+already wasted the run**. One silent failure costs a full overnight queue
+(~5 h) plus a read session spent analyzing a config that was never live. The
+milestone is justified by the missing *check*, not by the missing automation
+— which is why Phase 1 is the assertion and ships first, and why it would be
+worth building even if Phase 2 never followed.
+
+It is also inconsistent with the queue layer's own stated non-goal — *"a
+wrong plan fails preflight and a human fixes it."* A wrong plan does. A wrong
+`config.yaml` does not. Phase 1 closes that asymmetry.
+
+### Architecture
+
+```
+PHASE 1 — assert                     PHASE 2 — apply
+────────────────                     ───────────────
+plan.expected_config                 plan.config_overrides
+  {"edge_update.seed_prior_alpha": 3.0}
+        │                                    │
+        ▼                                    ▼
+  preflight reads                    docker_lifecycle merges
+  GET /admin/effective-config        CONFIG_OVERRIDES_JSON into the
+        │                            per-condition restart it ALREADY does
+        ▼                                    │
+  mismatch → hard stop,                      ▼
+  naming key / expected / actual      orchestrator deep-merges over
+        │                             _CONFIG at import (env → config
+        │                             → default, the existing precedent)
+        │                                    │
+        └──────────────► Phase 1's check still runs, and now verifies
+                         Phase 2's injection actually took effect
+```
+
+Phase 2 does not replace Phase 1 — it feeds it. The assertion becomes the
+proof that injection worked, which is the main reason to build the check
+first.
+
+### ⚠ The trap that shapes Phase 1: `/admin/config` reads from disk
+
+`GET /admin/config` exists already (`admin.py:250`) and is the obvious thing
+for preflight to call. **It would certify the exact bug it exists to
+prevent.**
+
+```
+     HOST                          CONTAINER
+  config.yaml ──bind mount──▶ /app/config.yaml
+       │                            │
+       │                  ┌─────────┴──────────┐
+       │        orchestrator._CONFIG      GET /admin/config
+       │        (read ONCE at import,     (re-opens the file on
+       │         orchestrator.py:54)       every request, admin.py:254)
+       ▼                  ▼                     ▼
+   you edit it  ═══▶  STALE values         FRESH values
+                      ↑                            ↑
+                 what the run runs on      what a naive check sees
+```
+
+Edit `config.yaml`, skip the restart, and `/admin/config` returns the new
+values while every turn executes on the old ones — check green, run wrong.
+
+**Phase 1 therefore requires a new endpoint reporting what the orchestrator
+*resolved*, not what is on disk.** `GET /admin/effective-config`, additive;
+`/admin/config` is left alone because the Admin UI reads it as the editable
+registry and that is a different job.
+
+Note the provenance layer is already correct: `full_config_snapshot=_CONFIG`
+(`orchestrator.py:656`) records the resolved config, and coverage is
+**100% — 2,300+ analytics rows across every experiment back to
+2026-07-03, zero empty snapshots** (verified 2026-08-13). Snapshots diff
+cleanly (exp0-a vs exp0b-rep3 → 0 differing leaves across all 57 config
+leaves, the correct answer for a same-config re-baseline). The gap is
+strictly *pre-run*, not historical.
+
+### Naming: two unrelated things are called `config_hash`
+
+| Where | Hashes | Used for |
+|---|---|---|
+| `orchestrator.py:67` `_CONFIG_HASH` | the whole live `config.yaml` | stamped on every run row |
+| `harness/manifest.py` `compute_config_hash()` | the `RunPlan` | `run_id`, duplicate detection, resume |
+
+They are unrelated. This milestone refers to them as **`runtime_config_hash`**
+(backend) and **`plan_config_hash`** (harness) in prose. **Do not rename
+either field** — both are persisted in the DB and in manifests; this is a
+documentation convention only.
+
+### Phase 1 — the assertion check
+
+**Scope decision (Paul, 2026-08-13):** declared keys hard-stop, *plus*
+record the backend's `runtime_config_hash` and full resolved snapshot into
+the run/queue manifest. Rejected: an exhaustive curated key list. Reasons —
+(a) historical comparability is already solved by `full_config_snapshot`, so
+exhaustive declaration would re-record in a second place what the run rows
+already hold authoritatively; (b) "exhaustive over `config.yaml`" is wrong
+scope, since `model.ollama_host` legitimately differs host-vs-container and
+`experiment.experiment_id`/`condition_label` are overridden per-condition by
+the harness's own env stamping — so it would mean a curated subset, a new
+artifact to maintain; (c) every new `config.yaml` key would then either
+invalidate every existing plan or make it silently under-specify while
+*looking* exhaustive, which is worse than declaring three keys and knowing
+you declared three. Phase 2 closes the residual gap by supply rather than
+assertion.
+
+1. **`backend/api/admin.py` — `GET /admin/effective-config`.** Returns the
+   orchestrator's resolved state: `{config: _CONFIG, runtime_config_hash:
+   _CONFIG_HASH, resolved_env: {EXPERIMENT_ID, RUN_CONDITION,
+   CONDITION_LABEL, USE_SESSION_CONTEXT}}`. Import `_CONFIG`/`_CONFIG_HASH`
+   from `core.orchestrator` — do **not** re-read the file, which is the
+   whole point. `/admin/config` unchanged.
+
+2. **`scripts/harness/schema.py` — `RunPlan.expected_config`.**
+   `dict[str, Any]`, default `{}` (every existing plan unaffected). Keys are
+   dotted paths into `config.yaml` (`"edge_update.seed_prior_alpha"`);
+   values are the expected leaf values. Shape-validated only — schema.py
+   cannot know which keys exist without importing backend modules, matching
+   the existing `seed_fixture_version`/`trained_spokes` convention where a
+   bad value fails loudly at runtime, not at schema-validation time.
+
+3. **`scripts/harness/client.py`** — `effective_config()` client method.
+
+4. **`scripts/harness/runner.py`** — new preflight step, ordered **after**
+   backend health (needs a live backend) and **before** any wipe/seed (must
+   not mutate on a config mismatch). Hard stop listing every mismatching
+   key as `key: expected=X actual=Y`; a declared key absent from the live
+   config is a mismatch, not a skip. Unconditional — not overridable via
+   `error_policy`, joining budget/probe-battery/judge-model/docker-restart.
+
+5. **`scripts/harness/queue.py`** — same check per plan inside
+   `run_preflight()`, at step 5 alongside health and judge availability, so
+   a bad plan-3 fails at minute zero. Record `runtime_config_hash` +
+   snapshot per plan in the queue manifest.
+
+6. **`scripts/harness/manifest.py`** — record `runtime_config_hash` and the
+   full resolved snapshot in the run manifest at resolution time.
+
+7. **The four exp01 plans** get `expected_config` populated from their
+   `plan_name` prose (cfgA: `edge_update.seed_prior_alpha`/`_beta` = 3.0;
+   cfgB: `hyperparameters.retrieval_level2_top_k` = 2 **and**
+   `reporting.pass_rank_thresholds.spoke_retrieval` = 5). Free — they have
+   not run, so the `plan_config_hash`/`run_id` change costs nothing.
+   **Do not retrofit already-run plans** (exp0b, Round 1 replicates):
+   changing their hash orphans their existing `harness_runs/` directories.
+
+**⚠ `expected_config` participates in `plan_config_hash`.** This is
+deliberate — it is the fix for the root cause — but it means adding the
+field to a plan changes its `run_id`. Correct behavior (a plan that declares
+its config *is* a different plan), and the reason step 7 is scoped to
+not-yet-run plans only.
+
+**Done when:** a plan whose `expected_config` disagrees with the live
+backend hard-stops before any graph mutation, naming every mismatching key;
+the same plan passes after the config is corrected and the backend
+restarted; a plan with no `expected_config` behaves exactly as today; and
+an edit-without-restart is caught (the specific case `/admin/config` would
+have missed — assert against a backend whose file was edited but not
+restarted, and confirm the check fails).
+
+### Phase 2 — env-override automation
+
+**Never mutate `config.yaml`.** It is git-tracked, human-edited, and
+bind-mounted; a harness that writes it must also revert reliably on crash or
+abort, and M42's step 7 ("never leave a config experiment's values as the
+working state") is exactly that rollback hazard — a crash mid-queue would
+leave the working tree dirty with experiment values.
+
+Instead, extend the existing env→config→default resolution. Direct
+precedent: `_resolve_experiment_id()`, `USE_SESSION_CONTEXT`, and
+`_resolve_run_condition()` all already do this, and M9 solved the *identical*
+"avoid config.yaml edits between runs" problem for `condition_label` this
+exact way (see the M9 open question at line ~1305).
+
+1. **`RunPlan.config_overrides`** — `dict[str, Any]`, default `{}`, same
+   dotted-key shape as `expected_config`. **Per-plan, not per-queue**
+   (Paul, 2026-08-13): the plan is already the unit of identity, so
+   per-plan overrides put config inside `plan_config_hash` — which is the
+   root cause fix. Per-queue would leave config outside the hash and
+   recreate the same "which state was in force?" ambiguity one level up.
+   Replicates repeating the same block is a feature: each plan file is a
+   self-contained, independently re-runnable, machine-writable record.
+
+2. **`docker-compose.yml`** — one new line:
+   `CONFIG_OVERRIDES_JSON=${CONFIG_OVERRIDES_JSON:-}`. A single JSON blob,
+   **not one entry per knob**: compose needs a static `${VAR:-}` line per
+   variable, so per-knob entries would mean editing compose every time a new
+   hyperparameter becomes sweepable.
+
+3. **`backend/core/orchestrator.py`** — parse `CONFIG_OVERRIDES_JSON` and
+   deep-merge over `_CONFIG` **before** `_CONFIG_HASH`,
+   `validate_edge_update_config()`, and every derived module constant, so
+   the hash and the validation both describe the effective config. Malformed
+   JSON or an unknown dotted key is a hard fail at import (before any run
+   state exists), matching `validate_edge_update_config()`'s existing
+   posture. `full_config_snapshot` then records the merged result — no
+   change needed at the write site, which is the point.
+
+4. **`scripts/harness/docker_lifecycle.py`** — add `CONFIG_OVERRIDES_JSON`
+   to the `env_overrides` dict already passed per condition. No structural
+   change; the mechanism exists.
+
+5. **`GET /admin/effective-config`** extends to report, per key, whether the
+   value was **supplied** (override) or **inherited** (config.yaml file) —
+   this is what lets a Karpathy-loop-written plan know which knobs it owns.
+
+6. **Cross-config queueing becomes legal** (Paul, 2026-08-13). Once each
+   plan carries its own overrides, one queue may span configs. `queue.py`'s
+   duplicate-`config_hash` detection keeps working unchanged and gets
+   *stronger*, since overrides now participate in the hash. Update the
+   M26 preflight docs and `docs/harness_usage.md` §7, which currently
+   states the one-queue-one-config rule as absolute — after Phase 2 it is
+   conditional on plans carrying their own config.
+
+**Done when:** a plan with `config_overrides` runs end-to-end with
+`config.yaml` untouched (`git status` clean throughout); `full_config_snapshot`
+on the resulting run rows shows the overridden values; Phase 1's assertion
+passes against the injected config without the operator touching anything;
+a single queue successfully runs two plans with *different* overrides,
+each restart carrying its own; and a malformed override fails at container
+start, not mid-run.
+
+### Risks and open questions
+
+- ⚠ **Import-time merge ordering is the whole correctness surface of Phase
+  2.** `_CONFIG_HASH`, `EDGE_UPDATE_CFG`, `_HP`, `_MODEL_CFG`,
+  `INITIAL_EDGE_WEIGHT` and the module constants derived from them are all
+  bound at import. The merge must precede every one of them. A test that
+  asserts `_CONFIG_HASH` differs between an overridden and non-overridden
+  boot is the cheapest guard.
+- ⚠ **`memory/extractor.py` loads config independently** (`_CONFIG =
+  _load_config()` at line 53) and would not see the merge. Phase 2 must
+  either route it through the same merged loader or hard-fail if it detects
+  overrides it did not apply. Silent divergence between two modules' views
+  of the config is exactly the class of bug this milestone exists to kill.
+- ⚠ **`decay.enabled: true` is hard-rejected** by
+  `validate_edge_update_config()`. An override that sets it must fail the
+  same way — verify the merge does not route around the validator.
+- ? **Should `expected_config` be auto-derivable from `config_overrides`?**
+  After Phase 2 a plan that supplies a key does not need to assert it.
+  Tempting to auto-populate, but it makes the two fields' relationship
+  implicit. Resolve during the Phase 2 build; default to keeping them
+  independent.
+- ? **Dotted-key collision with YAML keys containing dots.** None exist in
+  `config.yaml` today (verified 2026-08-13, 57 leaves). If one is ever
+  added, the dotted-path scheme breaks silently — worth a preflight
+  assertion that no config key contains a literal dot.
+
+**Estimate:** Phase 1 one session; Phase 2 one to two (the backend
+resolution path and `extractor.py` reconciliation are the real work). Both
+before exp01.
+
+---
+
 ## Status
 
 ```

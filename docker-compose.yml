@@ -19,6 +19,7 @@ services:
       - USE_SESSION_CONTEXT=${USE_SESSION_CONTEXT:-}
       - EXPERIMENT_ID=${EXPERIMENT_ID:-}
       - RUN_CONDITION=${RUN_CONDITION:-}
+      - CONFIG_OVERRIDES_JSON=${CONFIG_OVERRIDES_JSON:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

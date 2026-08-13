@@ -12,7 +12,7 @@ into a human-readable, field-by-field message for CLI output.
 """
 
 import re
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -191,6 +191,38 @@ class RunPlan(BaseModel):
             "cluster_d": "d_spoke1",
         }
     )
+
+    # M43 Phase 1 — declared config-state assertion. Keys are dotted paths
+    # into config.yaml ("edge_update.seed_prior_alpha"); values are the
+    # expected leaf values. Checked against GET /admin/effective-config
+    # before any graph mutation (runner.py preflight, queue.py step 5) —
+    # a mismatch (including a declared key absent from the live config) is
+    # an unconditional hard stop, not subject to error_policy override.
+    # Shape-validated only (dict[str, Any]) — schema.py cannot know which
+    # keys exist in config.yaml without importing backend modules, same
+    # convention as seed_fixture_version/trained_spokes above: a bad value
+    # fails loudly at runtime (a "mismatch" against the live config), not
+    # at schema-validation time. Default {} — every existing plan is
+    # unaffected and behaves exactly as before M43.
+    #
+    # Deliberately kept independent from config_overrides below rather than
+    # auto-derived from it (BUILD-PLAN.md M43 open question, resolved:
+    # "default to keeping them independent") — a plan can assert without
+    # supplying, or supply without asserting.
+    expected_config: dict[str, Any] = Field(default_factory=dict)
+
+    # M43 Phase 2 — per-condition config injection. Same dotted-key shape as
+    # expected_config. Rides the harness's existing per-condition backend
+    # restart (docker_lifecycle.restart_backend) as CONFIG_OVERRIDES_JSON —
+    # never writes config.yaml itself (git-tracked, human-edited,
+    # bind-mounted; a harness that wrote it would also need to revert
+    # reliably on crash/abort). Per-plan, not per-queue: the plan is already
+    # the unit of identity, and config_overrides participates in
+    # plan_config_hash (see compute_config_hash()) exactly like
+    # expected_config does — the root-cause fix this milestone exists to
+    # deliver is that a plan's config state is no longer external to its
+    # own identity. Default {} — every existing plan is unaffected.
+    config_overrides: dict[str, Any] = Field(default_factory=dict)
 
     difficulty: DifficultyConfig = Field(default_factory=DifficultyConfig)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)

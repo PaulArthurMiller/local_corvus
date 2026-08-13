@@ -164,6 +164,23 @@ class BackendClient:
         except httpx.HTTPError as exc:
             raise BackendConnectivityError(f"graph/stats failed: {exc}") from exc
 
+    def effective_config(self) -> dict:
+        """
+        GET /admin/effective-config (M43 Phase 1) — the backend's actually-
+        resolved config (config.yaml merged with any CONFIG_OVERRIDES_JSON),
+        not a re-read of the file. Used by the plan.expected_config
+        preflight assertion in runner.py/queue.py — see BUILD-PLAN.md
+        Milestone 43's "the trap that shapes Phase 1" for why /admin/config
+        (a plain disk re-read) would certify the exact bug this exists to
+        catch.
+        """
+        try:
+            resp = self._client.get("/admin/effective-config")
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as exc:
+            raise BackendConnectivityError(f"effective-config failed: {exc}") from exc
+
     def chat(self, message: str, series_id: Optional[str] = None) -> dict:
         """
         POST one turn to /chat, retrying a *retry-safe* connectivity failure up

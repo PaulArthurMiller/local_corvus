@@ -1,6 +1,6 @@
 {
   "plan_id": "exp01-cfgA-rep2-2026-08-12",
-  "plan_name": "Experiment Round 2 (exp01) config A replicate 2 — slow-evidence seed priors. Identical to exp01-cfgA-rep1-2026-08-12 except random_seed. REQUIRES config.yaml state: edge_update.seed_prior_alpha: 3.0 and edge_update.seed_prior_beta: 3.0 (baseline 1.0/1.0), all else baseline — see the M42 protocol (BUILD-PLAN.md); analytics.full_config_snapshot is the provenance record. random_seed 20260810 deliberately reuses Round 1 rep3's seed for a quasi-paired winner-identity comparison at matched turn/probe sequence (rep3 is the baseline replicate where trained spokes vs_b3/vs_d5 won — does the config preserve or disrupt that under the same turn sequence?).",
+  "plan_name": "Experiment Round 2 (exp01) config A replicate 2 — slow-evidence seed priors. Identical to exp01-cfgA-rep1-2026-08-12 except random_seed. Config state is SUPPLIED BY THIS PLAN, not by config.yaml (M43 Phase 2): config_overrides sets edge_update.seed_prior_alpha: 3.0 and edge_update.seed_prior_beta: 3.0 (baseline 1.0/1.0), all else inherited from config.yaml unchanged. No manual config switch is required, and expected_config asserts the same two keys against the live backend before any graph mutation; analytics.full_config_snapshot is the provenance record. random_seed 20260810 deliberately reuses Round 1 rep3's seed for a quasi-paired winner-identity comparison at matched turn/probe sequence (rep3 is the baseline replicate where trained spokes vs_b3/vs_d5 won — does the config preserve or disrupt that under the same turn sequence?).",
   "conceptual_fields": {
     "count": 4,
     "subjects": "auto"
@@ -12,6 +12,10 @@
   "probe_set_version": "v3",
   "seed_fixture_version": "v3",
   "expected_config": {
+    "edge_update.seed_prior_alpha": 3.0,
+    "edge_update.seed_prior_beta": 3.0
+  },
+  "config_overrides": {
     "edge_update.seed_prior_alpha": 3.0,
     "edge_update.seed_prior_beta": 3.0
   },

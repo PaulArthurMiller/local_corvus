@@ -30,6 +30,8 @@ from typing import Optional
 import httpx
 import yaml
 
+from core.config_overrides import apply_config_overrides, load_config_overrides_from_env
+
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = os.getenv(
@@ -51,6 +53,15 @@ def _load_config() -> dict:
 
 
 _CONFIG = _load_config()
+# M43 Phase 2 — extractor.py loads config.yaml independently of
+# core/orchestrator.py, so it must apply the same CONFIG_OVERRIDES_JSON
+# merge or silently diverge from what the rest of the backend is actually
+# running with (see core/config_overrides.py's module docstring — this is
+# exactly the "silent divergence between two modules' views of the config"
+# class of bug this milestone exists to kill).
+_CONFIG_OVERRIDES = load_config_overrides_from_env()
+if _CONFIG_OVERRIDES:
+    _CONFIG = apply_config_overrides(_CONFIG, _CONFIG_OVERRIDES)
 _MODEL_CFG = _CONFIG.get("model", {})
 _HP = _CONFIG.get("hyperparameters", {})
 

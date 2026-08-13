@@ -26,6 +26,7 @@ from typing import Optional
 import yaml
 from pydantic import BaseModel
 
+from core.config_overrides import apply_config_overrides, load_config_overrides_from_env
 from learning.edge_update import validate_edge_update_config
 from memory.store import store as graph_store
 
@@ -55,10 +56,23 @@ def _load_seed_priors() -> tuple[float, float]:
     invalid — register_fixture() is a data-loading path, not the place to
     hard-fail the whole app on a config problem (backend/core/orchestrator.py
     already validates and hard-fails at startup for the live request path).
+
+    M43 Phase 2 — applies CONFIG_OVERRIDES_JSON on top of the on-disk file,
+    same as core/orchestrator.py's own resolution. This is the read path a
+    seed-prior sweep (e.g. exp01 cfgA's edge_update.seed_prior_alpha/_beta)
+    actually depends on: register_fixture() calls this at wipe+seed time, so
+    without the override applied here, seed edges would silently seed at the
+    un-overridden config.yaml value regardless of what CONFIG_OVERRIDES_JSON
+    says — the exact "config lived, run silently used the wrong value"
+    failure this milestone exists to close, just one layer deeper than
+    core/orchestrator.py's own _CONFIG.
     """
     try:
         with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
+        overrides = load_config_overrides_from_env()
+        if overrides:
+            cfg = apply_config_overrides(cfg, overrides)
         resolved = validate_edge_update_config(cfg)
         return resolved["seed_prior_alpha"], resolved["seed_prior_beta"]
     except Exception as exc:

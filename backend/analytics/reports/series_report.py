@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 import yaml
 
+from core.config_overrides import apply_config_overrides, load_config_overrides_from_env
 from memory.store import GraphStore
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,16 @@ def resolve_report_path(stored_path: str) -> Path:
 
 
 def _load_config() -> dict:
+    """M43 Phase 2 — applies CONFIG_OVERRIDES_JSON on top of the on-disk
+    file, same as core/orchestrator.py's own resolution (see
+    core/config_overrides.py's module docstring for why every independent
+    config.yaml loader must do this)."""
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    overrides = load_config_overrides_from_env()
+    if overrides:
+        cfg = apply_config_overrides(cfg, overrides)
+    return cfg
 
 
 # ---------------------------------------------------------------------------

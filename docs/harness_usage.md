@@ -6,6 +6,10 @@ automates everything `docs/experiment_protocol.md` describes as manual API calls
 per-condition backend restarts, graph wipe/seed, turn execution, probe batteries,
 judging, verdict posting, checkpointing, budget enforcement, and report generation.
 
+For **several plans back-to-back** — replicates, or a one-factor sweep — see
+§7, which covers `scripts/run_experiment_queue.py` and the `config.yaml`
+boundary that decides how a multi-config round must be split.
+
 Read this document top to bottom before your first full run. After that, the
 **Quick Start** section is all you need.
 
@@ -23,6 +27,10 @@ python scripts/run_experiment_harness.py --plan plans/my_plan.json --dry-run
 
 # 3. Full run
 python scripts/run_experiment_harness.py --plan plans/my_plan.json
+
+# Several plans sharing one config.yaml state (see §7):
+python scripts/run_experiment_queue.py --queue queues/my_queue.json --dry-run
+python scripts/run_experiment_queue.py --queue queues/my_queue.json
 ```
 
 Everything below explains what those three commands actually do, what can stop
@@ -130,7 +138,7 @@ A known-good full-sized reference: `plans/pilot_125_2026-07-05.json`
 | `judge.model` | Ollama judge model | Default `gemma4:e4b`. Hard preflight: run aborts if not present on Ollama |
 | `judge.temperature` | Must be ≤ 0.1 | Verdict comparability requires near-determinism; keep `0.0` |
 | `conditions` / `condition_order` | Which of `learned` / `static_weight` / `random_weight` run, and in what order | `condition_order` must be a permutation of `conditions`. Run all three for a real experiment — the experiment report's control shadow needs both controls |
-| `error_policy` | Overrides per error category | See §7. Empty `{}` = defaults, which are correct for routine runs |
+| `error_policy` | Overrides per error category | See §8. Empty `{}` = defaults, which are correct for routine runs |
 | `notification.channel` | `"log"` (implemented), `"email"`/`"webhook"` (fall back to log with a warning) | |
 | `budget_cap` | USD cap, or `null` for none | Checked pre-run against the estimate and mid-run after every judge call. Local Ollama judge calls cost $0, so today this only bites on Sonnet bank generation — but set it anyway |
 | `prompt_bank_path` | Path to an existing bank | Set this to reuse a validated bank ($0 Sonnet spend). Omit it (with `subjects: "auto"`) to generate |
@@ -355,7 +363,156 @@ python scripts/run_experiment_harness.py --plan plans/my_plan.json
 
 ---
 
-## 7. Interruption, resume, and re-run semantics
+## 7. Running several plans: the queue
+
+One `run_experiment_harness.py` invocation runs one plan. When you have
+several — replicates of a condition, or a one-factor sweep — a **queue** feeds
+an ordered list of plan files through the same `execute_run()` back-to-back,
+unattended, with zero interaction after launch.
+
+```powershell
+python scripts/run_experiment_queue.py --queue queues/my_queue.json --dry-run
+python scripts/run_experiment_queue.py --queue queues/my_queue.json
+```
+
+The queue is a **playlist player**. It never reads results, never interprets
+them, never edits plans. A wrong plan fails preflight and a human fixes it.
+
+### The queue file
+
+```json
+{
+  "queue_id": "exp01_cfgA_slow_evidence_priors",
+  "on_plan_failure": "continue",
+  "max_total_budget_usd": 50.0,
+  "notification": { "enabled": true, "channel": "log" },
+  "plans": [
+    { "plan_path": "../plans/exp01-cfgA-rep1_2026-08-12.json" },
+    { "plan_path": "../plans/exp01-cfgA-rep2_2026-08-12.json" }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `queue_id` | Identity root; launch dirs are `harness_runs/queues/{queue_id}_{timestamp}/` |
+| `on_plan_failure` | `"continue"` (default) or `"halt"`. See the health-recheck caveat below |
+| `max_total_budget_usd` | Checked against the **aggregate** estimate across all enabled plans, before plan 1 starts |
+| `plans[].plan_path` | Resolves **relative to the queue file's own directory** when not absolute |
+| `plans[].enabled` | Defaults `true`; disabled entries are recorded `skipped_disabled` and never validated or executed |
+
+Queue settings live in the queue file only — never in `config.yaml`. They are
+per-queue operational choices, not experimental knobs under study.
+
+### ⚠️ One queue = one `config.yaml` state
+
+**This is the constraint that decides how you split your runs, and getting it
+wrong fails silently.**
+
+`RunPlan` has no hyperparameter fields. Hyperparameters live in `config.yaml`,
+which is bind-mounted into the backend container and applies to every run until
+changed again. So a queue can span exactly as many plans as share one
+`config.yaml` state:
+
+| | Same `config.yaml`? | Verdict |
+|---|---|---|
+| Replicates of one config (differing only in `random_seed`) | yes | **Queue them** |
+| Two configs in a sweep (different hyperparameters) | no | **Separate invocations, one per config** |
+
+This is why a two-config round like exp01 ships as *two* queue files
+(`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`), run on separate
+nights with a `config.yaml` edit between them — not one four-plan queue.
+
+**Why the failure is silent.** `config_hash` is computed over the *plan file
+only*. Two plans that differ solely in which `config.yaml` they assume produce
+byte-identical hashes for everything the harness checks. If you forget the edit,
+the run completes normally, writes reports, and passes every §6.2/§6.3 integrity
+and sanity check — it is simply a replicate of the previous config, silently.
+Nothing in the harness detects this, because nothing in the harness reads
+`config.yaml`.
+
+The only provenance is `analytics.full_config_snapshot`, stamped on every run
+row — checkable only *after* the fact.
+
+### The config-switch protocol
+
+Per config, in order:
+
+1. Working tree clean; `config.yaml` at baseline (committed state).
+2. Edit `config.yaml` — exactly the lines that config names, and **all** of
+   them. A config may require more than one edit: exp01's cfgB needs both
+   `hyperparameters.retrieval_level2_top_k: 2` *and*
+   `reporting.pass_rank_thresholds.spoke_retrieval: 5`, because a spoke gold
+   reached via K2 now occupies rank 4 or 5. Setting the knob without the
+   threshold leaves the measurement wrong rather than the run broken.
+3. `docker compose restart backend` — the file is mounted, so a restart applies
+   it.
+4. Restart Ollama (the 2026-08-06 prompt-cache OOM lesson).
+5. **Verify the live config before burning a wipe+seed:**
+   ```powershell
+   docker compose exec backend python -c "import yaml; c = yaml.safe_load(open('/app/config.yaml')); print('seed_priors', c['edge_update']['seed_prior_alpha'], c['edge_update']['seed_prior_beta'], '| k2', c['hyperparameters']['retrieval_level2_top_k'], '| spoke_thresh', c['reporting']['pass_rank_thresholds']['spoke_retrieval'])"
+   ```
+   It must print the intended values for the config about to run. This step is
+   the only thing standing between a forgotten edit and a wasted night.
+6. Launch the queue.
+7. **After the queue: `git checkout -- config.yaml`, restart backend.** Never
+   leave a config experiment's values as the working state — the next run to
+   launch will silently inherit them.
+
+Record which config was live in `PROGRESS.md` alongside the run, and confirm it
+from `full_config_snapshot` at the start of the read session.
+
+### What the preflight checks (all before turn 1)
+
+The whole point of a queue is that a bad *second* plan fails at minute zero
+rather than two hours in. In protocol order, all hard stops:
+
+| Step | Check |
+|---|---|
+| 2 | Every enabled plan loads and validates (field-identifying errors) |
+| 3 | **Duplicate `config_hash` across plans** — catches a forgotten `random_seed` bump between replicates, with the message "replicates need distinct `random_seed` values" |
+| 4 | Per-plan bank resolution. A plan needing fresh Sonnet generation, or one with neither a bank nor `subjects: "auto"`, hard-stops — placeholder turns in an unattended overnight run are wasted GPU-hours |
+| 5 | Backend `/health`; every distinct `judge.model` present on Ollama |
+| 6 | Aggregate estimated cost across all plans vs. `max_total_budget_usd` |
+| 7 | Projected archive count + free-disk WARN (never a hard stop) |
+
+`--dry-run` runs all seven and prints the resolved execution order, then exits
+0 — zero HTTP mutation calls, zero graph mutation, nothing written to disk.
+Always run it before the real launch.
+
+### Failure and resume semantics
+
+- **`on_plan_failure: "continue"` is conditional.** After a failed plan the
+  queue re-checks backend health; if that fails it halts the remainder anyway,
+  rather than letting every remaining plan fail identically against a dead
+  backend. An unexpected exception (as opposed to a clean harness abort) always
+  halts.
+- **Resume: just relaunch the same command.** The CLI auto-detects the latest
+  incomplete `{queue_id}_*` launch directory, guarded by a queue-content hash.
+  A hash mismatch — the queue file changed since that launch — hard-stops
+  rather than guessing; use `--resume-dir` to point at one explicitly.
+- **Resume prompts are auto-answered `y`.** The queue runs unattended, so every
+  prompt `execute_run()` would otherwise raise is answered automatically:
+  already-done turns are skipped, nothing blocks overnight.
+- **A plan whose own harness checkpoint is already `complete` is reconciled,
+  not re-run.** This covers a crash between the harness finishing and the queue
+  recording it, and an identity already run manually outside the queue — either
+  way it does not burn a fresh, wasted attempt.
+
+### Artifacts
+
+| Artifact | Location |
+|---|---|
+| Queue manifest, checkpoint, `queue_summary.md` | `harness_runs/queues/{queue_id}_{timestamp}/` |
+| Per-plan manifests/checkpoints | `harness_runs/{run_id}/` — unchanged, exactly as a solo run |
+| Series + experiment reports | Backend data dir, as always |
+
+`queue_summary.md` carries one row per plan: final status, run_id, wall-clock
+and per-condition durations, generated report paths, and any error summary.
+
+---
+
+## 8. Interruption, resume, and re-run semantics
 
 This is the part most worth understanding precisely, because getting it wrong
 mixes trials.
@@ -561,7 +718,7 @@ turn — every checklist field is `None` on all three — which is why the
 
 ---
 
-## 8. After the run — where things are and what to verify
+## 9. After the run — where things are and what to verify
 
 ### Artifact locations
 
@@ -620,7 +777,7 @@ outcomes, report paths, and anything the run taught you.
 
 ---
 
-## 9. Designing for measurable learning (science notes)
+## 10. Designing for measurable learning (science notes)
 
 Lessons from the 2026-07-06 real-model pilot that affect how you set up the
 *next* full run:
@@ -641,7 +798,7 @@ Lessons from the 2026-07-06 real-model pilot that affect how you set up the
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -659,6 +816,11 @@ Lessons from the 2026-07-06 real-model pilot that affect how you set up the
 | Calibration summary shows a large lenient split | The judge is crediting criteria on a looser standard than they state — the 2026-08-04 failure mode. Look at the flagged criteria first; they are pre-sorted candidates |
 | Report `§6.x` numbers look contaminated across attempts/dry runs | Should be impossible post-M21 (`experiment_id` scoping + `_dryrun` suffix). If seen, check for pre-M21 legacy rows in the DB and report it as a bug |
 | All conditions share one `experiment_id` | You ran multi-condition with `--no-docker-restart`. The run is not salvageable — re-run without the flag |
+| Queue: `duplicate config_hash across plans ... replicates need distinct random_seed values` | Two enabled plans in the queue are identical in every field the hash covers. Give each replicate its own `random_seed` |
+| Queue: `plan ... needs fresh Sonnet prompt-bank generation` | A queued plan has no resolvable bank. Generate it interactively first (`--generate-bank`), then set `prompt_bank_path` — the queue refuses to spend on API calls unattended |
+| Queue: `was launched from a different queue file (queue_content_hash mismatch)` | The queue file changed since that launch directory was created. Start a fresh launch, or `--resume-dir` the correct one. Never edit a queue file mid-flight |
+| Queue halts after one plan despite `on_plan_failure: "continue"` | The post-failure backend health recheck failed, so the remainder was halted deliberately rather than failing identically against a dead backend. Check `docker compose logs backend` |
+| Two configs' results look identical / a sweep shows no effect | **Check `full_config_snapshot` on a run row from each experiment first.** The likeliest cause is a `config.yaml` edit that was never made or never applied — nothing in the harness reads `config.yaml`, so this failure is silent by construction. See §7 |
 
 ---
 

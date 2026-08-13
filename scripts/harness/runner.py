@@ -8,6 +8,7 @@ per condition, runs the turn loop with per-turn checkpointing, applies the
 error-handling policy, and calls the notification stub.
 """
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from harness.client import (
     BackendTurnError,
     ReportGenerationError,
 )
+from harness.config_assert import find_config_mismatches, format_config_mismatches
 from harness.cost import (
     JUDGE_COST_PER_CALL_USD,
     BudgetExceededError,
@@ -852,6 +854,64 @@ def scope_for_dry_run(plan: RunPlan, conditions: list, full_sequence: list) -> t
     return scoped_conditions, scoped_sequence
 
 
+def check_and_record_effective_config(
+    plan: RunPlan,
+    client: BackendClient,
+    manifest: RunManifest,
+    run_base_dir: Path,
+    condition: str,
+    print_fn: Callable[[str], None] = print,
+) -> None:
+    """
+    M43 Phase 1 — fetch GET /admin/effective-config, always record
+    runtime_config_hash + the full resolved snapshot into the manifest (the
+    provenance half of the milestone, unconditional), and — only when
+    plan.expected_config declares something — hard-stop on any mismatch
+    (the assertion half).
+
+    Placement (called once per condition, right after that condition's
+    optional docker restart+health-wait, before its wipe/seed — see
+    execute_run()'s per-condition loop): the config a plan expects is only
+    guaranteed live *after* that condition's restart has applied
+    plan.config_overrides (M43 Phase 2), so checking once up front (before
+    any restart) would false-positive against whatever a *previous*
+    plan/condition left the backend running — exactly the scenario Phase
+    2's cross-config queueing done-criterion requires to work ("a single
+    queue successfully runs two plans with different overrides, each
+    restart carrying its own"). Running it per-condition instead of once
+    globally also matches how the existing docker-restart hard stop is
+    already positioned (per-condition, inside this same loop) — this joins
+    that same class of unconditional, error_policy-exempt preflight check,
+    just re-checked at the point where it's actually meaningful for every
+    condition, restart or no restart.
+    """
+    try:
+        effective = client.effective_config()
+    except BackendConnectivityError as exc:
+        raise HardStopError(
+            f"connectivity during effective-config check for condition={condition}: {exc}"
+        ) from exc
+
+    manifest.runtime_config_hash = effective.get("runtime_config_hash")
+    manifest.resolved_config_snapshot = effective.get("config")
+    save_manifest(manifest, run_base_dir)
+
+    if not plan.expected_config:
+        return
+
+    mismatches = find_config_mismatches(plan.expected_config, effective.get("config") or {})
+    if mismatches:
+        raise HardStopError(
+            f"{format_config_mismatches(mismatches)} (condition={condition}) — "
+            f"the live backend does not match plan.expected_config; check config.yaml "
+            f"and whether the backend was restarted after the last edit"
+        )
+    print_fn(
+        f"  expected_config verified for condition={condition}: "
+        f"{len(plan.expected_config)} key(s) matched"
+    )
+
+
 def execute_run(
     plan: RunPlan,
     client: BackendClient,
@@ -920,6 +980,14 @@ def execute_run(
     instead of silently reusing an identity that already has real data —
     wipe_graph() never deletes analytics/feedback_events, so reuse would
     otherwise mix an old trial's rows into a new one's experiment_id.
+
+    M43 Phase 1/2 — once per condition (after that condition's optional
+    docker restart, before its wipe/seed), check_and_record_effective_config()
+    always records the backend's runtime_config_hash + full resolved
+    snapshot into the manifest, and additionally hard-stops if
+    plan.expected_config disagrees with the live backend. plan.config_overrides
+    (Phase 2) rides the same per-condition restart as CONFIG_OVERRIDES_JSON —
+    config.yaml itself is never written.
     """
     probes = probes or []
     sample_battery_repeats = (
@@ -1136,6 +1204,14 @@ def execute_run(
                             "EXPERIMENT_ID": experiment_id,
                             "RUN_CONDITION": condition,
                             "CONDITION_LABEL": condition,
+                            # M43 Phase 2 — rides the same per-condition restart
+                            # this dict already triggers. "{}" (config_overrides'
+                            # default) round-trips through
+                            # parse_config_overrides_json() to the same empty-dict
+                            # no-op as an unset env var, so this is always safe to
+                            # include unconditionally rather than branching on
+                            # whether the plan actually has overrides.
+                            "CONFIG_OVERRIDES_JSON": json.dumps(plan.config_overrides),
                         },
                     )
                     wait_for_health_fn(client)
@@ -1143,6 +1219,21 @@ def execute_run(
                     error_summary = f"docker restart failed for condition {condition}: {exc}"
                     raise HardStopError(error_summary) from exc
                 print_fn(f"Backend restarted for condition={condition} EXPERIMENT_ID={experiment_id}")
+
+            # M43 Phase 1 — expected_config assertion + provenance recording.
+            # Must come after the restart above (so plan.config_overrides has
+            # actually taken effect for this condition — see
+            # check_and_record_effective_config()'s docstring) and before any
+            # wipe/seed below, restart or no restart. Unconditional hard stop,
+            # not subject to error_policy override — joins
+            # budget/probe-battery/judge-model/docker-restart in that class.
+            try:
+                check_and_record_effective_config(
+                    plan, client, manifest, run_base_dir, condition, print_fn,
+                )
+            except HardStopError as exc:
+                error_summary = str(exc)
+                raise
 
             if resuming_condition:
                 print_fn(

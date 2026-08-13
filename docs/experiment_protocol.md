@@ -93,7 +93,7 @@ Run the full unit test suite (outside Docker, on host) and confirm it passes
 in full before launching a real experiment:
 
 ```powershell
-pytest tests/ --ignore=tests/integration
+python -m pytest tests/ --ignore=tests/integration
 ```
 
 The seed fixture and prompt bank referenced by a plan must already exist on

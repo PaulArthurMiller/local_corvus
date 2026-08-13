@@ -81,6 +81,16 @@ class RunManifest(BaseModel):
     # (covers every condition/series in the plan, not just what a scoped
     # dry-run actually executes) so a run is fully auditable after the fact.
     series_id_map: dict[str, str] = Field(default_factory=dict)
+    # M43 Phase 1 — the backend's runtime_config_hash (from GET
+    # /admin/effective-config) and the full resolved config snapshot,
+    # recorded once a live backend has been checked (None until then, e.g.
+    # a plan whose preflight aborted before reaching the config check).
+    # Distinct from config_hash above: config_hash hashes this RunPlan;
+    # runtime_config_hash hashes the backend's whole live config.yaml
+    # (+ overrides) — see BUILD-PLAN.md Milestone 43's "Naming" section for
+    # why the two are deliberately not unified.
+    runtime_config_hash: Optional[str] = None
+    resolved_config_snapshot: Optional[dict] = None
 
 
 def run_dir_for(run_id: str, base_dir: Path) -> Path:

@@ -45,6 +45,7 @@ class FakeBackendClient:
         self, health_error=None, wipe_error=None, seed_error=None, chat_errors=None,
         verdict_errors=None, series_report_error=None, experiment_report_error=None,
         randomize_error=None, probe_errors=None,
+        effective_config_error=None, effective_config_response=None,
     ):
         self.health_error = health_error
         self.wipe_error = wipe_error
@@ -55,6 +56,14 @@ class FakeBackendClient:
         self.experiment_report_error = experiment_report_error
         self.randomize_error = randomize_error
         self.probe_errors = probe_errors or {}  # call-index -> exception instance
+        # M43 — effective_config_response defaults to a matches-anything empty
+        # config so every pre-M43 test (none of which set plan.expected_config)
+        # keeps passing unchanged; tests exercising the M43 assertion override
+        # this to a specific {"config": {...}} shape.
+        self.effective_config_error = effective_config_error
+        self.effective_config_response = effective_config_response or {
+            "config": {}, "runtime_config_hash": "fake-runtime-hash", "overridden_keys": [],
+        }
         self.chat_call_count = 0
         self.chat_messages = []
         self.chat_series_ids = []
@@ -66,11 +75,18 @@ class FakeBackendClient:
         self.experiment_report_calls = []
         self.randomize_calls = 0
         self.probe_calls = []
+        self.effective_config_calls = 0
 
     def health(self):
         if self.health_error:
             raise self.health_error
         return {"status": "ok", "db": "ok"}
+
+    def effective_config(self):
+        self.effective_config_calls += 1
+        if self.effective_config_error:
+            raise self.effective_config_error
+        return self.effective_config_response
 
     def wipe_graph(self, experiment_id=None):
         self.wipe_calls.append(experiment_id)
@@ -316,6 +332,7 @@ def test_resume_skips_restart_wipe_seed_for_already_complete_condition(tmp_path)
         "EXPERIMENT_ID": "p1_static_weight",
         "RUN_CONDITION": "static_weight",
         "CONDITION_LABEL": "static_weight",
+        "CONFIG_OVERRIDES_JSON": "{}",  # M43 — plan.config_overrides defaults to {}
     }]
     assert healthy_client.chat_call_count == 2  # only static_weight's 2 turns
 
@@ -453,6 +470,7 @@ def test_resume_mid_series_preserves_graph_and_skips_wipe_seed(tmp_path):
         "EXPERIMENT_ID": "p1_dryrun_learned",
         "RUN_CONDITION": "learned",
         "CONDITION_LABEL": "learned",
+        "CONFIG_OVERRIDES_JSON": "{}",  # M43 — plan.config_overrides defaults to {}
     }]  # still restarted for correct stamping
     assert healthy_client.chat_call_count == 2  # only the 2 remaining turns
 
@@ -1703,6 +1721,7 @@ def test_docker_restart_called_once_per_condition_when_project_root_given(tmp_pa
             "EXPERIMENT_ID": "p1_dryrun_learned",
             "RUN_CONDITION": "learned",
             "CONDITION_LABEL": "learned",
+            "CONFIG_OVERRIDES_JSON": "{}",  # M43 — plan.config_overrides defaults to {}
         })
     ]
     assert len(health_calls) == 1
@@ -2147,3 +2166,230 @@ def test_interactive_run_writes_a_calibration_summary(tmp_path):
     assert "Per-criterion agreement" in text
     assert "Criteria graded: **2**" in text
     assert "Judge lenient (judge met, operator not met): **1**" in text
+
+
+# ---------------------------------------------------------------------------
+# M43 Phase 1 — plan.expected_config preflight assertion
+# ---------------------------------------------------------------------------
+
+def test_no_expected_config_never_hard_stops(tmp_path):
+    """Every existing plan (expected_config={} by default) must behave
+    exactly as before M43."""
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+    assert client.effective_config_calls == 1  # still fetched, for provenance
+
+
+def test_expected_config_matching_the_live_backend_does_not_hard_stop(tmp_path):
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update": {"seed_prior_alpha": 3.0}},
+        "runtime_config_hash": "h1",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+
+
+def test_expected_config_mismatch_hard_stops_before_wipe(tmp_path):
+    """The exact defect M43 exists to catch: config.yaml edited but the
+    backend never restarted, so the live value still disagrees."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update": {"seed_prior_alpha": 1.0}},  # stale — not restarted
+        "runtime_config_hash": "h-stale",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "expected_config mismatch" in outcome.error_summary
+    assert "edge_update.seed_prior_alpha" in outcome.error_summary
+    assert "expected=3.0" in outcome.error_summary
+    assert "actual=1.0" in outcome.error_summary
+    assert client.wipe_calls == []  # never reached wipe/seed
+
+
+def test_expected_config_missing_key_hard_stops(tmp_path):
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update": {}},  # key absent entirely
+        "runtime_config_hash": "h",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "actual=<missing>" in outcome.error_summary
+
+
+def test_expected_config_check_failure_is_unconditional_not_overridable(tmp_path):
+    """Not subject to error_policy override — joins
+    budget/probe-battery/judge-model/docker-restart in that class."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+        error_policy={"connectivity": "soft_continue"},
+    )
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update": {"seed_prior_alpha": 1.0}},
+        "runtime_config_hash": "h",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+
+
+# ---------------------------------------------------------------------------
+# M43 Phase 1 — runtime_config_hash/resolved_config_snapshot provenance
+# ---------------------------------------------------------------------------
+
+def test_runtime_config_hash_recorded_in_manifest_even_without_expected_config(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient(effective_config_response={
+        "config": {"model": {"name": "gemma4:e4b"}},
+        "runtime_config_hash": "provenance-hash",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    manifest = load_manifest(outcome.run_id, tmp_path)
+    assert manifest.runtime_config_hash == "provenance-hash"
+    assert manifest.resolved_config_snapshot == {"model": {"name": "gemma4:e4b"}}
+
+
+def test_effective_config_connectivity_failure_hard_stops(tmp_path):
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient(effective_config_error=BackendConnectivityError("refused"))
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "effective-config check" in outcome.error_summary
+
+
+# ---------------------------------------------------------------------------
+# M43 Phase 2 — config_overrides threaded into the per-condition restart
+# ---------------------------------------------------------------------------
+
+def test_config_overrides_threaded_into_restart_env_as_json(tmp_path):
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        config_overrides={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient()
+    restart_calls = []
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        docker_project_root=Path("/fake/project"),
+        restart_backend_fn=lambda root, env: restart_calls.append(env),
+    )
+
+    assert outcome.status == "complete"
+    assert len(restart_calls) == 1
+    assert json.loads(restart_calls[0]["CONFIG_OVERRIDES_JSON"]) == {
+        "edge_update.seed_prior_alpha": 3.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M43 follow-up (review) — config_overrides requires the docker restart, and
+# a live config with a literal-dot key breaks the dotted-path scheme
+# ---------------------------------------------------------------------------
+
+def test_config_overrides_without_docker_restart_hard_stops(tmp_path):
+    """config_overrides ride the per-condition restart, so --no-docker-restart
+    (docker_project_root=None) would deliver none of them. Must hard-stop
+    rather than silently run against config.yaml's committed values — the
+    plan may declare overrides with no expected_config to catch it."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        config_overrides={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "config_overrides" in outcome.error_summary
+    assert "no-docker-restart" in outcome.error_summary
+    # Hard stop lands before any graph mutation, like every other
+    # unconditional preflight in this class.
+    assert client.wipe_calls == []
+
+
+def test_config_overrides_with_docker_restart_enabled_runs(tmp_path):
+    """The same plan is fine the moment restarts are enabled — the guard is
+    about delivery, not about overrides being suspect."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        config_overrides={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient()
+
+    outcome = execute_run(
+        plan, client, tmp_path, print_fn=_noop_print,
+        docker_project_root=Path("/fake/project"),
+        restart_backend_fn=lambda root, env: None,
+    )
+
+    assert outcome.status == "complete"
+
+
+def test_no_config_overrides_still_runs_without_docker_restart(tmp_path):
+    """Every pre-M43 plan (config_overrides={}) is unaffected by the guard."""
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient()
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"
+
+
+def test_live_config_with_a_literal_dot_key_hard_stops(tmp_path):
+    """A live config key containing "." makes every dotted path ambiguous —
+    hard-stop instead of silently resolving the wrong leaf."""
+    plan = _plan(
+        dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"],
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update.seed_prior_alpha": 3.0},  # flat key, not nested
+        "runtime_config_hash": "h-dotted",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "aborted"
+    assert "literal '.'" in outcome.error_summary
+    assert client.wipe_calls == []
+
+
+def test_dotted_key_collision_ignored_for_a_plan_using_neither_field(tmp_path):
+    """A plan with no dotted paths has nothing to be ambiguous about — the
+    collision check must not fail runs that predate M43."""
+    plan = _plan(dry_run=True, dry_run_n=1, probe_ratio=0.0, conditions=["learned"])
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update.seed_prior_alpha": 3.0},
+        "runtime_config_hash": "h-dotted",
+    })
+
+    outcome = execute_run(plan, client, tmp_path, print_fn=_noop_print)
+
+    assert outcome.status == "complete"

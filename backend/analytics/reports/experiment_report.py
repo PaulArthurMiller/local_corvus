@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 import yaml
 
+from core.config_overrides import apply_config_overrides, load_config_overrides_from_env
 from memory.store import GraphStore
 
 # Re-use the per-series section functions rather than re-implementing them.
@@ -54,8 +55,19 @@ confirmed effects."""
 
 
 def _load_config() -> dict:
+    """
+    M43 Phase 2 — applies CONFIG_OVERRIDES_JSON on top of the on-disk file,
+    same as core/orchestrator.py's own resolution. Report generation reads
+    reporting.pass_rank_thresholds (a cfgB-class sweep target) at generation
+    time; without the override applied here, §6.1 pass/fail classification
+    would silently use the un-overridden config.yaml value.
+    """
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    overrides = load_config_overrides_from_env()
+    if overrides:
+        cfg = apply_config_overrides(cfg, overrides)
+    return cfg
 
 
 # Maps the short per-series section keys used by the §5 aggregators to the

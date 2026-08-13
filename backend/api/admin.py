@@ -4,7 +4,8 @@ Admin API router — read-only endpoints for the Admin UI.
 GET  /admin/runs                           — paginated run log
 GET  /admin/graph                          — all MUs and edges (for memory inspector)
 GET  /admin/graph/stats                   — MU count summary with cluster_id coverage
-GET  /admin/config                         — current hyperparameter registry
+GET  /admin/config                         — current hyperparameter registry (re-reads config.yaml from disk)
+GET  /admin/effective-config               — the orchestrator's actually-resolved config (M43)
 POST /admin/graph/wipe                    — archive the current graph, then delete all MUs/edges
 POST /admin/seed-graph                    — register a seed fixture and load MUs into the graph
 POST /admin/run-probe                      — run a probe through retrieval (read-only; no MU creation)
@@ -42,7 +43,7 @@ from analytics.reports.experiment_report import generate_experiment_report, writ
 from analytics.reports.series_report import generate_series_report, resolve_report_path, write_series_report
 from analytics.run_log import query_runs
 from analytics.seed_fixture import register_fixture
-from core.orchestrator import EXPERIMENT_ID, RUN_CONDITION
+from core.orchestrator import _CONFIG, _CONFIG_HASH, _CONFIG_OVERRIDES, EXPERIMENT_ID, RUN_CONDITION, USE_SESSION_CONTEXT
 from learning.edge_update import VALID_WEIGHT_MODES
 from memory.retrieval import retrieve
 from memory.snapshot import take_archive_snapshot, take_battery_snapshot
@@ -257,6 +258,37 @@ async def get_config():
         logger.error("admin/config: could not read config.yaml — %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
     return cfg
+
+
+@router.get("/effective-config")
+async def get_effective_config():
+    """
+    Return what the orchestrator actually resolved at process startup —
+    config.yaml merged with CONFIG_OVERRIDES_JSON (M43 Phase 2), the exact
+    values every /chat and /admin/run-probe call is running on right now.
+
+    Deliberately NOT a re-read of config.yaml (that's GET /admin/config,
+    unchanged): re-reading the file would certify the exact bug this
+    endpoint exists to catch — a config.yaml edited on disk but not yet
+    picked up by a backend restart. Importing _CONFIG/_CONFIG_HASH from
+    core.orchestrator instead of re-parsing the file is the whole point
+    (see BUILD-PLAN.md Milestone 43's "the trap that shapes Phase 1").
+
+    `overridden_keys` (M43 Phase 2) lists which dotted keys in `config`
+    came from CONFIG_OVERRIDES_JSON rather than the on-disk file — this is
+    what lets a plan know which knobs it owns vs. inherits.
+    """
+    return {
+        "config": _CONFIG,
+        "runtime_config_hash": _CONFIG_HASH,
+        "resolved_env": {
+            "EXPERIMENT_ID": EXPERIMENT_ID,
+            "RUN_CONDITION": RUN_CONDITION,
+            "CONDITION_LABEL": os.getenv("CONDITION_LABEL") or None,
+            "USE_SESSION_CONTEXT": USE_SESSION_CONTEXT,
+        },
+        "overridden_keys": sorted(_CONFIG_OVERRIDES.keys()),
+    }
 
 
 class RunProbeRequest(BaseModel):

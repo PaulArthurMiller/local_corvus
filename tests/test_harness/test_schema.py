@@ -325,3 +325,53 @@ def test_trained_spokes_malformed_value_shape_raises_field_identifying_error():
         }))
     message = format_validation_error(exc_info.value)
     assert "trained_spokes" in message
+
+
+# ---------------------------------------------------------------------------
+# M43 Phase 1/2 — expected_config / config_overrides
+# ---------------------------------------------------------------------------
+
+def test_expected_config_defaults_to_empty_dict():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.expected_config == {}
+
+
+def test_config_overrides_defaults_to_empty_dict():
+    plan = RunPlan(**_base_kwargs())
+    assert plan.config_overrides == {}
+
+
+def test_expected_config_accepts_arbitrary_dotted_keys():
+    """Shape-validated only — schema.py cannot know which config.yaml keys
+    exist without importing backend modules (same convention as
+    seed_fixture_version/trained_spokes); a bad key fails loudly at
+    preflight time, not at schema-validation time."""
+    plan = RunPlan(**_base_kwargs(expected_config={
+        "edge_update.seed_prior_alpha": 3.0,
+        "edge_update.seed_prior_beta": 3.0,
+    }))
+    assert plan.expected_config == {
+        "edge_update.seed_prior_alpha": 3.0,
+        "edge_update.seed_prior_beta": 3.0,
+    }
+
+
+def test_config_overrides_accepts_arbitrary_dotted_keys():
+    plan = RunPlan(**_base_kwargs(config_overrides={
+        "hyperparameters.retrieval_level2_top_k": 2,
+    }))
+    assert plan.config_overrides == {"hyperparameters.retrieval_level2_top_k": 2}
+
+
+def test_expected_config_and_config_overrides_participate_in_plan_config_hash():
+    """M43's whole point: declaring config state changes the plan's
+    identity — a plan that declares its config *is* a different plan."""
+    from harness.manifest import compute_config_hash
+
+    base = RunPlan(**_base_kwargs())
+    with_expected = RunPlan(**_base_kwargs(expected_config={"model.timeout_seconds": 90}))
+    with_override = RunPlan(**_base_kwargs(config_overrides={"model.timeout_seconds": 90}))
+
+    assert compute_config_hash(base) != compute_config_hash(with_expected)
+    assert compute_config_hash(base) != compute_config_hash(with_override)
+    assert compute_config_hash(with_expected) != compute_config_hash(with_override)

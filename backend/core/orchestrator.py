@@ -23,6 +23,7 @@ import httpx
 import yaml
 
 from analytics.run_log import RunRecord, capture_run
+from core.config_overrides import apply_config_overrides, load_config_overrides_from_env
 from core.session import append_session_message, get_session_messages
 from gate.audit import append_audit
 from gate.sanitize import AttachmentSanitizeResult, sanitize_attachment, sanitize_in, sanitize_out
@@ -52,6 +53,26 @@ def _load_config() -> dict:
 
 
 _CONFIG = _load_config()
+
+# M43 Phase 2 — per-plan config sweeps ride the harness's existing
+# per-condition backend restart as a single JSON blob (CONFIG_OVERRIDES_JSON)
+# rather than editing config.yaml (git-tracked, human-edited, bind-mounted —
+# a harness that wrote it would also need to revert reliably on crash/abort).
+# This merge MUST precede every value derived from _CONFIG below —
+# _CONFIG_HASH, _MODEL_CFG, _HP, EDGE_UPDATE_CFG, and every module constant
+# bound from them — so the hash and every derived constant describe the
+# effective (overridden) config, not the on-disk one. A malformed override
+# or a key with no matching config.yaml leaf raises ConfigOverrideError here,
+# which is deliberate: hard-fail at import (before any run state exists)
+# rather than silently ignore a typo'd override.
+_CONFIG_OVERRIDES: dict = load_config_overrides_from_env()
+if _CONFIG_OVERRIDES:
+    logger.info(
+        "orchestrator: applying %d config override(s) from CONFIG_OVERRIDES_JSON: %s",
+        len(_CONFIG_OVERRIDES), sorted(_CONFIG_OVERRIDES.keys()),
+    )
+    _CONFIG = apply_config_overrides(_CONFIG, _CONFIG_OVERRIDES)
+
 _MODEL_CFG = _CONFIG.get("model", {})
 _HP = _CONFIG.get("hyperparameters", {})
 
@@ -63,7 +84,12 @@ MODEL_NAME: str = _MODEL_CFG.get("name", "gemma4:e4b")
 OLLAMA_TIMEOUT: float = float(_MODEL_CFG.get("timeout_seconds", 60))
 INITIAL_EDGE_WEIGHT: float = float(_HP.get("initial_edge_weight", 0.5))
 
-# Compute once at module load — stable hash of the full resolved config
+# Compute once at module load — stable hash of the full resolved (post-
+# override) config. GET /admin/effective-config reports this as
+# runtime_config_hash, distinct from harness/manifest.py's
+# compute_config_hash() (hashes the RunPlan, not the backend's config) —
+# see BUILD-PLAN.md Milestone 43's "Naming" section for why these two
+# same-named-in-spirit hashes are deliberately not unified.
 _CONFIG_HASH: str = hashlib.sha256(
     json.dumps(_CONFIG, sort_keys=True).encode()
 ).hexdigest()

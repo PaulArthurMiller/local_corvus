@@ -2,6 +2,26 @@
 
 ## Current state
 
+**2026-08-13 update:** Milestone 43 (Plan-Declared Config State — assertion +
+env-override automation) is COMPLETE and pushed, branch
+`milestone-43-plan-declared-config-build`, PR awaiting Paul's review. Both
+phases landed in one session per Paul's sequencing decision (both must land
+before exp01 runs). See BUILD-PLAN.md's Milestone 43 status paragraph and
+the session log entry below for full detail. 1151 tests passing, no
+regressions (1166 after the review pass below). **UPDATE (review pass,
+same day):** Paul's PR review found four gaps — all fixed on the same
+branch — and the live Docker verification the build session had to skip is
+now done, covering every "Done when" criterion in both phases. **AWAITING
+PAUL:** review + merge the PR, then exp01's queues
+(`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`) can run. The 4
+plans now declare **both** `expected_config` and `config_overrides`, so
+exp01 needs **no manual `config.yaml` switch at all** — each plan's own
+per-condition restart establishes its config, and the assertion verifies
+the injection took effect. The rest of this
+"Current state" section (below) predates this and is retained for history;
+see BUILD-PLAN.md's own per-milestone Status log for the more current
+narrative on milestones after M34.
+
 Project: Local Corvus — local LLM learning research platform  
 Phase: Active — M19–M30 merged/pushed. Milestone 30 (Dual-Mode Probe Battery) is now **fully code-complete and pushed**: Part A (harness+backend dual-mode dispatch, built 2026-07-15) and Part B (§6.1 report consumption fix, built 2026-07-26) both landed as commits on `fix/smoketest-2026-07-15`, updating the already-open PR #51 rather than opening a new one. The M28 baseline tie-break was re-confirmed stable under `static_weight`/`mean` (2 independent reseeds) AND under `learned`/`mean` (identical, as expected). But a follow-up check under `learned`/`weight_mode: sample` — the mode the learning mechanism actually needs for exploration — found the tie-break is a **qualitatively different, noisy regime** there: no clean "always-fail" spoke subset exists at N=25 (see `docs/m28_tiebreak_learned_mode_findings_2026-07-15.md`). The original M28/M29 premise ("avoid `b_spoke1`/`d_spoke1`, pick a clean-fail spoke instead") is `weight_mode: mean`-specific and does not straightforwardly generalize to `sample`. Milestone 30 is the direct answer: harness+backend now run both a mean pass and K=25 sample repeats at every probe checkpoint, and `experiment_report.py`'s §6.1 now correctly filters `battery_mode="mean"` for the existing mean-only subsections and exposes a new `sample_pass_rates` subsection (JSON + Markdown) for reading the sample-mode data directly.  
 Current milestone: **Experiment 0 prep (2026-07-26 /smoketest).** Milestone 30 is complete and PR #51 is merged. The experiment-0 run plan now exists (`plans/exp0_2026-07-26.json`), and the three questions left open since M28 are decided and committed: `weight_mode: sample` (a structural requirement — under `mean` no spoke outside the initial tie-break winner can ever gain evidence, so the run would return a null for mechanical reasons), `trained_spokes` a1/b3/c1/d5, and sizing 5×70 @ `probe_ratio` 0.4 (28 probe turns/series = exactly one full v3 battery per session; the docs' v2-era 5×25 shape would have probed only 10 of 28 probes and never touched clusters c/d). Two real harness bugs on the bank-generation path were found and fixed (cost-gate traceback; the coherence gate that could never pass because adaptive thinking is on by default on `claude-sonnet-5` and consumed the whole `max_tokens` budget). 798 tests passing.  
@@ -1274,3 +1294,123 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
     - The one 20-prompt verification bank (`prompt_banks/prompt_bank_3a3c...json`) is committed as evidence of a real, successful end-to-end run — `prompt_banks/` is not gitignored, consistent with `seed_fixtures/` being a committed, reusable artifact
   - Branch: `milestone-19-phase-1-prompt-bank`
   - Milestone 19 Phase 1 status: COMPLETE — all Done criteria met (all 4 verification checks PASS with real recorded output, criteria present on every validated entry, placeholder string confirmed absent from bank-backed dry-run output, no regressions)
+
+- 2026-08-13: /build — Milestone 43 complete (Plan-Declared Config State — assertion + env-override automation)
+  - See BUILD-PLAN.md's Milestone 43 status paragraph for the full technical
+    record (files touched, per-file rationale, and the scope-expansion
+    finding). Summary here:
+  - **Phase 1 (assertion):** `GET /admin/effective-config` (new, additive —
+    `GET /admin/config` untouched), `RunPlan.expected_config`,
+    `scripts/harness/config_assert.py` (shared mismatch-finder), a
+    per-condition preflight check in `runner.py` and a per-plan step-5
+    check in `queue.py` (enforced only when `config_overrides` is empty, to
+    avoid false-positiving on Phase 2's cross-config queueing), and
+    `runtime_config_hash`/`resolved_config_snapshot` provenance recorded in
+    both run and queue manifests unconditionally.
+  - **Phase 2 (injection):** `RunPlan.config_overrides` rides the harness's
+    existing per-condition backend restart as `CONFIG_OVERRIDES_JSON`
+    (docker-compose.yml passthrough); `backend/core/config_overrides.py`
+    (`apply_config_overrides()`) is called from `core/orchestrator.py`
+    before `_CONFIG_HASH`/`EDGE_UPDATE_CFG`/every derived constant.
+    `config.yaml` itself is never written.
+  - **Real gap found and closed beyond the plan's own named risk:** the
+    plan flagged only `memory/extractor.py` as needing the same override
+    merge as `core/orchestrator.py`. Grepping every independent
+    `config.yaml` loader found two more that read exactly the keys exp01's
+    two configs sweep — `analytics/seed_fixture.py`'s `_load_seed_priors()`
+    (cfgA's `edge_update.seed_prior_alpha/_beta`) and both
+    `analytics/reports/experiment_report.py`/`series_report.py`'s
+    `_load_config()` (cfgB's `reporting.pass_rank_thresholds.spoke_retrieval`).
+    Left unfixed, cfgA's seed edges and cfgB's §6.1 pass/fail scoring would
+    have silently used the un-overridden config.yaml value even with Phase
+    2 fully wired everywhere else — exactly the "silent divergence between
+    two modules' views of the config" class of bug the milestone exists to
+    kill, just at more sites than the plan named. All four now apply the
+    same merge (`tools/registry.py`/`gate/sanitize.py`/`api/chat.py`'s
+    SimpleRL-only read were left alone — no hyperparameter sweep targets
+    those sections).
+  - The 4 exp01 plans (not yet run, so free to change per the plan's own
+    scoping) got `expected_config` populated from their existing
+    `plan_name` prose: cfgA → `edge_update.seed_prior_alpha/_beta: 3.0`;
+    cfgB → `hyperparameters.retrieval_level2_top_k: 2` and
+    `reporting.pass_rank_thresholds.spoke_retrieval: 5`.
+  - 68 new tests: `test_config_overrides.py` (pure parse/merge logic),
+    `test_config_overrides_wiring.py` (import-time reload tests — confirms
+    `_CONFIG_HASH` differs with/without an override, a malformed override
+    hard-fails at import, and `decay.enabled: true` still hard-rejects
+    post-merge — the milestone's own flagged "cheapest guard"),
+    `test_config_assert.py`, `test_client_effective_config.py`,
+    `test_effective_config.py`, plus extensions to `test_schema.py`
+    (expected_config/config_overrides participate in plan_config_hash),
+    `test_manifest.py`, `test_runner.py` (per-condition assertion +
+    provenance + config_overrides threading into the restart env dict —
+    also required adding `effective_config()` to the existing
+    `FakeBackendClient` and fixing two pre-existing tests that asserted an
+    exact restart-env dict), and `test_queue.py` (step-5 enforcement
+    skipped for override-carrying plans, still recorded). 1151 tests total
+    (1083 baseline + 68 new), no regressions.
+  - Docs: `docs/harness_usage.md` §7 rewritten — the "one queue = one
+    config.yaml state" rule is now conditional on whether plans carry their
+    own `config_overrides`; new "Plan-declared config" subsection; two new
+    troubleshooting rows for the mismatch error message.
+  - No live verification against a real Docker backend this session
+    (Docker wasn't running) — the milestone's own "Done when" criteria
+    (hard-stop on a real mismatch, pass after correction+restart, an
+    edit-without-restart caught) are exercised by the test suite's fake
+    `BackendClient` against the exact same code path `execute_run()` uses,
+    matching the pattern several prior harness milestones used when Docker
+    wasn't up (e.g. M19 Phase 1). **Still worth a live pass before exp01
+    actually runs:** restart the real backend with a deliberately wrong
+    `CONFIG_OVERRIDES_JSON`, confirm `GET /admin/effective-config` reports
+    it, and run one of the exp01 plans with `--dry-run` to see the
+    assertion fire against the real container.
+  - Branch: `milestone-43-plan-declared-config-build`
+  - Milestone 43 status: COMPLETE — both phases built, all Done criteria
+    verified against a fake backend (real-Docker pass still recommended
+    before the actual exp01 launch, noted above), no regressions. AWAITING
+    PAUL: PR review + merge.
+
+- 2026-08-13 (b): /review follow-up — Milestone 43 review fixes + full live verification
+  - Paul reviewed the M43 PR against the BUILD-PLAN and asked for all four
+    review findings implemented plus the live run. See BUILD-PLAN.md's
+    "Milestone 43 (review pass, same day)" paragraph for the full record.
+  - **The one real defect found:** `--no-docker-restart` silently disabled
+    Phase 2 entirely. `config_overrides` are delivered *only* by the
+    per-condition backend restart, so that flag (present on both CLIs)
+    delivered none of them — and since `schema.py` explicitly allows a plan
+    to supply without asserting, a `config_overrides`-only plan would have
+    run to completion against the un-overridden `config.yaml` with nothing
+    to detect it. That is the exact silent-wrong-config failure M43 exists
+    to kill, reintroduced through a CLI flag. Now an unconditional hard stop
+    in `execute_run()` and in `run_preflight()` (minute zero, before the
+    backend is consulted at all).
+  - Also fixed: the queue manifest now records `resolved_config_snapshot`
+    alongside `runtime_config_hash` (Phase 1 step 5 asked for both, and the
+    docs already claimed both); the dotted-key-collision open question is
+    closed with `find_dotted_key_collisions()` asserted against the *live*
+    config; and all 4 exp01 plans now carry `config_overrides` (not just
+    `expected_config`), with their stale "REQUIRES config.yaml state ..."
+    prose corrected.
+  - **exp01 no longer needs a manual config switch.** Each plan supplies its
+    own config and asserts it. The two queue files remain as an operational
+    split (two ~5 h nights vs one ~10 h run), not a harness constraint —
+    merge them into one 4-plan queue whenever that's preferable.
+  - **Live verification, real Docker backend + real gemma4:e4b** (Docker was
+    up this session): the edit-without-restart trap reproduced end to end
+    (`/admin/config` fresh 3.0 vs `/admin/effective-config` stale 1.0, real
+    preflight hard-stopping on both keys), the same plan passing after a
+    restart, a real 2-plan cross-config queue completing with three distinct
+    `runtime_config_hash` values and `expected_config verified` on both
+    plans, `full_config_snapshot` on real run rows carrying the overridden
+    values while `config.yaml` stayed committed-clean (`git status` clean
+    throughout), malformed/unknown/typo'd overrides each hard-failing at
+    container import, and `decay.enabled: true` still rejected by
+    `validate_edge_update_config()` post-merge.
+  - Environment left clean: backend restored to baseline
+    `runtime_config_hash=c95248806877` / `overridden_keys: []`, `config.yaml`
+    untouched. The graph is wiped/re-seeded to seed_v3 + one verification
+    turn (37 MUs) — the state exp01 wipes from anyway — with the previous
+    667-MU exp0b-rep3 graph archived by the harness's own wipe, and
+    throwaway analytics rows under `m43-live-cfgA/cfgB_dryrun_learned`.
+  - 1166 tests passing (15 new beyond the build session's 1151), no regressions.
+  - Branch: `milestone-43-plan-declared-config-build` (same PR, updated)

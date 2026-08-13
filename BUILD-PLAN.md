@@ -6189,8 +6189,14 @@ session.
 
 ## Plan-Declared Config State — Milestone 43
 
-**Status:** Planned 2026-08-13 (/planner, no code). Two phases; both land
-before exp01 runs (Paul's sequencing decision — see "Why now" below).
+**Status:** COMPLETE — both phases built 2026-08-13 (/build), same session
+as planning, per Paul's sequencing decision that both land before exp01
+runs, then extended the same day by a review pass (four findings fixed +
+full live verification against a real Docker backend). See "Why now" below
+for the rationale, and PROGRESS.md's 2026-08-13 entries for the full build
+and review records. **Every "Done when" criterion in both phases is now
+verified live, not just against fakes.** Branch:
+`milestone-43-plan-declared-config-build`.
 
 ### The defect
 
@@ -6458,10 +6464,11 @@ start, not mid-run.
   Tempting to auto-populate, but it makes the two fields' relationship
   implicit. Resolve during the Phase 2 build; default to keeping them
   independent.
-- ? **Dotted-key collision with YAML keys containing dots.** None exist in
-  `config.yaml` today (verified 2026-08-13, 57 leaves). If one is ever
-  added, the dotted-path scheme breaks silently — worth a preflight
-  assertion that no config key contains a literal dot.
+- ✅ **Dotted-key collision with YAML keys containing dots.** RESOLVED in the
+  post-review pass: `config_assert.find_dotted_key_collisions()` asserts it
+  against the *live* config on the effective-config call both preflights
+  already make, for any plan using dotted paths. None exist in `config.yaml`
+  today (57 leaves) and a unit test now pins that against the committed file.
 
 **Estimate:** Phase 1 one session; Phase 2 one to two (the backend
 resolution path and `extractor.py` reconciliation are the real work). Both
@@ -6946,5 +6953,70 @@ Last updated: 2026-08-02
 
 
 **Milestone 39:** Complete — report-layer only, no schema change. New `backend/analytics/reports/spoke_membership.py`: a duplicated (never imported — `scripts/` isn't mounted into the backend container) spoke_key -> mu_id table mirroring `generate_seed_v3.py`'s `MU_IDS`, cross-checked in tests against the real frozen `seed_fixtures/seed_v3.json.gz` and `probes/probe_set_v3.yaml` on disk so the duplication can't silently drift. `resolve_trained_probe_ids()` maps `RunPlan.trained_spokes` to probe ids (a trained spoke with no matching probe renders as such, never dropped); `experiment_report.py._compute_cluster_winner_table()` computes the per-cluster argmax-by-sample-pass-rate table (ties recorded explicitly) for both the learned condition and every control; `control_shadow.py` adds `_compute_trained_subset_comparison()` (the primary config-comparison number — trained-probe-only sample-mode mean Δ, all sessions + final) and `_compute_pin_adjusted_mean_deltas()`/`_compute_pinned_probes()` (control-pinned = pass_rate 1.0 in *every* session; both the unmodified all-probe mean and the excluding-pinned mean are always shown side by side, per M34's never-silently-redefine rule). `trained_spokes`/`seed_fixture_version` threaded as new optional params through `generate_experiment_report()` → `_section_61_learning_measures()`/`generate_control_shadow()` → the admin `POST /reports/generate-experiment` request body → `scripts/harness/client.py`/`runner.py` (so future harness runs populate these sections automatically from the plan, not just on-demand admin calls). Markdown rendering added to both §6.1 and §6.2; every new block degrades to —/an explanatory line rather than crashing when the underlying key is absent (verified against a report dict with none of the M39 keys). 91 new tests (new `test_spoke_membership.py` plus additions to `test_learning_measures.py`, `test_control_shadow.py`, `test_experiment_report.py`, `test_markdown_renderer.py`, `test_runner.py`), 1083 total, no regressions. **Live verification (the milestone's own done-criterion) run against the real `memory/graph.db` via the real `POST /admin/reports/generate-experiment` endpoint, Docker backend up:** regenerated `experiment_report_exp0-2026-07-26_learned` and `experiment_report_exp0b-2026-08-06_learned` with `trained_spokes={cluster_a: a_spoke1, cluster_b: b_spoke3, cluster_c: c_spoke1, cluster_d: d_spoke5}`. exp0b's per-cluster final-session winners came back **a_spoke2 / b: no stable winner (all 7 tied at 0.0) / c_spoke3 / d_spoke6, none trained** — an exact match to the pre-registered hand-analysis in the milestone's own §6 note. Pinned-probe classification caught **exactly** the worked example: `vs_a1`/`vs_c1`/`vs_d1` under `static_weight`, `vs_d5` under `random_weight` (both from real exp0b data, not a synthetic check). Pin-adjustment moved the static-weight sample-mode mean Δ from ~0.002 (all probes) to +0.118 (excluding pinned) — confirming the milestone's central claim that control tie-break pins were cancelling learned's real gains in the old all-probe mean. Trained-subset final-session mean Δ came back negative against both controls (static −0.46, random −0.21 on exp0b) — the trained spokes did not win their own clusters, the central open question M40's Round 1 now measures the noise floor for. See PROGRESS.md 2026-08-09 (b) entry for the full read. Branch: `milestone-39-config-comparison-endpoints`.
+
+**Milestone 43:** Complete — both phases built in one session per Paul's sequencing decision. **Phase 1 (assertion):** `GET /admin/effective-config` (`backend/api/admin.py`) returns the orchestrator's actually-resolved `_CONFIG`/`_CONFIG_HASH` (imported, never re-read from disk — the trap the milestone's own planning flagged: a disk re-read would certify the "edited but not restarted" bug it exists to catch). `RunPlan.expected_config` (dotted-key dict, shape-validated, participates in `plan_config_hash`); `scripts/harness/config_assert.py` (`find_config_mismatches()`, shared by `runner.py` and `queue.py` so the two call sites can't drift on what "mismatch" means). `runner.py`'s check runs **once per condition** (not once globally before the loop) — a deliberate placement decision beyond the plan's literal single-preflight-step text: checking before any restart would false-positive against whatever a *previous* plan/condition left the backend running, which is exactly the state Phase 2's cross-config queueing needs to tolerate. `queue.py` step 5 mirrors this by enforcing only for plans whose `config_overrides` is empty, while always recording `runtime_config_hash` for every plan regardless. **Phase 2 (injection):** `RunPlan.config_overrides` rides the harness's existing per-condition `restart_backend_fn` call as `CONFIG_OVERRIDES_JSON` (docker-compose.yml passthrough); `backend/core/config_overrides.py` (`apply_config_overrides()` — dotted-key deep merge, hard-fails on an unknown key or malformed JSON at import time) is called from `core/orchestrator.py` *before* `_CONFIG_HASH`/`EDGE_UPDATE_CFG`/every derived constant. **Scope grew beyond the plan's explicitly-named risk** (only `memory/extractor.py` was flagged): `analytics/seed_fixture.py`'s `_load_seed_priors()` and both `analytics/reports/experiment_report.py`/`series_report.py`'s `_load_config()` also independently read `config.yaml` from disk, and read exactly the keys exp01's two configs sweep (`edge_update.seed_prior_alpha/_beta` for cfgA; `reporting.pass_rank_thresholds.spoke_retrieval` for cfgB) — left unfixed, cfgA's seed edges and cfgB's pass/fail scoring would have silently used the un-overridden value even with Phase 2 fully wired elsewhere. All four now apply the same merge. `config.yaml` is never written by the harness (M42's rollback-hazard concern is moot — nothing to roll back). The 4 exp01 plans (not yet run) got `expected_config` populated from their existing `plan_name` prose, at zero cost since their `run_id` was always going to be whatever `--generate-bank` produces on first real invocation. 68 new tests (`test_config_overrides.py`, `test_config_overrides_wiring.py` — import-time reload tests confirming `_CONFIG_HASH` differs with/without an override and that `decay.enabled: true` still hard-rejects post-merge, `test_config_assert.py`, `test_client_effective_config.py`, `test_effective_config.py`, plus extensions to `test_schema.py`/`test_manifest.py`/`test_runner.py`/`test_queue.py`), 1151 total, no regressions. Branch: `milestone-43-plan-declared-config-build`.
+
+**Milestone 43 (review pass, same day):** Paul's PR review found four gaps; all
+fixed on the same branch, plus the live verification the build session couldn't
+run (Docker was down then, up now). **(1) Queue manifest under-recorded.** Phase
+1 step 5 asks for `runtime_config_hash` *and* the resolved snapshot per plan;
+only the hash was stored, while `harness_usage.md`/PROGRESS.md claimed both.
+`QueuePlanManifestEntry.resolved_config_snapshot` added — the docs' claim is now
+true rather than the claim being softened. **(2) `--no-docker-restart` silently
+disabled Phase 2** — the real defect this pass found. `config_overrides` ride the
+per-condition restart *only*, so `--no-docker-restart` (a real flag on both CLIs)
+delivered none of them, and a plan declaring `config_overrides` with no
+`expected_config` — which `schema.py` explicitly permits ("supply without
+asserting") — would have run to completion against the un-overridden
+`config.yaml` with nothing to detect it: precisely the failure class M43 exists
+to kill, reintroduced through a flag. Now an unconditional hard stop in both
+`execute_run()` (before the condition loop) and `run_preflight()` (before the
+backend is even consulted, so a queue dies at minute zero naming every offending
+plan). **(3) exp01 didn't use Phase 2.** The four plans asserted their config but
+supplied nothing, so exp01 would still have run on the manual config-switch
+protocol and Phase 2 would have shipped with zero production exercise. All four
+now carry `config_overrides` matching their `expected_config` (free — unrun), so
+the assertion doubles as proof the injection took effect, which is exactly the
+relationship the Phase-1-feeds-Phase-2 architecture diagram describes. Their
+`plan_name` prose, which still read "REQUIRES config.yaml state: ... the config
+lives in config.yaml per the M42 protocol", was corrected to match. The two
+exp01 queue files are kept as an operational split (two ~5 h nights, not one
+~10 h run), no longer as a harness constraint. **(4) Dotted-key collision open
+question closed** — `find_dotted_key_collisions()` asserts no live-config key
+contains a literal "." on the effective-config call both preflights already
+make, for plans using dotted paths only; a unit test pins the premise against
+the committed `config.yaml`. 15 further tests (1166 total, no regressions).
+
+**Live verification (real Docker backend + real gemma4:e4b, 2026-08-13), every
+done-criterion in both phases:** *Phase 1* — the trap itself reproduced end to
+end: `config.yaml` edited on disk without a restart, after which
+`GET /admin/config` reported the fresh 3.0 while `GET /admin/effective-config`
+reported the stale 1.0 the run would actually have used, and a real
+`run_experiment_queue.py --dry-run` preflight hard-stopped naming both keys
+(`expected=3.0 actual=1.0`) — the exact certification failure a
+`/admin/config`-based check would have produced. The same plan passed once the
+backend was restarted, and correctly still flagged `seed_prior_beta` alone in
+the intermediate state where only alpha had been edited. `config.yaml` reverted;
+`git status` clean. *Phase 2* — a **single queue ran two plans with different
+`config_overrides`** (`m43-cross-config`, COMPLETE, exit 0): cfgA's condition
+resolved `runtime_config_hash=b4684ea6…` with `seed_prior_alpha=3.0` and cfgB's
+knobs at baseline, cfgB's resolved `9b0b7f73…` with `seed_prior_alpha` back at
+1.0 and `retrieval_level2_top_k=2`/`spoke_retrieval=5` — three distinct runtime
+hashes in one invocation, each restart carrying its own config, and
+`expected_config verified … 2 key(s) matched` printed for both. `analytics.
+full_config_snapshot` on the resulting real run rows shows the overridden values
+while `config.yaml` on disk stayed at its committed 1.0/1.0/1/4 throughout
+(`git status` clean the whole time — the M42 rollback hazard is genuinely moot).
+A malformed `CONFIG_OVERRIDES_JSON`, an unknown dotted key, and a typo'd key
+(`seed_prior_alfa`) each hard-failed at container import, before any run state
+existed; `decay.enabled: true` supplied as an override still hit
+`validate_edge_update_config()` and was rejected — the merge does not route
+around the validator, the third flagged risk. The `--no-docker-restart` guard
+was exercised against the real exp01 cfgA plan (hard stop) and the same queue
+passed with restarts enabled. Backend left at its original baseline hash
+`c95248806877` with `overridden_keys: []`; the graph is wiped/re-seeded to
+seed_v3 + one verification turn (37 MUs), which is the state exp01 wipes from
+anyway. Throwaway analytics rows live under `m43-live-cfgA/cfgB_dryrun_learned`
+experiment_ids.
 
 **Milestone 41:** Complete — report-layer only, no schema change, restricted to `backend/analytics/reports/control_shadow.py` + `markdown_renderer.py`. `_compute_session_mean_deltas()` extracted (shared session-mean/final-session-mean arithmetic) so `_compute_trained_subset_comparison()`'s new optional `pinned_probe_ids` param computes the raw mean and an excluding-pinned mean through the identical code path — the same M39 `_aggregate_deltas_by_phenomenon` rationale, applied to the trained-subset number this time. New output keys are purely additive (`pinned_trained_probe_ids`, `matched_probe_count_excluding_pinned`, `mean_delta_by_session_excluding_pinned`, `final_session_mean_delta_excluding_pinned`, `control_pinned` per per_probe row); the existing raw keys are untouched, verified both by unit test (equality assertion, not closeness) and by live regeneration. `generate_control_shadow()` reordered so `pinned_probe_ids` is computed before the trained-subset call, feeding both M39's all-probe pin-adjustment and M41's trained-subset pin-adjustment from one computation. All-pinned degrades to `None`/count-0, never `0.0` (verified by dedicated test — the all-pinned hazard the milestone called out explicitly). Markdown block retitled `(M39/M41)`, gains a control-pinned-trained-probes line and a second headline figure (both means always shown with their probe counts), and an explicit all-pinned note gated on M41-key *presence* (not a defaulted zero) so a pre-M41 stored report can never trigger a false "all pinned" note — the one subtlety the backward-compat tests exist to catch. 10 new tests (1093 total, no regressions) across `test_control_shadow.py`/`test_markdown_renderer.py`, plus the existing M39 end-to-end `generate_experiment_report` test in `test_experiment_report.py` extended (its `vs_a1` fixture — control pinned at 1.0 both sessions, the only trained probe with data — already is the all-pinned case). **Live verification (done-criterion) regenerated exp0-a, exp0b, and both Round 1 replicates against the real `memory/graph.db`.** Confirmed unchanged, exactly: raw trained-subset final Δ (−0.46/−0.20/−0.12 for rep1/rep2/rep3) and the M39 all-probe pin-adjusted finals (+0.096/+0.007/+0.039) — proof this milestone touched nothing outside its scope. **One correction the live run surfaced against the milestone's own pre-build hand-worked example:** rep3 pins only `vs_c1`, not `vs_a1` as the planning-time table assumed (`vs_a1`'s static control reads 0.0 in 2 of rep3's 5 sessions, so the unchanged "1.0 in every session" rule correctly excludes it — the table's author had eyeballed only the final session). Across all three Round 1 replicates, real pin counts are `vs_a1`: 1/3 (exp0b/rep1 only), `vs_c1`: 2/3 (rep1, rep3) — the earlier "`vs_a1` 3/3" claim carried in PROGRESS.md/BUILD-PLAN was a hand-read generalization error, corrected here rather than propagated. **Recomputed pin-adjusted trained-subset Δ envelope across the three replicates: [−0.20, +0.16]** (rep1 0.0, rep2 −0.20 — nothing pinned that replicate — rep3 +0.16), recorded alongside the existing raw envelope [−0.46, −0.12] in M42's decision rule, which now names both and which metric each governs. See PROGRESS.md 2026-08-12 entry for the full read including per-probe detail. Branch: `milestone-41-pin-adjusted-trained-subset-delta`.

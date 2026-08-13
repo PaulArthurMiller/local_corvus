@@ -8,10 +8,16 @@ env-override automation) is COMPLETE and pushed, branch
 phases landed in one session per Paul's sequencing decision (both must land
 before exp01 runs). See BUILD-PLAN.md's Milestone 43 status paragraph and
 the session log entry below for full detail. 1151 tests passing, no
-regressions. **AWAITING PAUL:** review + merge the PR, then exp01's queues
-(`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`) can run — the 4
-plans now declare `expected_config` so a forgotten `config.yaml` switch
-hard-stops instead of silently running the wrong config. The rest of this
+regressions (1166 after the review pass below). **UPDATE (review pass,
+same day):** Paul's PR review found four gaps — all fixed on the same
+branch — and the live Docker verification the build session had to skip is
+now done, covering every "Done when" criterion in both phases. **AWAITING
+PAUL:** review + merge the PR, then exp01's queues
+(`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`) can run. The 4
+plans now declare **both** `expected_config` and `config_overrides`, so
+exp01 needs **no manual `config.yaml` switch at all** — each plan's own
+per-condition restart establishes its config, and the assertion verifies
+the injection took effect. The rest of this
 "Current state" section (below) predates this and is retained for history;
 see BUILD-PLAN.md's own per-milestone Status log for the more current
 narrative on milestones after M34.
@@ -1363,3 +1369,48 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
     verified against a fake backend (real-Docker pass still recommended
     before the actual exp01 launch, noted above), no regressions. AWAITING
     PAUL: PR review + merge.
+
+- 2026-08-13 (b): /review follow-up — Milestone 43 review fixes + full live verification
+  - Paul reviewed the M43 PR against the BUILD-PLAN and asked for all four
+    review findings implemented plus the live run. See BUILD-PLAN.md's
+    "Milestone 43 (review pass, same day)" paragraph for the full record.
+  - **The one real defect found:** `--no-docker-restart` silently disabled
+    Phase 2 entirely. `config_overrides` are delivered *only* by the
+    per-condition backend restart, so that flag (present on both CLIs)
+    delivered none of them — and since `schema.py` explicitly allows a plan
+    to supply without asserting, a `config_overrides`-only plan would have
+    run to completion against the un-overridden `config.yaml` with nothing
+    to detect it. That is the exact silent-wrong-config failure M43 exists
+    to kill, reintroduced through a CLI flag. Now an unconditional hard stop
+    in `execute_run()` and in `run_preflight()` (minute zero, before the
+    backend is consulted at all).
+  - Also fixed: the queue manifest now records `resolved_config_snapshot`
+    alongside `runtime_config_hash` (Phase 1 step 5 asked for both, and the
+    docs already claimed both); the dotted-key-collision open question is
+    closed with `find_dotted_key_collisions()` asserted against the *live*
+    config; and all 4 exp01 plans now carry `config_overrides` (not just
+    `expected_config`), with their stale "REQUIRES config.yaml state ..."
+    prose corrected.
+  - **exp01 no longer needs a manual config switch.** Each plan supplies its
+    own config and asserts it. The two queue files remain as an operational
+    split (two ~5 h nights vs one ~10 h run), not a harness constraint —
+    merge them into one 4-plan queue whenever that's preferable.
+  - **Live verification, real Docker backend + real gemma4:e4b** (Docker was
+    up this session): the edit-without-restart trap reproduced end to end
+    (`/admin/config` fresh 3.0 vs `/admin/effective-config` stale 1.0, real
+    preflight hard-stopping on both keys), the same plan passing after a
+    restart, a real 2-plan cross-config queue completing with three distinct
+    `runtime_config_hash` values and `expected_config verified` on both
+    plans, `full_config_snapshot` on real run rows carrying the overridden
+    values while `config.yaml` stayed committed-clean (`git status` clean
+    throughout), malformed/unknown/typo'd overrides each hard-failing at
+    container import, and `decay.enabled: true` still rejected by
+    `validate_edge_update_config()` post-merge.
+  - Environment left clean: backend restored to baseline
+    `runtime_config_hash=c95248806877` / `overridden_keys: []`, `config.yaml`
+    untouched. The graph is wiped/re-seeded to seed_v3 + one verification
+    turn (37 MUs) — the state exp01 wipes from anyway — with the previous
+    667-MU exp0b-rep3 graph archived by the harness's own wipe, and
+    throwaway analytics rows under `m43-live-cfgA/cfgB_dryrun_learned`.
+  - 1166 tests passing (15 new beyond the build session's 1151), no regressions.
+  - Branch: `milestone-43-plan-declared-config-build` (same PR, updated)

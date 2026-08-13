@@ -425,10 +425,20 @@ per-condition backend restart injects them for that plan only, and
 | Two configs in a sweep, `config.yaml` switched by hand between them | no | no | **Separate invocations, one per config** (unchanged — M43 Phase 1 now also *catches* a forgotten switch, see below) |
 | Two configs in a sweep, each plan supplies its own `config_overrides` | no | yes | **Queue them together** — each plan's own restart carries its own config (M43 Phase 2) |
 
-This is why exp01's Round 2 still ships as *two* queue files
-(`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`) — those plans predate
-M43 and rely on the manual config-switch protocol below. A plan written with
-`config_overrides` from the start would not need this split.
+exp01's Round 2 plans **carry their own `config_overrides`** (all four, as of
+M43): cfgA supplies `edge_update.seed_prior_alpha`/`_beta: 3.0`, cfgB supplies
+`hyperparameters.retrieval_level2_top_k: 2` and
+`reporting.pass_rank_thresholds.spoke_retrieval: 5`, each inheriting everything
+else from `config.yaml` unchanged. **No manual config switch is required for
+exp01** — start the queue and each plan's own per-condition restart establishes
+its own config. Each plan also asserts the same keys via `expected_config`, so
+the assertion doubles as proof the injection took effect.
+
+The two queue files (`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`)
+are kept as an *operational* split — two ~5 h nights rather than one ~10 h
+run — not because the harness requires it. They may now be merged into one
+four-plan queue whenever running them back to back is preferable; nothing in
+the harness objects.
 
 **Why the pre-M43 failure was silent.** `config_hash` is computed over the
 *plan file only*. Two plans that differ solely in which `config.yaml` they
@@ -471,6 +481,19 @@ one that was resolved at the last container boot.
   A malformed override or an unknown dotted key hard-fails at container
   import — before any run state exists — the same posture as
   `validate_edge_update_config()`.
+- **`config_overrides` requires the backend restart.** They are delivered
+  *only* by the per-condition restart, so `--no-docker-restart` would
+  silently deliver none of them. Both CLIs therefore hard-stop up front when
+  a plan declares `config_overrides` and restarts are disabled — the queue at
+  preflight (minute zero, naming every offending plan), the single-plan
+  runner before its first condition. Never work around this by exporting
+  `CONFIG_OVERRIDES_JSON` by hand: the harness would then have no record of
+  what was live, which is the whole failure mode M43 exists to close.
+- **A `config.yaml` key containing a literal `.` is rejected.** It would make
+  every dotted path ambiguous between the nested path and the flat key. No
+  such key exists today (57 leaves), and both preflights now assert that
+  against the *live* config rather than assuming it — but only for plans that
+  actually use dotted paths, so pre-M43 plans are unaffected.
 - Both fields participate in `plan_config_hash` — a plan that declares its
   config *is* a different plan, which is the actual fix for "two plans that
   differ only in an assumed `config.yaml` state look identical to the

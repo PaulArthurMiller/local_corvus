@@ -404,37 +404,88 @@ them, never edits plans. A wrong plan fails preflight and a human fixes it.
 Queue settings live in the queue file only — never in `config.yaml`. They are
 per-queue operational choices, not experimental knobs under study.
 
-### ⚠️ One queue = one `config.yaml` state
+### ⚠️ One queue = one `config.yaml` state (conditional as of M43)
 
-**This is the constraint that decides how you split your runs, and getting it
-wrong fails silently.**
+**This is the constraint that decides how you split your runs.** Before
+Milestone 43 it was absolute and its violation was silent; M43 closes the
+silence (Phase 1 — see "Plan-declared config: the M43 assertion" below) and,
+for a plan that opts in via `config_overrides` (Phase 2), the constraint no
+longer applies to that plan at all.
 
-`RunPlan` has no hyperparameter fields. Hyperparameters live in `config.yaml`,
-which is bind-mounted into the backend container and applies to every run until
-changed again. So a queue can span exactly as many plans as share one
-`config.yaml` state:
+`RunPlan` has no *general* hyperparameter fields. Hyperparameters live in
+`config.yaml`, which is bind-mounted into the backend container and applies to
+every run until changed again — unless a plan supplies its own
+`config_overrides` (M43 Phase 2), in which case the harness's own
+per-condition backend restart injects them for that plan only, and
+`config.yaml` itself is never touched.
 
-| | Same `config.yaml`? | Verdict |
-|---|---|---|
-| Replicates of one config (differing only in `random_seed`) | yes | **Queue them** |
-| Two configs in a sweep (different hyperparameters) | no | **Separate invocations, one per config** |
+| | Same `config.yaml`? | Any plan uses `config_overrides`? | Verdict |
+|---|---|---|---|
+| Replicates of one config (differing only in `random_seed`) | yes | no | **Queue them** (unchanged) |
+| Two configs in a sweep, `config.yaml` switched by hand between them | no | no | **Separate invocations, one per config** (unchanged — M43 Phase 1 now also *catches* a forgotten switch, see below) |
+| Two configs in a sweep, each plan supplies its own `config_overrides` | no | yes | **Queue them together** — each plan's own restart carries its own config (M43 Phase 2) |
 
-This is why a two-config round like exp01 ships as *two* queue files
-(`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`), run on separate
-nights with a `config.yaml` edit between them — not one four-plan queue.
+This is why exp01's Round 2 still ships as *two* queue files
+(`queues/exp01_cfgA_*.json`, `queues/exp01_cfgB_*.json`) — those plans predate
+M43 and rely on the manual config-switch protocol below. A plan written with
+`config_overrides` from the start would not need this split.
 
-**Why the failure is silent.** `config_hash` is computed over the *plan file
-only*. Two plans that differ solely in which `config.yaml` they assume produce
-byte-identical hashes for everything the harness checks. If you forget the edit,
-the run completes normally, writes reports, and passes every §6.2/§6.3 integrity
-and sanity check — it is simply a replicate of the previous config, silently.
-Nothing in the harness detects this, because nothing in the harness reads
-`config.yaml`.
+**Why the pre-M43 failure was silent.** `config_hash` is computed over the
+*plan file only*. Two plans that differ solely in which `config.yaml` they
+assume produce byte-identical hashes for everything the harness checks. If you
+forgot the edit, the run completed normally, wrote reports, and passed every
+§6.2/§6.3 integrity and sanity check — it was simply a replicate of the
+previous config, silently. The only provenance was
+`analytics.full_config_snapshot`, stamped on every run row — checkable only
+*after* the fact, once the night was already spent.
 
-The only provenance is `analytics.full_config_snapshot`, stamped on every run
-row — checkable only *after* the fact.
+### Plan-declared config: the M43 assertion + injection
 
-### The config-switch protocol
+**`GET /admin/effective-config`** (additive; `GET /admin/config` is
+unchanged and still just re-reads the file) returns what the orchestrator
+actually *resolved* at process startup — `config.yaml` merged with any
+`CONFIG_OVERRIDES_JSON` — plus `runtime_config_hash` (a sha256 over that
+resolved config, distinct from `config_hash`, which hashes the *plan*) and
+`overridden_keys`. Re-reading the file would certify the exact bug this
+exists to catch: edit `config.yaml`, skip the restart, and a naive check
+would see the fresh disk value while every turn still executes on the stale
+one that was resolved at the last container boot.
+
+- **`RunPlan.expected_config`** (Phase 1) — `{"dotted.key": expected_value}`.
+  Checked once per condition, after that condition's restart (if any) and
+  before its wipe/seed. A mismatch — including a declared key absent from
+  the live config — is an unconditional hard stop naming every offending
+  key as `key: expected=X actual=Y`. `queue.py`'s own preflight (step 5)
+  checks it too, once per plan, but only enforces it for a plan whose
+  `config_overrides` is empty — a plan that supplies its own overrides gets
+  its config established by its own restart once it actually runs, so
+  checking it against whatever the *previous* plan left the backend running
+  would false-positive.
+- **`RunPlan.config_overrides`** (Phase 2) — same dotted-key shape, injected
+  via the harness's existing per-condition backend restart as
+  `CONFIG_OVERRIDES_JSON`. `config.yaml` is never written — the merge happens
+  in-process (`core/orchestrator.py` and every other module that
+  independently loads `config.yaml`: `memory/extractor.py`,
+  `analytics/seed_fixture.py`, `analytics/reports/experiment_report.py`,
+  `analytics/reports/series_report.py`) before anything is derived from it.
+  A malformed override or an unknown dotted key hard-fails at container
+  import — before any run state exists — the same posture as
+  `validate_edge_update_config()`.
+- Both fields participate in `plan_config_hash` — a plan that declares its
+  config *is* a different plan, which is the actual fix for "two plans that
+  differ only in an assumed `config.yaml` state look identical to the
+  harness."
+- Every run and queue manifest records `runtime_config_hash` + the full
+  resolved snapshot, regardless of whether `expected_config` is set — this
+  is the provenance half, independent of the assertion half.
+
+### The config-switch protocol (manual — for plans without `config_overrides`)
+
+A plan that doesn't opt into `config_overrides` (M43 Phase 2) still relies on
+this manual protocol; the difference from before M43 is that step 5's
+verification is no longer optional discipline — a plan with `expected_config`
+set will hard-stop on its own if you skip the restart, instead of silently
+running the previous config.
 
 Per config, in order:
 
@@ -472,7 +523,7 @@ rather than two hours in. In protocol order, all hard stops:
 | 2 | Every enabled plan loads and validates (field-identifying errors) |
 | 3 | **Duplicate `config_hash` across plans** — catches a forgotten `random_seed` bump between replicates, with the message "replicates need distinct `random_seed` values" |
 | 4 | Per-plan bank resolution. A plan needing fresh Sonnet generation, or one with neither a bank nor `subjects: "auto"`, hard-stops — placeholder turns in an unattended overnight run are wasted GPU-hours |
-| 5 | Backend `/health`; every distinct `judge.model` present on Ollama |
+| 5 | Backend `/health`; `GET /admin/effective-config` (M43 — enforced per plan only when that plan's `config_overrides` is empty; always recorded for provenance); every distinct `judge.model` present on Ollama |
 | 6 | Aggregate estimated cost across all plans vs. `max_total_budget_usd` |
 | 7 | Projected archive count + free-disk WARN (never a hard stop) |
 
@@ -820,7 +871,9 @@ Lessons from the 2026-07-06 real-model pilot that affect how you set up the
 | Queue: `plan ... needs fresh Sonnet prompt-bank generation` | A queued plan has no resolvable bank. Generate it interactively first (`--generate-bank`), then set `prompt_bank_path` — the queue refuses to spend on API calls unattended |
 | Queue: `was launched from a different queue file (queue_content_hash mismatch)` | The queue file changed since that launch directory was created. Start a fresh launch, or `--resume-dir` the correct one. Never edit a queue file mid-flight |
 | Queue halts after one plan despite `on_plan_failure: "continue"` | The post-failure backend health recheck failed, so the remainder was halted deliberately rather than failing identically against a dead backend. Check `docker compose logs backend` |
-| Two configs' results look identical / a sweep shows no effect | **Check `full_config_snapshot` on a run row from each experiment first.** The likeliest cause is a `config.yaml` edit that was never made or never applied — nothing in the harness reads `config.yaml`, so this failure is silent by construction. See §7 |
+| Two configs' results look identical / a sweep shows no effect | **Check `full_config_snapshot` on a run row from each experiment first.** For a plan predating M43 (no `expected_config`), the likeliest cause is a `config.yaml` edit that was never made or never applied. A plan with `expected_config` set would have hard-stopped instead of running silently — if it didn't, the config really was live; look elsewhere. See §7 |
+| `expected_config mismatch — key: expected=X actual=Y` | The live backend (`GET /admin/effective-config`) disagrees with the plan's declared config. Either `config.yaml` was never edited, or it was edited but the backend was never restarted — the M43 Phase 1 assertion exists specifically to catch the second case, which a plain `GET /admin/config` re-read would miss |
+| `expected_config mismatch ... actual=<missing>` | The plan declares a dotted key that doesn't exist in the live `config.yaml` at all — a typo, or a key renamed since the plan was written |
 
 ---
 

@@ -67,7 +67,7 @@ Work through this list before every full-sized run:
 1. **Clean `main`.** Pull latest; make sure any pending fix PRs that touch the
    harness or report layer are merged. Run the full suite on the host:
    ```powershell
-   pytest
+   python -m pytest
    ```
    All tests must pass. A full run takes an hour-plus of wall clock — don't
    spend it on a known-broken tree.

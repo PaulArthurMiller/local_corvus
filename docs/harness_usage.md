@@ -16,7 +16,7 @@ Read this document top to bottom before your first full run. After that, the
 ```powershell
 # 1. Stack up, Ollama serving, tests green
 docker compose up -d --build
-pytest
+python -m pytest
 
 # 2. Dry-run the plan (2 turns, 1 condition, isolated _dryrun identity)
 python scripts/run_experiment_harness.py --plan plans/my_plan.json --dry-run

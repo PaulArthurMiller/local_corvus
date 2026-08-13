@@ -73,6 +73,40 @@ def test_load_manifest_returns_none_when_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# M43 Phase 1 — runtime_config_hash / resolved_config_snapshot
+# ---------------------------------------------------------------------------
+
+def test_runtime_config_hash_and_snapshot_default_to_none():
+    plan = _plan()
+    config_hash = compute_config_hash(plan)
+    manifest = RunManifest(
+        run_id=compute_run_id(plan, config_hash),
+        plan=plan.model_dump(mode="json"),
+        config_hash=config_hash,
+    )
+    assert manifest.runtime_config_hash is None
+    assert manifest.resolved_config_snapshot is None
+
+
+def test_runtime_config_hash_and_snapshot_round_trip(tmp_path):
+    plan = _plan()
+    config_hash = compute_config_hash(plan)
+    run_id = compute_run_id(plan, config_hash)
+    manifest = RunManifest(
+        run_id=run_id,
+        plan=plan.model_dump(mode="json"),
+        config_hash=config_hash,
+        runtime_config_hash="fake-runtime-hash",
+        resolved_config_snapshot={"edge_update": {"seed_prior_alpha": 3.0}},
+    )
+    save_manifest(manifest, tmp_path)
+
+    loaded = load_manifest(run_id, tmp_path)
+    assert loaded.runtime_config_hash == "fake-runtime-hash"
+    assert loaded.resolved_config_snapshot == {"edge_update": {"seed_prior_alpha": 3.0}}
+
+
+# ---------------------------------------------------------------------------
 # M19 Phase 3 — attempt-suffix disambiguation (experiment_id collision fix)
 # ---------------------------------------------------------------------------
 

@@ -55,15 +55,29 @@ REAL_FIXTURE_PATH_V3 = FIXTURES_DIR / "seed_v3.json.gz"
 # ---------------------------------------------------------------------------
 
 class FakeBackendClient:
-    def __init__(self, health_error=None):
+    def __init__(self, health_error=None, effective_config_error=None, effective_config_response=None):
         self.health_error = health_error
         self.health_calls = 0
+        # M43 — defaults to a matches-anything empty config so every
+        # pre-M43 test (none of which set plan.expected_config) keeps
+        # passing unchanged.
+        self.effective_config_error = effective_config_error
+        self.effective_config_response = effective_config_response or {
+            "config": {}, "runtime_config_hash": "fake-runtime-hash", "overridden_keys": [],
+        }
+        self.effective_config_calls = 0
 
     def health(self):
         self.health_calls += 1
         if self.health_error:
             raise self.health_error
         return {"status": "ok", "db": "ok"}
+
+    def effective_config(self):
+        self.effective_config_calls += 1
+        if self.effective_config_error:
+            raise self.effective_config_error
+        return self.effective_config_response
 
 
 class FakeJudgeClient:
@@ -550,3 +564,100 @@ def test_compute_queue_content_hash_stable_for_identical_content(tmp_path):
     hash_a = compute_queue_content_hash(load_queue_file(queue_path_a))
     hash_b = compute_queue_content_hash(load_queue_file(queue_path_b))
     assert hash_a == hash_b
+
+
+# ---------------------------------------------------------------------------
+# M43 Phase 1 — step 5 expected_config check + runtime_config_hash recording
+# ---------------------------------------------------------------------------
+
+def test_preflight_expected_config_mismatch_hard_stops_when_no_overrides(tmp_path):
+    """A plan relying on manual config.yaml setup (no config_overrides) must
+    be checked against the live backend at preflight time — this is the
+    'one queue = one config' pre-Phase-2 invariant."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", prompt_bank_path=str(bank_path),
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update": {"seed_prior_alpha": 1.0}},  # stale
+        "runtime_config_hash": "h-stale",
+    })
+    judge = FakeJudgeClient()
+
+    with pytest.raises(QueuePreflightError, match="planA.json"):
+        run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+
+
+def test_preflight_expected_config_match_does_not_hard_stop(tmp_path):
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", prompt_bank_path=str(bank_path),
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update": {"seed_prior_alpha": 3.0}},
+        "runtime_config_hash": "h",
+    })
+    judge = FakeJudgeClient()
+
+    resolution = run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+    assert resolution.manifest.plans[0].status == MANIFEST_STATUS_RESOLVED
+
+
+def test_preflight_skips_enforcement_for_plans_with_config_overrides(tmp_path):
+    """A plan carrying its own config_overrides gets its config established
+    by its own per-condition restart once execute_run() actually starts it
+    — enforcing expected_config against *this* backend's pre-restart state
+    would false-positive on exactly the cross-config queueing scenario
+    Phase 2 exists to support."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", prompt_bank_path=str(bank_path),
+        expected_config={"edge_update.seed_prior_alpha": 3.0},
+        config_overrides={"edge_update.seed_prior_alpha": 3.0},
+        random_seed=1,
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    # Backend still reflects some prior plan's config (1.0), not this one's —
+    # would hard-stop if enforced the same way as the no-overrides case.
+    client = FakeBackendClient(effective_config_response={
+        "config": {"edge_update": {"seed_prior_alpha": 1.0}},
+        "runtime_config_hash": "h-prior-plan",
+    })
+    judge = FakeJudgeClient()
+
+    resolution = run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+    assert resolution.manifest.plans[0].status == MANIFEST_STATUS_RESOLVED
+
+
+def test_preflight_records_runtime_config_hash_per_plan_regardless_of_overrides(tmp_path):
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(tmp_path / "planA.json", prompt_bank_path=str(bank_path))
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_response={
+        "config": {}, "runtime_config_hash": "queue-level-hash",
+    })
+    judge = FakeJudgeClient()
+
+    resolution = run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+    assert resolution.manifest.plans[0].runtime_config_hash == "queue-level-hash"
+    assert client.effective_config_calls == 1  # one shared call, not one per plan
+
+
+def test_preflight_effective_config_connectivity_failure_hard_stops(tmp_path):
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(tmp_path / "planA.json", prompt_bank_path=str(bank_path))
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_error=BackendConnectivityError("refused"))
+    judge = FakeJudgeClient()
+
+    with pytest.raises(QueuePreflightError, match="effective-config"):
+        run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)

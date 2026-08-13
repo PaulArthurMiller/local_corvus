@@ -11,6 +11,10 @@
   "probe_placement": "end",
   "probe_set_version": "v3",
   "seed_fixture_version": "v3",
+  "expected_config": {
+    "hyperparameters.retrieval_level2_top_k": 2,
+    "reporting.pass_rank_thresholds.spoke_retrieval": 5
+  },
   "trained_spokes": {
     "cluster_a": "a_spoke1",
     "cluster_b": "b_spoke3",

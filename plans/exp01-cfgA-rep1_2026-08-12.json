@@ -11,6 +11,10 @@
   "probe_placement": "end",
   "probe_set_version": "v3",
   "seed_fixture_version": "v3",
+  "expected_config": {
+    "edge_update.seed_prior_alpha": 3.0,
+    "edge_update.seed_prior_beta": 3.0
+  },
   "trained_spokes": {
     "cluster_a": "a_spoke1",
     "cluster_b": "b_spoke3",

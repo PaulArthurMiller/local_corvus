@@ -18,6 +18,16 @@ Read this document top to bottom before your first full run. After that, the
 ## Quick Start (for operators who have run one before)
 
 ```powershell
+
+# Disable sleep on AC power (0 = never)
+powercfg /change standby-timeout-ac 0
+
+# Also disable hibernate on AC power
+powercfg /change hibernate-timeout-ac 0
+
+# When the experiment is done, restore your normal timeout (example: 30 min)
+powercfg /change standby-timeout-ac 30
+
 # 1. Stack up, Ollama serving, tests green
 docker compose up -d --build
 python -m pytest

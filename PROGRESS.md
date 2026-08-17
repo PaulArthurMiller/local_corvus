@@ -2,6 +2,20 @@
 
 ## Current state
 
+**2026-08-17 update: Alpha item A (run-documentation process) is done — docs-only `/build`, no code.**
+`EVALUATIONS.md` created at repo root (fixed-heading run-evaluation log,
+format agreed in Alpha A.a) with its first entry backfilled — the
+2026-08-16 exp01 read, cross-linked to the four experiment reports rather
+than restating their numbers. The per-experiment setup-and-goals doc
+convention (Alpha A.c) is now a copyable template,
+`plans/TEMPLATE_setup-and-goals.md`; the first real use will be the
+`exp01-cfgA-rep3` setup doc (Alpha B.a). `EXPERIMENT-PLAN.md`'s item A and
+its three subitems are marked done with pointers to both new files. **Next
+step: Alpha B** (write the rep3 setup doc from the template, then run
+`exp01-cfgA-rep3` overnight) **with Alpha C** (lock-in analysis on existing
+data) **in parallel, before the rep3 read.** See the 2026-08-17 session log
+entry.
+
 **2026-08-16 update: exp01 (Round 2) RAN and the read session is done; EXPERIMENT-PLAN.md created.**
 All four exp01 experiments (cfgA rep1/rep2, cfgB rep1/rep2) completed clean —
 0 failed turns, 0 ghosts, all §6.3 checks PASS, M43 config injection verified
@@ -107,6 +121,34 @@ Forward-looking work items surfaced by past sessions but not yet built. Each say
 **Proposed fix (a `/build`-sized backend change, not a smoketest fix):** replace each per-probe loop with a **single** `query_probe_results(experiment_id=..., battery_mode=...)` call — no `probe_id` filter — and group the rows by `probe_id` in Python, keyed off the `get_all_probes()` list already loaded at line 1146. That turns 86–172 queries into **4** (mean, sample, and their two fallbacks) with no change to the returned shape, so `_compute_state_transitions()` / `_compute_sample_pass_rates()` and their tests are untouched. Worth a regression test asserting a probe with no results still gets an empty list rather than being dropped from the dict — the loops guarantee a key for every probe today, and a naive `groupby` would not.
 
 ## Session log
+
+- 2026-08-17: `/build` — Alpha item A (run-documentation process) complete — docs only, branch `alpha-a-run-documentation-process`
+  - **a. `EVALUATIONS.md` created** at repo root, matching the format agreed
+    in `EXPERIMENT-PLAN.md` A.a: newest-entry-first, fixed headings (What
+    ran / What it showed / Comparison to prior runs / Interpretation /
+    Implications / Next steps / Longer-term notes), deep dives deferred to
+    `docs/evaluations/` (not created yet — no entry has needed one).
+  - **b. First entry backfilled**: the 2026-08-16 exp01 read, covering all
+    four Round 2 reports against the three Round 1 baselines — cfgA 4/8
+    aligned (clear signal), cfgB 2/8 (null), the early-feedback lock-in
+    hypothesis, and Paul's seed-share reframe (conv MUs as permanent
+    infrastructure needing path-back, not noise to suppress). Numbers kept
+    to inline evidence for specific claims, not copied tables — the guardrail
+    the format itself specifies.
+  - **c. Setup-and-goals doc convention made concrete**:
+    `plans/TEMPLATE_setup-and-goals.md`, a copyable three-heading template
+    (What we adjusted / What we're watching for / How we'll measure) matching
+    A.c's spec exactly, with the naming rule (same basename as the plan
+    file, `.md` beside its `.json`) stated at the top and stripped from the
+    copy.
+  - `EXPERIMENT-PLAN.md` item A and all three subitems marked done, each
+    pointing at the file it produced.
+  - Files changed: `EVALUATIONS.md` (new), `plans/TEMPLATE_setup-and-goals.md`
+    (new), `EXPERIMENT-PLAN.md`, `PROGRESS.md`. No code, no tests — a pure
+    documentation milestone; BUILD-PLAN.md untouched (this is an
+    EXPERIMENT-PLAN item, not a numbered build milestone).
+  - **Next step:** Alpha B (rep3 setup doc from the new template, then run
+    `exp01-cfgA-rep3`) with Alpha C (lock-in analysis) in parallel.
 
 - 2026-08-16: exp01 read session + EXPERIMENT-PLAN.md created — no code
   - **The read (all four exp01 reports vs the three Round 1 baselines):** cfgA 4/8 aligned slots (rep1: vs_a1 only, dominant at 0.92–1.00; rep2: vs_b3 0.36, vs_c1 0.16, vs_d5 0.96) = pre-registered "clear signal", vs baseline 2/12. cfgB 2/8 (rep1: vs_a1 0.12, vs_c1 0.40; rep2: none) = pre-registered null. Trained-subset final Δ (raw): cfgA 0.00 / −0.13, cfgB −0.12 / −0.22 — only cfgA rep1 escapes the Round 1 envelope [−0.46, −0.12]. Pin-adjusted (M41) deltas small-positive in 3 of 4 runs; vs_c1/vs_d1 pinned again in several controls, vindicating M41. Universal dynamics held in all 4 runs: seed-share collapse (~45–55% → 4–17%), within-run up-rate decay, cross-cluster/mixed edges a trickle (2–9), zero failures/pressure/saturation. Mean-mode metrics flat 0.0000/4.0 again — dead instrument. cfgB rep1's 69.2% up-rate is the highest ever recorded, but rep2's 48.2% is in the normal band, so "wider K → better-judged answers" is one replicate's suggestion. cfgA's pre-registered "too slow to concentrate" signature did NOT appear (champions ≥ baseline band), so the Round 3 redirect to 2.0/2.0 priors is not triggered.

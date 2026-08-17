@@ -1,0 +1,9 @@
+{
+  "queue_id": "exp01_cfgA_rep3",
+  "on_plan_failure": "halt",
+  "max_total_budget_usd": 25.0,
+  "notification": { "enabled": true, "channel": "log" },
+  "plans": [
+    { "plan_path": "../plans/exp01-cfgA-rep3_2026-08-17.json" }
+  ]
+}

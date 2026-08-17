@@ -109,7 +109,11 @@ be inflated into an effect-size claim — and a poor rep3 must not be excused as
 rep1/rep2 (plan-declared `expected_config` + `config_overrides`, no manual
 config.yaml edit). Plan written and schema-validated:
 `plans/exp01-cfgA-rep3_2026-08-17.json` — differs from rep2 only in
-`plan_id`/`plan_name`/`random_seed`.
+`plan_id`/`plan_name`/`random_seed`. Queue file staged at
+`queues/exp01_cfgA_rep3_2026-08-17.json` (own `queue_id`, so resume
+auto-detect can't collide with the 2026-08-12 cfgA launch dirs);
+`on_plan_failure: "halt"` since a single-plan queue has nothing to continue
+to. **Not yet launched** — awaiting a night the machine is free.
 
 **c. Read against the pre-registered decision rule** (fixed here, before the
 run). Complete item C's analysis before this read if at all possible — an

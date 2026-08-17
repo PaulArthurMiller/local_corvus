@@ -40,12 +40,14 @@ slots were weak winners (0.16, 0.36). Universal dynamics held in every run:
 seed-share collapse (~45–55% → 4–17%), within-run up-rate decay, only a
 trickle of cross-cluster/mixed edges, zero failures/pressure/saturation.
 
-### A. Adopt the run-documentation process — *agreed 2026-08-16*
+### A. Adopt the run-documentation process — *done 2026-08-17*
 
 The two standing process pieces, established first because item B's run is
-the first consumer of both.
+the first consumer of both. All three subitems built as a docs-only
+`/build` pass (no code, no BUILD-PLAN milestone) — see PROGRESS.md's
+2026-08-17 session log entry.
 
-**a. Create `EVALUATIONS.md`** — the run-evaluation log, at repo root beside
+**a. Create `EVALUATIONS.md`** — done, at repo root beside
 BUILD-PLAN.md and PROGRESS.md. The durable record of what each run produced
 and what we decided it meant — the discussion layer reports can't capture.
 Working format (deliberately simple):
@@ -63,15 +65,17 @@ Working format (deliberately simple):
 - Guardrail against bloat: entries record *conclusions and reasoning*, not
   data — numbers live in the linked reports, never copied in.
 
-**b. Backfill the first entry:** the 2026-08-16 exp01 read (cfgA 4/8, cfgB
-null, the lock-in hypothesis, the path-back reframe).
+**b. Backfill the first entry:** done — `EVALUATIONS.md`'s 2026-08-16 entry
+covers the exp01 read (cfgA 4/8, cfgB null, the lock-in hypothesis, the
+path-back reframe).
 
-**c. Define the per-experiment setup-and-goals doc convention** — every
-experiment run from `exp01-cfgA-rep3` forward gets a brief pre-run statement
-of intent, so results are always read against what we said we were looking
-for. Shape: a markdown file in `plans/` with the same basename as the plan
-file (e.g. `plans/exp01-cfgA-rep3_<date>.md` beside its `.json`), short and
-fixed-format:
+**c. Define the per-experiment setup-and-goals doc convention** — done.
+Every experiment run from `exp01-cfgA-rep3` forward gets a brief pre-run
+statement of intent, so results are always read against what we said we were
+looking for. Shape: a markdown file in `plans/` with the same basename as the
+plan file (e.g. `plans/exp01-cfgA-rep3_<date>.md` beside its `.json`), short
+and fixed-format — see `plans/TEMPLATE_setup-and-goals.md` for the copyable
+template:
 
 - **What we adjusted** — the knob(s) and values, vs. what baseline.
 - **What we're watching for** — expected phenomena if the idea is right, and

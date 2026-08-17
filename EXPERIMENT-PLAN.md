@@ -85,20 +85,31 @@ template:
 - Backfilling older runs is not required; their intent lives in PROGRESS.md
   and BUILD-PLAN.md.
 
-### B. cfgA rep3 — settle the 4/8 — *agreed 2026-08-16*
+### B. cfgA rep3 — settle the 4/8 — *in progress 2026-08-17*
 
 **Goal:** determine whether cfgA's 4/8 is a real effect or replicate noise.
 One more replicate is the cheapest way to move from "promising" to
 "confirmed": 6/12 vs. 4/12 is the difference between "cfgA works" and
 "cfgA is baseline-plus-noise."
 
-**a. Write the setup-and-goals doc** (first use of the A.c convention).
-The one open design decision it must record: seed choice — fresh seed vs.
-reusing a Round 1 seed for another quasi-paired winner-identity read.
+**a. Write the setup-and-goals doc** (first use of the A.c convention) —
+*done 2026-08-17*, at `plans/exp01-cfgA-rep3_2026-08-17.md`. **Seed decision:
+reuse 20260726**, the one Round 1 baseline seed cfgA had not yet run (rep1 took
+20260809 = R1 rep2, rep2 took 20260810 = R1 rep3). It is a fresh sequence draw
+from cfgA's side — so the pooled 12-slot rule in B.c holds as pre-registered —
+while completing a 3×3 quasi-paired baseline-vs-cfgA set for item C. Reusing a
+seed cfgA had already run was rejected: it measures pipeline noise and breaks
+the independence the pooled rule assumes. Caveat recorded in the setup doc: this
+seed's baseline pair (`exp0b-2026-08-06`) was the weakest Round 1 replicate
+(0/4 aligned, the −0.46 trained-subset floor), so the paired narrative must not
+be inflated into an effect-size claim — and a poor rep3 must not be excused as
+"the hard seed."
 
 **b. Run `exp01-cfgA-rep3`** — overnight queue, same plan pattern as
 rep1/rep2 (plan-declared `expected_config` + `config_overrides`, no manual
-config.yaml edit).
+config.yaml edit). Plan written and schema-validated:
+`plans/exp01-cfgA-rep3_2026-08-17.json` — differs from rep2 only in
+`plan_id`/`plan_name`/`random_seed`.
 
 **c. Read against the pre-registered decision rule** (fixed here, before the
 run). Complete item C's analysis before this read if at all possible — an

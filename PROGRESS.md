@@ -2,6 +2,27 @@
 
 ## Current state
 
+**2026-08-16 update: exp01 (Round 2) RAN and the read session is done; EXPERIMENT-PLAN.md created.**
+All four exp01 experiments (cfgA rep1/rep2, cfgB rep1/rep2) completed clean —
+0 failed turns, 0 ghosts, all §6.3 checks PASS, M43 config injection verified
+working (cfgB's retrieval K change visibly took effect: 210 vs 168 retrieved
+per series). **Against the pre-registered M42 decision rules: cfgA = 4/8
+final-session cluster-slots aligned to trained spokes (vs 2/12 Round 1
+baseline) — exactly on the "clear signal" line; cfgB = 2/8 = null, not
+extended.** cfgA also produced the two strongest champions of the program
+(rep1 vs_a1 at 0.92–1.00 every session; rep2 vs_d5 climbing 0.40→0.96), and
+cfgA rep1's trained-subset final Δ of 0.00 is the first value outside the
+Round 1 raw envelope [−0.46, −0.12]. Caveats: replicate variance still dwarfs
+the config effect (vs_a1 = 1.00 champion in rep1, flat 0.00 in rep2), and two
+of cfgA's four aligned slots are weak winners (0.16, 0.36). Full discussion
+and agreed next steps live in **`EXPERIMENT-PLAN.md`** (new, repo root) —
+experiment planning now lives there as per-session Greek-lettered plans
+("Plan Concept Alpha" is this one), not BUILD-PLAN milestones. **Next step:
+Alpha items A–B — create EVALUATIONS.md + the rep3 setup doc, then run
+`exp01-cfgA-rep3` overnight; Alpha item C (early-feedback lock-in analysis on
+existing data) in parallel, before the rep3 read.** See the 2026-08-16
+session log entry.
+
 **2026-08-13 update:** Milestone 43 (Plan-Declared Config State — assertion +
 env-override automation) is COMPLETE and pushed, branch
 `milestone-43-plan-declared-config-build`, PR awaiting Paul's review. Both
@@ -86,6 +107,13 @@ Forward-looking work items surfaced by past sessions but not yet built. Each say
 **Proposed fix (a `/build`-sized backend change, not a smoketest fix):** replace each per-probe loop with a **single** `query_probe_results(experiment_id=..., battery_mode=...)` call — no `probe_id` filter — and group the rows by `probe_id` in Python, keyed off the `get_all_probes()` list already loaded at line 1146. That turns 86–172 queries into **4** (mean, sample, and their two fallbacks) with no change to the returned shape, so `_compute_state_transitions()` / `_compute_sample_pass_rates()` and their tests are untouched. Worth a regression test asserting a probe with no results still gets an empty list rather than being dropped from the dict — the loops guarantee a key for every probe today, and a naive `groupby` would not.
 
 ## Session log
+
+- 2026-08-16: exp01 read session + EXPERIMENT-PLAN.md created — no code
+  - **The read (all four exp01 reports vs the three Round 1 baselines):** cfgA 4/8 aligned slots (rep1: vs_a1 only, dominant at 0.92–1.00; rep2: vs_b3 0.36, vs_c1 0.16, vs_d5 0.96) = pre-registered "clear signal", vs baseline 2/12. cfgB 2/8 (rep1: vs_a1 0.12, vs_c1 0.40; rep2: none) = pre-registered null. Trained-subset final Δ (raw): cfgA 0.00 / −0.13, cfgB −0.12 / −0.22 — only cfgA rep1 escapes the Round 1 envelope [−0.46, −0.12]. Pin-adjusted (M41) deltas small-positive in 3 of 4 runs; vs_c1/vs_d1 pinned again in several controls, vindicating M41. Universal dynamics held in all 4 runs: seed-share collapse (~45–55% → 4–17%), within-run up-rate decay, cross-cluster/mixed edges a trickle (2–9), zero failures/pressure/saturation. Mean-mode metrics flat 0.0000/4.0 again — dead instrument. cfgB rep1's 69.2% up-rate is the highest ever recorded, but rep2's 48.2% is in the normal band, so "wider K → better-judged answers" is one replicate's suggestion. cfgA's pre-registered "too slow to concentrate" signature did NOT appear (champions ≥ baseline band), so the Round 3 redirect to 2.0/2.0 priors is not triggered.
+  - **The central open question sharpened:** identical configs produce a 1.00 champion in one replicate and flat 0.00 for the same probe in the other, and rising curves appear on untrained spokes (vs_d3 twice) — concentration without alignment. Hypothesis: the winner is decided by an early-feedback lottery in session 0–1, amplified rich-get-richer, with config only shifting the odds. Testable on existing data (concept Ba).
+  - **Paul's decisions this session** (recorded in EXPERIMENT-PLAN.md, Plan Concept Alpha): (1) run cfgA rep3 (Alpha B); (2) do the lock-in analysis (Alpha C); (3) **seed-share collapse reframed** — conv MUs are intended infrastructure, not noise; the goal is making them *stepping stones back* to the seed MU (strong seed↔prompt/seed↔response strengthening on upvoted seed-centered answers, retrieval that chases highest-weight edges back to a base MU). In a deployed system seeds won't be designated — they'll be enthroned/dis-enthroned by connected edge weight. Decay deferred; suppressing conv MUs rejected (Alpha D/F). (4) Judge: post-run re-grade loop with Sonnet/Opus over larger samples (Gemma failure rate ~10–20% from prior calibrations); Paul's leading explanation for the up-rate down-slope is *incomplete information in retrieved conv MUs*, i.e. a real retrieval problem the judge correctly reports, not judge drift — the strong-judge pass distinguishes these (Alpha E). (5) Cross-cluster transfer: keep passive tracking now, dedicated series later (Alpha standing item). (6) New process: EVALUATIONS.md run-evaluation log (root, fixed headings, deep dives in `docs/evaluations/`) and per-experiment setup-and-goals doc in `plans/` with the plan file's basename, from rep3 forward (Alpha A).
+  - **EXPERIMENT-PLAN.md created (repo root):** experiment planning moves out of BUILD-PLAN.md (which had bloated with experiment-specific reporting work). Each planning session yields an independent Greek-lettered plan (Alpha, Beta, …); within a plan, items A/B/C in time sequence (A completes before B unless noted), subitems a/b/c, then aa/ab, non-sequential lists bulleted. Explicitly not milestones and not numbered. Code needed by a plan item still becomes a BUILD-PLAN milestone. (Layout revised same session from an initial theme-letter scheme, which wouldn't have survived successive planning sessions.)
+  - Files changed: `EXPERIMENT-PLAN.md` (new), `PROGRESS.md`. No code, nothing committed yet.
 
 - 2026-08-13 (b): Milestone 43 (plan-declared config state) planned — /planner, no code, branch `claude-milestone-43-plan-declared-config`
   - **Origin:** the exp01 queueing question ("run replicates separately or queue them?") surfaced that `RunPlan` cannot express hyperparameters, so cfgA and cfgB plans are byte-identical except `plan_id`/`plan_name` and the actual knob lives in hand-edited `config.yaml`. Nothing in the harness reads `config.yaml`, so a forgotten edit yields a clean run, clean reports, and passing §6.2/§6.3 checks that are silently a replicate of the previous config.

@@ -1,0 +1,51 @@
+{
+  "plan_id": "exp01-cfgA-rep3-2026-08-17",
+  "plan_name": "Experiment Round 2 (exp01) config A replicate 3 — slow-evidence seed priors. Identical to exp01-cfgA-rep1-2026-08-12 and exp01-cfgA-rep2-2026-08-12 except plan_id/plan_name/random_seed. Config state is SUPPLIED BY THIS PLAN, not by config.yaml (M43 Phase 2): config_overrides sets edge_update.seed_prior_alpha: 3.0 and edge_update.seed_prior_beta: 3.0 (baseline 1.0/1.0), all else inherited from config.yaml unchanged. No manual config switch is required, and expected_config asserts the same two keys against the live backend before any graph mutation; analytics.full_config_snapshot on every run row remains the provenance record. random_seed 20260726 is the one Round 1 baseline seed cfgA has not yet run (rep1 reused 20260809 = R1 rep2, rep2 reused 20260810 = R1 rep3), so it is a third independent sequence draw for cfgA while completing the 3x3 quasi-paired baseline-vs-cfgA set at matched turn/probe sequences; its baseline pair is exp0b-2026-08-06, the weakest Round 1 replicate (0/4 aligned, trained-subset final delta -0.46). Question under test (Plan Concept Alpha item B): is cfgA's 4/8 final-session cluster-slot alignment a real directional effect or replicate noise? Pre-registered decision rule and watch list in plans/exp01-cfgA-rep3_2026-08-17.md, written before launch.",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 5,
+  "turns_per_series": 70,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "expected_config": {
+    "edge_update.seed_prior_alpha": 3.0,
+    "edge_update.seed_prior_beta": 3.0
+  },
+  "config_overrides": {
+    "edge_update.seed_prior_alpha": 3.0,
+    "edge_update.seed_prior_beta": 3.0
+  },
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
+  "difficulty": {
+    "hop_distance_levels": [0, 1]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": ["learned", "static_weight"],
+  "condition_order": ["learned", "static_weight"],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": 25.0,
+  "prompt_gen": {
+    "model": "claude-sonnet-5",
+    "max_retries": 2
+  },
+  "dry_run": false,
+  "dry_run_n": 2,
+  "random_seed": 20260726,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
+}

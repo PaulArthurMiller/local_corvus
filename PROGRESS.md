@@ -2,6 +2,31 @@
 
 ## Current state
 
+**2026-08-20 update (2): Plan Alpha item D discussion opened; a measurement defect found and filed as Milestone 44.**
+Reading `retrieve()` to settle item D.a's metric definitions surfaced that
+`POST /admin/run-probe` re-opens `config.yaml` from disk
+(`backend/api/admin.py:362-364`) instead of using the orchestrator's resolved
+`_CONFIG`, which the same file already imports at line 46. **M43 Phase 2's
+`CONFIG_OVERRIDES_JSON` therefore reaches every real turn and no probe
+measurement.** Confirmed against `memory/graph.db`: exp01-cfgB declared
+`retrieval_level2_top_k: 2`, its 210 real turns per series retrieved 5 MUs,
+and all 3,500 of its probe rows retrieved 4 — cfgB's "2/8 = null" is a null
+on a knob the probe battery never saw. cfgA is unaffected (seed priors are
+applied at fixture load by `seed_fixture.py`, on M43's list, and land in the
+`edges` table where probes read them), so **Plan Alpha items B and C stand as
+read.** Filed as BUILD-PLAN Milestone 44 (two phases: use the resolved config
++ a loader-inventory guard test; then a §6.3 `probe_retrieval_geometry` check
+whose acceptance criterion is that it FAILS the two archived cfgB reports and
+PASSES the other six). It should land before any item D instrumentation or
+item F knob run, since every item F read-side candidate is a
+`hyperparameters.*` knob measured by probes. **Open with Paul, not yet
+decided:** (1) whether item D.a adopts the exclusive reachability partition
+proposed in discussion in place of the three independent rates; (2) whether
+item D is scoped as an analysis script over archived data (feasible — the
+graph is exactly reconstructible from `analytics` rows plus the seed fixture,
+even though MU/edge tables are wiped per run); (3) whether cfgB gets re-run
+under correct measurement or is written off. Paul is thinking on (1) and (2).
+
 **2026-08-17 update: Alpha item A (run-documentation process) is done — docs-only `/build`, no code.**
 `EVALUATIONS.md` created at repo root (fixed-heading run-evaluation log,
 format agreed in Alpha A.a) with its first entry backfilled — the

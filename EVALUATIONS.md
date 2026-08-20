@@ -33,6 +33,93 @@ that data.
 
 ---
 
+## 2026-08-20 — exp01-cfgA-rep3 read: 1/4, cfgA lands ambiguous, priors look like a flattener
+
+**What ran.** `exp01-cfgA-rep3` alone (plan `plans/exp01-cfgA-rep3_2026-08-17.json`,
+setup-and-goals `plans/exp01-cfgA-rep3_2026-08-17.md`, report
+`memory/reports/experiment_report_exp01-cfgA-rep3-2026-08-17_learned.md`) — the
+third cfgA replicate (seed priors 3.0/3.0), at seed 20260726, the one Round 1
+baseline seed cfgA had not yet used. Read against the decision rule
+pre-registered in `EXPERIMENT-PLAN.md` item B.c and the setup doc, and against
+its quasi-paired baseline `exp0b-2026-08-06`. First read to use the A.c
+setup-and-goals convention.
+
+**What it showed.** **1/4 final-session cluster-slots aligned → pooled cfgA
+5/12 → the pre-registered *ambiguous* outcome**, which routes the config
+decision to item C. The single aligned slot is degenerate and should not be
+read as a win: `vs_a1` is control-pinned at 1.0000 in every session under
+static_weight, ran 0.04–0.12 in the learned condition (final Δ −0.88), and
+"won" cluster_a only because the whole cluster collapsed to the floor — 3
+passes against 2 out of 25 at session 5, and a coin-flip tie at session 4. The
+secondary champion watch fails outright: no probe reaches the Round 1 champion
+band (≥0.44) in any session except untrained `vs_a2` at 0.48 in session 1,
+decaying to zero, and the best trained-spoke value anywhere in the run is
+`vs_d5` at 0.16. All three paired predictions missed — `vs_b3` never started
+rather than decaying (0.04 → 0.00 and flat), `vs_d5` took cluster_d in sessions
+2–3 and lost it back, and `vs_d3` produced no third climb. Trained-subset final
+Δ of −0.19 sits inside the Round 1 envelope (+0.04 excluding the pin). The run
+itself is clean: every §6.3 integrity check PASS, `expected_config` asserted
+3.0/3.0, zero failures / ghost MUs / pressure / saturation, and all the
+universal dynamics present exactly as pre-registered non-outcomes.
+
+**Comparison to prior runs.** rep3 is the **flattest of the eight learned runs
+to date** — its best final-session cluster winner is 0.24, where every other run
+has at least one at 0.28 or above and most have one in the champion band.
+Nothing consolidated in any cluster, trained or untrained. Its own baseline pair
+at this seed was more decisive, not less: `exp0b-2026-08-06` handed cluster_d to
+untrained `vs_d6` at 0.84. So the honest paired statement is that cfgA aligned
+1/4 where baseline aligned 0/4, at a sequence where baseline nonetheless
+produced far stronger concentration. Pooled cfgA (5/12) still nominally exceeds
+the Round 1 baseline (2/12), but that margin is carried entirely by two slots —
+rep1's `vs_a1` and rep2's `vs_d5`.
+
+**Interpretation.** The working reading of cfgA changes: 3.0/3.0 priors are
+behaving as a **flattener**, not as a discriminator. They do what they were
+designed to do — dilute early evidence and keep exploration alive past session 1
+— and the consequence in rep3 is that *nothing* consolidates, rather than that
+the trained spoke gets a fairer chance. A preliminary pass at item C's
+preservation question supports this: session-1 winner survives to session 5 in
+roughly two-thirds of baseline slots but only about a fifth of exp01-config
+slots, with rep3 preserving none of its four, against a chance rate near
+one-in-seven. Lock-in therefore looks real in the program *and* substantially
+suppressed by both configs we have tried — which makes rep1's and rep2's
+successes read more like early lottery wins that happened to survive the
+flattening than like the config selecting for the trained spoke. That
+preliminary pass is a quick count with crude tie handling and a different run
+scope than item C specifies; it sharpens item C's hypothesis, it does not
+answer it.
+
+**Implications.** cfgA is **not confirmed** and should stop being treated as the
+presumptive base config for item F's knob search; that choice now waits on item
+C, as B.c pre-registered. More alignment replicates will not settle this — four
+binary slots per run cannot distinguish "the config worked" from "one slot got
+lucky," which makes the bottleneck a measurement problem and raises the priority
+of item D's per-turn instrumentation ahead of any further knob runs. Item E also
+gains relevance: a run this flat, with up-rate sliding 54.5% → 28.1%, is exactly
+where a 10–20% judge error rate correlated with context composition would most
+plausibly swamp the edge-update signal, so rep3 is a good re-grade candidate.
+One process gap surfaced: the setup doc predicted the wrong control-pinned
+probe, and the pin landed on the very slot that decided the primary outcome —
+checking which probes are control-pinned belongs *before* reading the winner
+table, since a pinned probe can win a cluster in the learned condition while
+scoring −0.88 against its control.
+
+**Next steps.** Alpha C, now, and extended to cover the baseline-vs-config
+preservation split above — it is the pre-registered tiebreaker for this exact
+outcome and the gate on Alpha F's base config. Alpha D before any further knob
+replicates. Alpha E, with rep3 as a re-grade candidate. Alpha F stays gated.
+
+**Longer-term notes.** Cross-cluster passive tracking: 7 cross-cluster and 5
+mixed edges, deltas in both directions, including two updates to a single
+`cluster_a → bridge_ab` edge — bridge-targeted edges have now appeared in three
+runs (`exp0b-2026-08-06`, cfgA rep2, cfgA rep3), still with zero bridge probes
+and no bridge activity in the probe results, so this remains an observational
+note rather than a signal. Mean-mode headline metrics read 0.0000 / 4.0 for the
+eighth consecutive run — the dead-instrument finding is now as well-evidenced as
+it is going to get.
+
+---
+
 ## 2026-08-16 — exp01 (Round 2) read: cfgA confirms, cfgB nulls, lock-in hypothesis opens
 
 **What ran.** All four exp01 Round 2 experiments, read together in one

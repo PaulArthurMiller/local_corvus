@@ -85,7 +85,15 @@ template:
 - Backfilling older runs is not required; their intent lives in PROGRESS.md
   and BUILD-PLAN.md.
 
-### B. cfgA rep3 — settle the 4/8 — *in progress 2026-08-17*
+### B. cfgA rep3 — settle the 4/8 — *done 2026-08-20 (outcome: ambiguous)*
+
+**Outcome:** rep3 aligned **1/4** final-session cluster-slots → pooled cfgA
+**5/12** → the pre-registered **ambiguous** branch, which routes the config
+decision to item C. The secondary champion watch also failed (no probe in the
+Round 1 champion band except untrained `vs_a2` at 0.48 in session 1; best
+trained value `vs_d5` at 0.16), and the one aligned slot is degenerate —
+`vs_a1` is control-pinned at 1.0 under static_weight and scored 0.04–0.12 in
+the learned condition. Full read: `EVALUATIONS.md`, 2026-08-20 entry.
 
 **Goal:** determine whether cfgA's 4/8 is a real effect or replicate noise.
 One more replicate is the cheapest way to move from "promising" to
@@ -113,11 +121,16 @@ config.yaml edit). Plan written and schema-validated:
 `queues/exp01_cfgA_rep3_2026-08-17.json` (own `queue_id`, so resume
 auto-detect can't collide with the 2026-08-12 cfgA launch dirs);
 `on_plan_failure: "halt"` since a single-plan queue has nothing to continue
-to. **Not yet launched** — awaiting a night the machine is free.
+to. **Ran 2026-08-19** (run dir `harness_runs/exp01-cfgA-rep3-2026-08-17_b459518e7b10`,
+report `memory/reports/experiment_report_exp01-cfgA-rep3-2026-08-17_learned.md`).
+Clean run: all §6.3 integrity checks PASS, `expected_config` asserted 3.0/3.0
+against the live backend, zero failures / ghost MUs / pressure / saturation.
 
 **c. Read against the pre-registered decision rule** (fixed here, before the
-run). Complete item C's analysis before this read if at all possible — an
-ambiguous outcome needs it as tiebreaker. Outcomes:
+run) — *read 2026-08-20; the **1/4 → ambiguous** branch was taken.* Item C did
+**not** land before this read as the item hoped, so the tiebreaker it calls for
+is now the immediate next work rather than an input already on the table.
+Outcomes as pre-registered:
 
 - rep3 ≥2/4 aligned → cfgA treated as a confirmed directional signal; it
   becomes the base config for item F's knob experiments.
@@ -131,10 +144,13 @@ ambiguous outcome needs it as tiebreaker. Outcomes:
   appear in rep1/rep2 (champions reached and exceeded the baseline band), so
   the previously sketched redirect to 2.0/2.0 priors is not triggered.
 
-### C. Early-feedback lottery / lock-in analysis — *agreed 2026-08-16*
+### C. Early-feedback lottery / lock-in analysis — *in progress 2026-08-20*
 
-Existing data only, no new runs. **May run in parallel with item B** (the
-queue runs overnight anyway); should land before B.c's read.
+Existing data only, no new runs. ~~May run in parallel with item B; should land
+before B.c's read.~~ **Superseded by events:** B.c was read first and returned
+the ambiguous branch, so C is no longer a parallel nice-to-have — it is the
+pre-registered tiebreaker that gates item F's base config choice, and it is
+the immediate next work.
 
 **Goal:** test whether the eventual cluster winner is effectively decided in
 the first session — an early-feedback lottery whose winner the
@@ -143,19 +159,37 @@ Motivated by the rep1/rep2 vs_a1 split (1.00 vs. 0.00 under identical
 config) and by rising learned-looking curves on *untrained* spokes (vs_d3 in
 two separate runs) — concentration without alignment.
 
-**a. Build the table:** across all 7 learned runs to date (exp0b ×3,
-exp01 ×4), per run × cluster: session-1 sample-mode winner; first spoke to
-receive an upvote-driven edge increase (from the edge delta ledger);
-final-session winner; whether each matches the trained spoke.
+**a. Build the table:** across all **8** learned runs to date (exp0b ×3,
+exp01 ×5 — cfgA rep3 joins the set), per run × cluster: session-1 sample-mode
+winner; first spoke to receive an upvote-driven edge increase (from the edge
+delta ledger); final-session winner; whether each matches the trained spoke.
+Record session-1 ties explicitly rather than letting argmax silently pick —
+several slots are ties and the tie-handling rule changes the headline.
 
-**b. Headline number:** P(final winner = session-1 winner) across the 28
+**b. Headline number:** P(final winner = session-1 winner) across the **32**
 run×cluster slots, vs. the ~1/7 chance level. Secondary:
 P(final winner = first-upvoted spoke).
 
-**c. Read:** a strong result (say >50%) confirms lock-in — future configs
+**c. Split the headline by condition** *(added 2026-08-20, from the rep3
+read)*. A quick preliminary count during that read put preservation at roughly
+two-thirds of baseline slots against about a fifth of exp01-config slots, with
+rep3 preserving none of its four — i.e. lock-in may be real in the program
+*and* substantially suppressed by both configs tried so far. If that holds
+under a careful count, it reframes cfgA's 3.0/3.0 priors as a **flattener**
+(nothing consolidates) rather than a discriminator (the trained spoke gets a
+fairer chance), and it explains rep1/rep2 as surviving lottery wins rather
+than as the config selecting for the trained spoke. This split is now a
+required output of the analysis, not an optional extra. Treat the preliminary
+numbers as a hypothesis to test, not a result to confirm — that pass used
+crude tie handling and a different run scope.
+
+**d. Read:** a strong result (say >50%) confirms lock-in — future configs
 get judged on *session-1* alignment, not just final, and config search aims
 at the session-0/1 window. A weak result means late sessions still matter
-and the variance lives elsewhere.
+and the variance lives elsewhere. With c added, the condition split carries
+its own decision: if baselines lock in and configs don't, then item F's knob
+search should target *which* spoke wins the session-0/1 lottery, rather than
+trying to keep the lottery open longer.
 
 ### D. Instrument path-back behavior — *agreed 2026-08-16 (metric definitions to be settled)*
 
@@ -230,6 +264,14 @@ durably strengthens the path back to that seed, and retrieval actually
 follows it. Runs only after item B confirms/denies cfgA as the base config
 and item D provides the instruments to see path-back at all; design should
 also be informed by item C's lock-in findings.
+
+**Base config status — updated 2026-08-20.** Item B returned **ambiguous**
+(cfgA 5/12), so cfgA is **not** confirmed and is no longer the presumptive
+base config here; that choice now waits on item C per B.c. Note also that
+more alignment replicates cannot settle it — four binary cluster-slots per run
+cannot separate "the config worked" from "one slot got lucky," which makes
+this a measurement problem and puts item D's per-turn instrumentation ahead of
+any further knob runs in priority, not merely alongside them.
 
 Candidate knobs (examples, not commitments):
 

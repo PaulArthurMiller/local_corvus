@@ -24,6 +24,16 @@ bug this milestone exists to kill. As of Milestone 43 that is:
   - analytics/reports/experiment_report.py and series_report.py (reporting.*
     thresholds — read at report-generation time, critical for a
     pass_rank_thresholds sweep to score correctly)
+  - api/admin.py's POST /admin/run-probe (hyperparameters.* read for
+    retrieval — added Milestone 44, after this endpoint's own independent
+    disk read went unnoticed by M43's audit and left probe measurement
+    reading a different config than the real turns in the same run; see
+    BUILD-PLAN.md's Milestone 44). Unlike the other four, this one inherits
+    rather than merging independently: it imports `_CONFIG` directly from
+    core.orchestrator (already-merged) instead of calling
+    load_config_overrides_from_env()/apply_config_overrides() itself. Its
+    sibling GET /admin/config, a few lines above it in the same file,
+    stays a deliberate disk read — see that endpoint's own docstring.
 
 tools/registry.py, gate/sanitize.py, and api/chat.py's SimpleRL-only
 weight_update_rate read config.yaml too, but only sections no experiment

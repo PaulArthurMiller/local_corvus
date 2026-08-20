@@ -250,7 +250,13 @@ async def create_probe_snapshot(body: ProbeSnapshotRequest):
 
 @router.get("/config")
 async def get_config():
-    """Return the current hyperparameter registry from config.yaml."""
+    """
+    Return the current hyperparameter registry from config.yaml.
+
+    DELIBERATE disk re-read — this is the Admin UI's editable registry, not
+    a runtime-resolution endpoint. See GET /admin/effective-config below for
+    what's actually running. Do not "fix" this to use _CONFIG (M43/M44).
+    """
     try:
         with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
@@ -358,13 +364,15 @@ async def run_probe(body: RunProbeRequest):
             detail=f"Probe '{body.probe_id}' not found in probe set version '{body.probe_set_version}'",
         )
 
-    # Load config for retrieval hyperparameters
-    try:
-        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-    except Exception as exc:
-        logger.error("admin/run-probe: could not load config — %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+    # Use the orchestrator's already-resolved config — NOT a fresh disk
+    # read. _CONFIG (imported above from core.orchestrator) is config.yaml
+    # merged with CONFIG_OVERRIDES_JSON at process startup (M43 Phase 2);
+    # re-opening the file here would silently ignore any override a plan
+    # declared, which is exactly the bug Milestone 44 exists to fix — see
+    # GET /admin/config above for the endpoint that deliberately still does
+    # a disk read, and BUILD-PLAN.md's Milestone 44 for the exp01-cfgB
+    # measurement this caused.
+    config = _CONFIG
 
     # Run retrieval — read-only; no MU creation, no edges written. rng is
     # deliberately NOT the orchestrator's process-scoped EDGE_RNG (real turns'

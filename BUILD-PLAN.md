@@ -6476,6 +6476,230 @@ before exp01.
 
 ---
 
+## Probe Measurement Reads the Resolved Config — Milestone 44
+
+**Status:** PROPOSED 2026-08-20, from the Plan Concept Alpha item D
+discussion (metric definitions). Found while reading `retrieve()` to settle
+what "path-back" can mean under the current retrieval geometry. Should land
+before any Alpha item D instrumentation or item F knob run that touches
+`hyperparameters.*` — every read-side candidate in item F is exactly such a
+knob, and would be silently unmeasured.
+
+### The defect
+
+`POST /admin/run-probe` builds its retrieval config by **re-opening
+`config.yaml` from disk** (`backend/api/admin.py:362-364`) instead of using
+the orchestrator's resolved `_CONFIG` — which the same file already imports
+at line 46 and already serves from `GET /admin/effective-config`.
+
+So M43 Phase 2's `CONFIG_OVERRIDES_JSON` reaches every real turn and never
+reaches a single probe measurement. **The training layer and the measurement
+layer of the same run resolve different configs.**
+
+```
+                          CONFIG_OVERRIDES_JSON
+                          (per-condition restart — M43 Phase 2)
+                                     │
+      config.yaml ───────────────────┤
+      (git-tracked, bind-mounted)    │
+            │                        ▼
+            │              apply_config_overrides()
+            │                        │
+            │                        ▼
+            │              orchestrator._CONFIG        ← THE RESOLVED CONFIG
+            │                        │
+            │      ┌─────────────────┼──────────────┬──────────────────┐
+            │      ▼                 ▼              ▼                  ▼
+            │  real turns      extractor.py   seed_fixture.py   experiment_report.py
+            │  /chat           (M43 list)     (M43 list)        series_report.py
+            │  K2 = 2                                           (M43 list)
+            │
+            │                  ┌── admin.py:255  GET /admin/config
+            │                  │   disk read — CORRECT, deliberate: the Admin
+            └──────────────────┤   UI's editable registry (M43 left it alone)
+                               │
+                               └── admin.py:363  POST /admin/run-probe
+                                   disk read — THE BUG
+                                            │
+                                            ▼
+                                     probe measurement
+                                     K2 = 1  ◀── override never arrives
+```
+
+The affected surface is precisely `hyperparameters.*` — every value
+`retrieve()` reads: `retrieval_keyword_pool_size`, `retrieval_keyword_count`,
+`retrieval_level1_top_k`, `retrieval_level2_top_k`,
+`directional_edge_weight_multiplier`, `retrieval_exclude_source_types`.
+(`edge_update.weight_mode` is exempt — the endpoint already passes
+`weight_mode_override` explicitly, per M30.)
+
+### Blast radius — measured, not hypothesised
+
+**cfgB is the casualty.** Its plan declares
+`hyperparameters.retrieval_level2_top_k: 2`.
+
+```
+cfgB plan:  retrieval_level2_top_k: 2
+
+  TRAINING LAYER                        MEASUREMENT LAYER
+  ──────────────                        ─────────────────
+  210 real turns per series             3,500 probe measurements
+  slate = K1(3) + K2(2) = 5             slate = K1(3) + K2(1) = 4
+        ▲                                     ▲
+   override applied                     override absent
+        │                                     │
+        └───────────── same run ──────────────┘
+                          │
+                          ▼
+          exp01-cfgB read: "2/8 = pre-registered null"
+          ── a null on a knob the probe battery never saw
+```
+
+Confirmed against `memory/graph.db` (2026-08-20): every one of cfgB rep1's
+3,500 `probe_results` rows has a 4-MU retrieved set, while all 210 of its
+real-turn `analytics.activated_mu_ids` have 5. The companion override
+`reporting.pass_rank_thresholds.spoke_retrieval: 5` *did* apply (the report
+layer is on M43's list), so cfgB was additionally scored against a rank-5
+threshold its probe geometry could never reach — benign in direction, but the
+two halves of the config disagreed with each other.
+
+**cfgA is unaffected.** Its knobs are `edge_update.seed_prior_alpha/beta`,
+applied at fixture load by `seed_fixture.py` (on M43's list) and written into
+the `edges` table; probes read α/β from the DB, so cfgA's effect is fully
+visible to probe measurement. **Nothing in Plan Alpha items B or C is
+invalidated by this defect.**
+
+### Why M43 missed it
+
+M43 knew this exact bug class and hunted it. `core/config_overrides.py`'s
+module docstring enumerates the loaders that must apply the merge and
+explicitly warns that *"silent divergence between two modules' views of the
+config is exactly the class of bug this milestone exists to kill."* It caught
+`extractor.py`, `seed_fixture.py`, and both report modules. `api/admin.py`
+appears in **neither** list — not the must-apply list, and not the
+deliberately-exempt list (`tools/registry.py`, `gate/sanitize.py`,
+`api/chat.py`).
+
+The likely reason is the file's own shape: `admin.py` holds **two** disk
+loaders. The one at line 255 was reviewed and correctly left alone — M43's
+architecture section reasons about it by name, and its trap diagram is built
+around it. The second, a hundred lines below in the same file, was never
+separately noticed. And before M43 the miss was harmless: disk config *was*
+runtime config. M43 is what created the divergence, which is why the gap
+opened at exactly the moment nobody was looking for a new one.
+
+The lesson to encode: an inventory kept in a docstring is tribal knowledge
+with no enforcement. Phase 1 turns it into a test.
+
+### Phase 1 — use the resolved config, and pin the loader inventory
+
+**Files:**
+
+1. `backend/api/admin.py` — `run_probe()` drops the `_CONFIG_PATH` read at
+   362-364 and passes the already-imported `_CONFIG` to `retrieve()`. Add a
+   one-line comment at **both** loader sites naming which is which, so a
+   future reader cannot "fix" the deliberate one at 255.
+2. `backend/core/config_overrides.py` — docstring inventory updated:
+   `api/admin.py` joins the resolved-config consumers, noting that it
+   inherits by importing `orchestrator._CONFIG` rather than merging
+   independently.
+3. `tests/test_api/test_run_probe_resolved_config.py` (new) — **the
+   regression test**: with
+   `CONFIG_OVERRIDES_JSON={"hyperparameters.retrieval_level2_top_k": 2}` in
+   the environment, `POST /admin/run-probe` returns a retrieved set whose
+   size reflects K2=2. This test must **fail against the pre-fix code** —
+   verify that before applying the fix, or it isn't a regression test.
+4. `tests/test_config_loader_inventory.py` (new) — the class fix. Scans
+   `backend/**/*.py` for disk-config load sites and compares against an
+   explicit allowlist mapping each path to a one-line reason (`"applies
+   overrides"` / `"deliberately disk"` / `"section no sweep targets"`). A
+   new, unlisted loader fails the suite with a message telling the author to
+   add it *and decide whether it needs `apply_config_overrides()`*.
+
+**Done when:**
+
+- Probe retrieval resolves the same config as real turns in the same run.
+- The K2=2 regression test fails on pre-fix code and passes after.
+- Adding a throwaway loader to a backend module fails the inventory test.
+- Full suite green, no regressions.
+- **Live verification, not fakes:** a real Docker backend booted with
+  `CONFIG_OVERRIDES_JSON` setting `retrieval_level2_top_k: 2`, then a real
+  `POST /admin/run-probe`, returns a 5-MU retrieved set and writes a
+  matching `probe_results` row. This is the criterion the whole milestone
+  exists for — it does not count as met against a stub.
+
+**Estimate:** half a session. The code change is a few lines; the two tests
+and the live check are the actual work.
+
+### Phase 2 — a §6.3 check that would have caught it
+
+The same argument M43 made for itself: the cost is not the mistake, it is
+that **the mistake is undetectable until the night is already spent.**
+exp01-cfgB ran clean — zero failures, zero ghosts, every §6.3 integrity check
+PASS, and `expected_config verified … 2 key(s) matched` against the live
+backend — with its measurement layer on the wrong geometry the entire time.
+Phase 1 stops it happening again; Phase 2 makes it *visible* if it does.
+
+**Files:**
+
+1. `backend/analytics/reports/experiment_report.py` — new §6.3 check,
+   `probe_retrieval_geometry`. Reads `retrieval_level1_top_k` +
+   `retrieval_level2_top_k` from `analytics.full_config_snapshot` (the
+   resolved config — M43 verified 100% coverage) and compares against the
+   observed `probe_results.retrieved_mu_ids` lengths for that experiment.
+2. `backend/analytics/reports/markdown_renderer.py` — the §6.3 block line.
+
+**Check semantics — get this right or it will false-alarm:**
+
+```
+  observed slate sizes for an experiment's probe rows
+        │
+        ├── max(observed)  ==  K1 + K2   ──▶ PASS
+        ├── max(observed)  !=  K1 + K2   ──▶ FAIL, naming both numbers
+        └── no probe rows at all         ──▶ SKIP (not FAIL)
+```
+
+Only the **maximum** is diagnostic. Short slates are legitimate and common —
+baseline rep1 has 25 probe rows of length 3 and 50 of length 2 in early
+sessions, when the graph is small and few candidates clear the
+two-keyword-hit bar. A check written as "every slate equals K1+K2" fails
+every healthy run in the program.
+
+**Done when:** regenerating the eight archived learned-run reports makes the
+new check **FAIL for cfgB rep1 and rep2 and PASS for the other six.**
+Reproducing the real defect from archived data is the acceptance criterion —
+a synthetic fixture would only prove the check runs, not that it detects the
+thing it was written from.
+
+**Estimate:** half to one session.
+
+### Risks and open questions
+
+- ⚠ **Do not "fix" the fix back to a fresh disk read.** `_CONFIG` is bound at
+  import, so `run_probe` will not see a `config.yaml` edited mid-process
+  without a restart. That is correct and intended — M43's trap diagram shows
+  fresh-from-disk certifying the exact bug it exists to prevent. The comment
+  required in Phase 1 step 1 is what defends this.
+- ⚠ **Post-fix probe data is not comparable to pre-fix probe data** for any
+  run whose plan overrides `hyperparameters.*`. Nothing archived is
+  recomputed, so existing reads stand as written, but a cfgB-style re-run
+  produces measurements on a different geometry than the 2026-08-12 rows.
+  Whatever plan re-runs it must say so in its setup-and-goals doc (Alpha A.c).
+- ⚠ **Keep the inventory guard cheap.** `backend/` only, allowlist keyed by
+  path with a one-line reason each, so adding a legitimate loader is a
+  two-line edit rather than a reason to delete the test.
+- ? **Does `apply_config_overrides()` handle list-valued keys sanely?**
+  `retrieval_exclude_source_types` is a list, and deep-merge semantics for
+  lists are usually replace-not-merge — probably what we want, but
+  unverified. No current plan overrides it; item F's read-side candidates
+  might. Verify during the Phase 1 build and record the answer here.
+- ? **Does cfgB get re-run under correct measurement, or written off?** Not a
+  build question — it belongs to `EXPERIMENT-PLAN.md` (Plan Concept Alpha),
+  and it interacts with item F's base-config decision, which is currently
+  open. This milestone only makes a correct re-run *possible*.
+
+---
+
 ## Status
 
 ```

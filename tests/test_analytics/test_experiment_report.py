@@ -34,6 +34,7 @@ from analytics.reports.experiment_report import (
     _aggregate_verdict_mix,
     _check_graph_wipe,
     _check_probe_replay_index,
+    _check_probe_retrieval_geometry,
     _check_seed_provenance,
     generate_experiment_report,
 )
@@ -679,6 +680,118 @@ def test_probe_replay_index_fail_with_gap():
 
 
 # ---------------------------------------------------------------------------
+# §6.3 probe-retrieval geometry (Milestone 44)
+# ---------------------------------------------------------------------------
+
+
+def _insert_run_with_config_snapshot(store, experiment_id, level1_k, level2_k, series_id="series-A"):
+    """Insert a minimal run whose full_config_snapshot carries the given
+    K1/K2 — what _check_probe_retrieval_geometry resolves 'expected' from."""
+    run_dict = _make_minimal_run(series_id=series_id, experiment_id=experiment_id, turn_index=1)
+    run_dict["full_config_snapshot"] = {
+        "hyperparameters": {
+            "retrieval_level1_top_k": level1_k,
+            "retrieval_level2_top_k": level2_k,
+        }
+    }
+    run(store.insert_run(run_dict))
+
+
+def _insert_probe_result_with_slate_size(
+    store, experiment_id, size, session_idx, probe_id="p01", condition_label="learning"
+):
+    run(store.insert_probe_result({
+        "result_id": str(uuid.uuid4()),
+        "probe_id": probe_id,
+        "run_id": None,
+        "measurement_session_index": session_idx,
+        "condition_label": condition_label,
+        "retrieved_mu_ids": [_mu_id() for _ in range(size)],
+        "gold_mu_rank": None,
+        "retrieval_precision": None,
+        "retrieval_recall": None,
+        "bm25_scores_per_mu": {},
+        "experiment_id": experiment_id,
+    }))
+
+
+def test_probe_retrieval_geometry_pass_when_max_observed_matches_k1_plus_k2():
+    """The healthy case: config declares K1=3+K2=2=5, and the largest probe
+    slate actually observed is 5 — matches, PASS."""
+    with TempDB() as store:
+        experiment_id = "exp-geom-pass"
+        _insert_run_with_config_snapshot(store, experiment_id, level1_k=3, level2_k=2)
+        _insert_probe_result_with_slate_size(store, experiment_id, size=2, session_idx=0)
+        _insert_probe_result_with_slate_size(store, experiment_id, size=5, session_idx=1)
+
+        result = run(_check_probe_retrieval_geometry(experiment_id, store))
+        print(f"probe_retrieval_geometry: {result}")
+        assert result["status"] == "PASS"
+        assert result["expected_k1"] == 3
+        assert result["expected_k2"] == 2
+        assert result["expected_max_slate_size"] == 5
+        assert result["max_observed_slate_size"] == 5
+
+
+def test_probe_retrieval_geometry_fail_reproduces_exp01_cfgb_defect():
+    """The real defect this check exists to catch (BUILD-PLAN.md Milestone
+    44): config declares K2=2 (slate should max at 5), but every probe row
+    was measured at the pre-fix K2=1 geometry (slate maxes at 4) — FAIL,
+    naming both numbers."""
+    with TempDB() as store:
+        experiment_id = "exp-geom-fail"
+        _insert_run_with_config_snapshot(store, experiment_id, level1_k=3, level2_k=2)
+        for session_idx in range(3):
+            _insert_probe_result_with_slate_size(store, experiment_id, size=4, session_idx=session_idx)
+
+        result = run(_check_probe_retrieval_geometry(experiment_id, store))
+        print(f"probe_retrieval_geometry: {result}")
+        assert result["status"] == "FAIL"
+        assert result["expected_max_slate_size"] == 5
+        assert result["max_observed_slate_size"] == 4
+
+
+def test_probe_retrieval_geometry_short_slates_do_not_false_alarm():
+    """Short slates below K1+K2 are legitimate and common (small graph, few
+    multi-hit candidates) — only the MAXIMUM observed is diagnostic. A
+    check requiring every slate to equal K1+K2 would fail every healthy
+    run in the program."""
+    with TempDB() as store:
+        experiment_id = "exp-geom-short-slates"
+        _insert_run_with_config_snapshot(store, experiment_id, level1_k=3, level2_k=1)
+        # Mostly short slates, but the maximum still reaches K1+K2=4.
+        for session_idx, size in enumerate([2, 3, 3, 4, 2]):
+            _insert_probe_result_with_slate_size(store, experiment_id, size=size, session_idx=session_idx)
+
+        result = run(_check_probe_retrieval_geometry(experiment_id, store))
+        print(f"probe_retrieval_geometry: {result}")
+        assert result["status"] == "PASS"
+        assert result["max_observed_slate_size"] == 4
+
+
+def test_probe_retrieval_geometry_skip_when_no_runs():
+    """No runs for this experiment_id — nothing to resolve K1+K2 against, SKIP not FAIL."""
+    with TempDB() as store:
+        result = run(_check_probe_retrieval_geometry("nonexistent-experiment", store))
+        print(f"probe_retrieval_geometry: {result}")
+        assert result["status"] == "SKIP"
+
+
+def test_probe_retrieval_geometry_skip_when_no_probe_rows():
+    """Runs exist (so K1+K2 resolves) but no probe measurement has happened
+    yet — SKIP, not FAIL, per the check semantics (only 'no probe rows at
+    all' is SKIP; every other case with data present is PASS/FAIL)."""
+    with TempDB() as store:
+        experiment_id = "exp-geom-no-probes"
+        _insert_run_with_config_snapshot(store, experiment_id, level1_k=3, level2_k=1)
+
+        result = run(_check_probe_retrieval_geometry(experiment_id, store))
+        print(f"probe_retrieval_geometry: {result}")
+        assert result["status"] == "SKIP"
+        assert result["expected_max_slate_size"] == 4
+
+
+# ---------------------------------------------------------------------------
 # §6.4 statistical caveat
 # ---------------------------------------------------------------------------
 
@@ -748,6 +861,51 @@ def test_statistical_caveat_in_markdown():
     assert "§6.4 Statistical Note" in md
     assert "directional signals for hypothesis generation" in md
     assert "statistical significance the sample size cannot support" in md
+
+
+def test_probe_retrieval_geometry_renders_in_markdown():
+    """§6.3's new probe-retrieval-geometry block (Milestone 44) renders its
+    status and both K1+K2 numbers, on both a PASS and a FAIL row."""
+    minimal_report = {
+        "report_id": "r1",
+        "report_type": "experiment",
+        "experiment_id": "exp-1",
+        "condition_label": "learning",
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "series_summary": {
+            "series_ids": [], "series_count": 0, "total_run_count": 0,
+            "s5_1_failure_aggregation": {"total_failed_turn_count": 0, "total_ghost_mu_incidents": 0, "per_series": [], "all_ghost_incidents": []},
+            "s5_3_retrieval_rate_aggregation": {"mean_intra_series_rate": 0.0, "min_intra_series_rate": 0.0, "max_intra_series_rate": 0.0, "outlier_series": [], "outlier_threshold": 0.15, "per_series": []},
+            "s5_5_edge_weight_aggregation": {"total_activated_edge_count": 0, "edges_increased": 0, "edges_decreased": 0, "edges_unchanged": 0, "mean_abs_delta": 0.0, "per_series": []},
+            "s5_6_probe_integrity_aggregation": {"status": "PASS", "total_violations": 0, "hard_fail_series": []},
+            "s5_7_mode3_aggregation": {"total_mode3_mu_count": 0, "increasing_pressure_flag": False, "per_series": []},
+            "s5_8_ctx_pressure_aggregation": {"increasing_pressure_flag": False, "per_series": []},
+        },
+        "integrity_checks": {
+            "overall_pass": False,
+            "seed_fixture_provenance": {"status": "PASS", "fixture_versions_found": [], "unregistered_versions": [], "hash_mismatch": False},
+            "graph_wipe_verification": {"status": "SKIP", "pre_experiment_foreign_mu_count": 0, "earliest_run_timestamp": None},
+            "probe_replay_index_normalization": {"status": "PASS", "condition_label": None, "session_indices_found": [], "gaps": []},
+            "probe_retrieval_geometry": {
+                "status": "FAIL",
+                "expected_k1": 3,
+                "expected_k2": 2,
+                "expected_max_slate_size": 5,
+                "max_observed_slate_size": 4,
+                "probe_result_count": 3500,
+            },
+        },
+        "learning_measures": None,
+        "control_shadow": None,
+    }
+
+    md = render_experiment_report_markdown(minimal_report)
+    print(f"Markdown length: {len(md)}")
+    assert "Probe-Retrieval Geometry" in md
+    assert "❌ FAIL" in md
+    assert "Expected K1+K2:** 5 (K1=3 + K2=2)" in md
+    assert "Max observed probe slate size:** 4" in md
+    assert "Probe result rows checked:** 3500" in md
 
 
 def _base_series_summary_for_markdown(s53_overrides: dict) -> dict:

@@ -965,10 +965,12 @@ def render_experiment_report_markdown(report: dict) -> str:
     sp = ic.get("seed_fixture_provenance") or {}
     gw = ic.get("graph_wipe_verification") or {}
     pr = ic.get("probe_replay_index_normalization") or {}
+    prg = ic.get("probe_retrieval_geometry") or {}
 
     sp_display = "✅ PASS" if sp.get("status") == "PASS" else ("⏭ SKIP" if sp.get("status") == "SKIP" else "❌ FAIL")
     gw_display = "✅ PASS" if gw.get("status") == "PASS" else ("⏭ SKIP" if gw.get("status") == "SKIP" else "❌ FAIL")
     pr_display = "✅ PASS" if pr.get("status") == "PASS" else ("⏭ SKIP" if pr.get("status") == "SKIP" else "❌ FAIL")
+    prg_display = "✅ PASS" if prg.get("status") == "PASS" else ("⏭ SKIP" if prg.get("status") == "SKIP" else "❌ FAIL")
 
     integrity_lines = [
         "## §6.3 Data-Integrity / Confound Checks\n",
@@ -987,6 +989,14 @@ def render_experiment_report_markdown(report: dict) -> str:
         f"**Condition:** `{pr.get('condition_label') or '—'}`  ",
         f"**Session indices found:** {pr.get('session_indices_found') or []}  ",
         f"**Gaps:** {pr.get('gaps') or 'none'}\n",
+        "### Probe-Retrieval Geometry (M44)\n",
+        f"**Status:** {prg_display}  ",
+        f"**Expected K1+K2:** {prg.get('expected_max_slate_size', '—')}"
+        f" (K1={prg.get('expected_k1', '—')} + K2={prg.get('expected_k2', '—')})  ",
+        f"**Max observed probe slate size:** {prg.get('max_observed_slate_size', '—')}  ",
+        f"**Probe result rows checked:** {prg.get('probe_result_count', '—')}"
+        + (f"  \n**Reason:** {prg['reason']}" if prg.get("reason") else "")
+        + "\n",
     ]
     integrity_section = "\n".join(integrity_lines)
 

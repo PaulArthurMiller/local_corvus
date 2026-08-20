@@ -144,7 +144,18 @@ Outcomes as pre-registered:
   appear in rep1/rep2 (champions reached and exceeded the baseline band), so
   the previously sketched redirect to 2.0/2.0 priors is not triggered.
 
-### C. Early-feedback lottery / lock-in analysis — *in progress 2026-08-20*
+### C. Early-feedback lottery / lock-in analysis — *done 2026-08-20*
+
+**Outcome:** lock-in **confirmed for baseline** (58% strict / 75% lenient vs.
+14% chance, past C.d's >50% line) but **broken by both configs** (cfgA 27%,
+cfgB 12%), and driven by broad early performance rather than by the first
+credit event — the first-upvoted spoke predicts the final winner *worse* (26%)
+than the session-1 winner does. Session-1 alignment sits at chance in every
+condition, so no config has ever steered the opening window. cfgA is not
+rescued: 3/11 against baseline's 2/12 once control-pinned winners are excluded.
+Analysis `scripts/alpha_c_lockin.py`, full tables in
+`docs/evaluations/alpha_c_lockin_analysis.md`, read in `EVALUATIONS.md`'s
+second 2026-08-20 entry.
 
 Existing data only, no new runs. ~~May run in parallel with item B; should land
 before B.c's read.~~ **Superseded by events:** B.c was read first and returned
@@ -267,11 +278,21 @@ also be informed by item C's lock-in findings.
 
 **Base config status — updated 2026-08-20.** Item B returned **ambiguous**
 (cfgA 5/12), so cfgA is **not** confirmed and is no longer the presumptive
-base config here; that choice now waits on item C per B.c. Note also that
+base config here; item C did not rescue it (3/11 vs. baseline 2/12 excluding
+pinned winners), so the base config stays **open**. Note also that
 more alignment replicates cannot settle it — four binary cluster-slots per run
 cannot separate "the config worked" from "one slot got lucky," which makes
 this a measurement problem and puts item D's per-turn instrumentation ahead of
 any further knob runs in priority, not merely alongside them.
+
+**Direction from item C (2026-08-20).** Since baselines lock in, both configs
+tried so far break lock-in without redirecting it, and session-1 alignment sits
+at chance in every condition, the search should target **which spoke wins the
+session-0/1 window** rather than trying to keep the contest open longer. That
+favours the write-side candidate below — it acts on the credit event itself —
+over the read-side chase-down stage, which acts on prior strength. Item C also
+established session-1 alignment as a usable success criterion: no config has
+moved it yet, so any that does is doing something new.
 
 Candidate knobs (examples, not commitments):
 

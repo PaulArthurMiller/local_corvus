@@ -35,6 +35,7 @@ def make_slot(**overrides):
         final_pass_rate=0.5,
         final_tied=[],
         pinned_probes=frozenset(),
+        first_upvoted=None,
     )
     defaults.update(overrides)
     return alpha_c.Slot(**defaults)
@@ -102,6 +103,62 @@ class TestAlignment:
     def test_untrained_winner_is_not_aligned(self):
         slot = make_slot(trained_probe="vs_a1", final_winner="vs_a2")
         assert slot.final_aligned is False
+
+
+class TestFirstUpvoted:
+    def test_missing_first_upvoted_never_counts_as_a_match(self):
+        """A slot with no recorded first-upvoted spoke must not score as a hit."""
+        slot = make_slot(first_upvoted=None, final_winner="vs_a1")
+        assert slot.final_matches_first_upvoted is False
+        assert slot.first_upvoted_is_trained is False
+
+    def test_first_upvoted_winning_the_cluster_is_a_match(self):
+        slot = make_slot(first_upvoted="vs_a3", final_winner="vs_a3")
+        assert slot.final_matches_first_upvoted is True
+
+    def test_first_upvoted_losing_the_cluster_is_not_a_match(self):
+        slot = make_slot(first_upvoted="vs_a3", final_winner="vs_a5")
+        assert slot.final_matches_first_upvoted is False
+
+    def test_first_upvoted_trained_is_independent_of_who_won(self):
+        slot = make_slot(
+            trained_probe="vs_a1", first_upvoted="vs_a1", final_winner="vs_a5"
+        )
+        assert slot.first_upvoted_is_trained is True
+        assert slot.final_matches_first_upvoted is False
+
+
+class TestMuToProbeMapping:
+    def test_maps_gold_mus_to_probe_ids(self):
+        mapping = alpha_c.load_mu_to_probe()
+        if not mapping:
+            pytest.skip("probe set not present in this checkout")
+        # Deterministic v3 fixture id for cluster_a spoke 1.
+        assert mapping["a0000002-aaaa-4aaa-8aaa-000000000002"] == "vs_a1"
+        assert len(mapping) == 28
+
+
+class TestFirstUpvotedQuery:
+    """Exercises the read-only graph.db path when the DB is present."""
+
+    def test_rep3_resolves_a_spoke_for_every_cluster(self):
+        if not alpha_c.GRAPH_DB.exists():
+            pytest.skip("graph.db not present")
+        mapping = alpha_c.load_mu_to_probe()
+        first = alpha_c.load_first_upvoted_spokes(
+            alpha_c.GRAPH_DB, "exp01-cfgA-rep3-2026-08-17_learned", mapping
+        )
+        assert set(first) == {"cluster_a", "cluster_b", "cluster_c", "cluster_d"}
+        for cluster, probe in first.items():
+            assert probe.startswith(f"vs_{cluster[-1]}")
+
+    def test_unknown_experiment_returns_empty(self):
+        if not alpha_c.GRAPH_DB.exists():
+            pytest.skip("graph.db not present")
+        first = alpha_c.load_first_upvoted_spokes(
+            alpha_c.GRAPH_DB, "no-such-experiment_learned", alpha_c.load_mu_to_probe()
+        )
+        assert first == {}
 
 
 class TestRateFormatting:

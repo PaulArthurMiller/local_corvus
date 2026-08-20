@@ -31,15 +31,20 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from dataclasses import dataclass
+import sqlite3
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("alpha_c_lockin")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPORT_DIR = REPO_ROOT / "memory" / "reports"
+GRAPH_DB = REPO_ROOT / "memory" / "graph.db"
+PROBE_SET = REPO_ROOT / "probes" / "probe_set_v3.yaml"
 
 # Spokes per cluster — sets the chance level for "final winner = session-1 winner".
 SPOKES_PER_CLUSTER = 7
@@ -80,6 +85,10 @@ class Slot:
     final_pass_rate: float
     final_tied: list[str]
     pinned_probes: frozenset[str]
+    # First spoke in this cluster to receive an upvote-driven edge increase.
+    # None when the graph DB was unavailable, or when no seed spoke in the
+    # cluster ever took a positive update under an "up" verdict.
+    first_upvoted: Optional[str] = field(default=None)
 
     @property
     def s1_is_tied(self) -> bool:
@@ -135,21 +144,99 @@ class Slot:
         return self.final_aligned and not self.winner_is_pinned
 
     @property
+    def first_upvoted_is_trained(self) -> bool:
+        return self.first_upvoted is not None and self.first_upvoted == self.trained_probe
+
+    @property
+    def final_matches_first_upvoted(self) -> bool:
+        """
+        Item C.b's secondary number: does the first spoke to get positive
+        credit go on to win the cluster? This is the sharper test of the
+        lottery hypothesis than the session-1 winner, since it points at the
+        specific feedback event the rich-get-richer loop would amplify.
+        """
+        return self.first_upvoted is not None and self.first_upvoted == self.final_winner
+
+    @property
     def s1_aligned(self) -> bool:
         return self.s1_winner == self.trained_probe
 
 
-def first_upvoted_spoke_available() -> bool:
+def load_mu_to_probe(probe_set: Path = PROBE_SET) -> dict[str, str]:
     """
-    Item C.a's third column needs per-update weight_updates rows, which the
-    archived reports do not carry. Kept as an explicit gate so the omission is
-    visible in output rather than silently dropped.
+    Map gold seed MU id -> probe id from the probe set.
+
+    Seed MU ids are deterministic per fixture version (a0000002-... is always
+    cluster_a spoke 1), which is what lets edge updates from wiped-and-reseeded
+    experiments still resolve to a spoke.
     """
-    return False
+    try:
+        with probe_set.open(encoding="utf-8") as fh:
+            spec = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError) as exc:
+        logger.error("could not read probe set %s: %s", probe_set, exc)
+        return {}
+    mapping: dict[str, str] = {}
+    for probe in spec.get("probes") or []:
+        for mu_id in probe.get("gold_mu_ids") or []:
+            mapping[mu_id] = probe["probe_id"]
+    logger.info("mapped %d gold MUs to probes", len(mapping))
+    return mapping
 
 
-def load_slots(basename: str, condition: str, label: str) -> list[Slot]:
+def load_first_upvoted_spokes(
+    db_path: Path, experiment_id: str, mu_to_probe: dict[str, str]
+) -> dict[str, str]:
+    """
+    Per cluster, the first seed spoke to receive an upvote-driven edge increase.
+
+    Reads `edge_update_events` (the per-update ledger the report aggregates)
+    joined to `analytics` for the experiment id. Ordered chronologically by
+    `created_at`, since updates span several series within one experiment.
+
+    Opened read-only: this is analysis over experiment history and must never
+    mutate the graph.
+    """
+    query = """
+        SELECT e.mu_id, e.verdict, e.increment
+        FROM edge_update_events e
+        JOIN analytics a ON a.run_id = e.run_id
+        WHERE a.experiment_id = ?
+        ORDER BY e.created_at, e.turn_index
+    """
+    first: dict[str, str] = {}
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        logger.error("could not open graph db %s read-only: %s", db_path, exc)
+        return {}
+    try:
+        for mu_id, verdict, increment in con.execute(query, (experiment_id,)):
+            # An upvote-driven *increase* only — down verdicts and the
+            # negative-scope decrements they cause are not credit.
+            if verdict != "up" or (increment or 0) <= 0:
+                continue
+            probe_id = mu_to_probe.get(mu_id)
+            if not probe_id:
+                continue  # conversation MU, or a spoke with no probe
+            cluster = f"cluster_{probe_id[3]}"
+            first.setdefault(cluster, probe_id)
+    except sqlite3.Error as exc:
+        logger.error("query failed for %s: %s", experiment_id, exc)
+        return {}
+    finally:
+        con.close()
+    return first
+
+
+def load_slots(
+    basename: str,
+    condition: str,
+    label: str,
+    first_upvoted: Optional[dict[str, str]] = None,
+) -> list[Slot]:
     """Extract the four cluster slots from one archived experiment report."""
+    first_upvoted = first_upvoted or {}
     path = REPORT_DIR / f"experiment_report_{basename}_learned.json"
     try:
         with path.open(encoding="utf-8") as fh:
@@ -198,6 +285,7 @@ def load_slots(basename: str, condition: str, label: str) -> list[Slot]:
                 final_pass_rate=float(final.get("winner_pass_rate") or 0.0),
                 final_tied=list(final.get("tied_with") or []),
                 pinned_probes=frozenset(pinned),
+                first_upvoted=first_upvoted.get(cluster),
             )
         )
     logger.info("run %s: %d slots loaded", label, len(slots))
@@ -222,14 +310,24 @@ def summarize(slots: list[Slot], exclude_degenerate: bool) -> dict[str, str]:
         "final_aligned": rate(sum(1 for s in pool if s.final_aligned), n),
         "final_aligned_solid": rate(sum(1 for s in pool if s.final_aligned_solid), n),
         "s1_aligned": rate(sum(1 for s in pool if s.s1_aligned), n),
+        # Denominator is slots where the first-upvoted spoke is known at all.
+        "first_upvoted_wins": rate(
+            sum(1 for s in pool if s.final_matches_first_upvoted),
+            sum(1 for s in pool if s.first_upvoted is not None),
+        ),
+        "first_upvoted_trained": rate(
+            sum(1 for s in pool if s.first_upvoted_is_trained),
+            sum(1 for s in pool if s.first_upvoted is not None),
+        ),
     }
 
 
 def render_slot_table(slots: list[Slot]) -> list[str]:
     """The per-slot detail table — item C.a's deliverable."""
     lines = [
-        "| run | cluster | trained | session-1 winner | final winner | preserved? | aligned? |",
-        "|---|---|---|---|---|---|---|",
+        "| run | cluster | trained | session-1 winner | first upvoted "
+        "| final winner | preserved? | aligned? |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for s in slots:
         s1 = f"{s.s1_winner} ({s.s1_pass_rate:.2f})"
@@ -245,9 +343,12 @@ def render_slot_table(slots: list[Slot]) -> list[str]:
             aligned = "✅ (pinned)" if s.winner_is_pinned else "✅"
         else:
             aligned = "—"
+        upvoted = s.first_upvoted or "—"
+        if s.first_upvoted_is_trained:
+            upvoted += " ✅"
         lines.append(
             f"| {s.run_label} | {s.cluster.replace('cluster_', '')} | {s.trained_probe} "
-            f"| {s1} | {fin} | {pres} | {aligned} |"
+            f"| {s1} | {upvoted} | {fin} | {pres} | {aligned} |"
         )
     return lines
 
@@ -289,15 +390,17 @@ def render_summary_table(slots: list[Slot], exclude_degenerate: bool) -> list[st
     """Preservation and alignment rates, overall and split by condition (item C.c)."""
     lines = [
         "| group | slots | preserved (strict) | preserved (lenient) "
-        "| final aligned | final aligned (excl. pinned) | session-1 aligned |",
-        "|---|---|---|---|---|---|---|",
+        "| final = first-upvoted | final aligned | final aligned (excl. pinned) "
+        "| session-1 aligned |",
+        "|---|---|---|---|---|---|---|---|",
     ]
 
     def row(name: str, subset: list[Slot]) -> str:
         r = summarize(subset, exclude_degenerate)
         return (
             f"| {name} | {r['n']} | {r['strict']} | {r['lenient']} "
-            f"| {r['final_aligned']} | {r['final_aligned_solid']} | {r['s1_aligned']} |"
+            f"| {r['first_upvoted_wins']} | {r['final_aligned']} "
+            f"| {r['final_aligned_solid']} | {r['s1_aligned']} |"
         )
 
     for group in ["baseline", "cfgA", "cfgB"]:
@@ -306,7 +409,7 @@ def render_summary_table(slots: list[Slot], exclude_degenerate: bool) -> list[st
             lines.append(row(group, subset))
     lines.append(row("**pooled**", slots))
     pct = f"_{CHANCE_LEVEL * 100:.0f}%_"
-    lines.append(f"| _chance_ | — | {pct} | {pct} | {pct} | {pct} | {pct} |")
+    lines.append(f"| _chance_ | — | {pct} | {pct} | {pct} | {pct} | {pct} | {pct} |")
     return lines
 
 
@@ -358,16 +461,16 @@ def build_report(slots: list[Slot], supplementary: list[Slot]) -> str:
             *render_summary_table(supplementary, exclude_degenerate=False),
             "",
         ]
-    if not first_upvoted_spoke_available():
+    missing = [s for s in slots if s.first_upvoted is None]
+    if missing:
         out += [
-            "## Not computed — first-upvoted-spoke column",
+            "## Coverage note — first-upvoted-spoke column",
             "",
-            "Item C.a also asks for the first spoke in each cluster to receive an",
-            "upvote-driven edge increase, and C.b for P(final winner = first-upvoted",
-            "spoke). That needs per-update `weight_updates` rows (source/target MU ids,",
-            "`feedback_event_id`, turn ordering) from the run store — the archived",
-            "reports carry only per-edge aggregate deltas with no endpoints, so the",
-            "column cannot be reconstructed from files alone. Requires the backend DB.",
+            f"{len(missing)} of {len(slots)} slots have no first-upvoted spoke recorded.",
+            "That means either the graph DB was unavailable, or no seed spoke in that",
+            "cluster ever took a positive edge update under an `up` verdict — in which",
+            "case the cluster's whole upvote history landed on conversation MUs.",
+            "Those slots are excluded from the `final = first-upvoted` denominator.",
             "",
         ]
     return "\n".join(out)
@@ -381,14 +484,35 @@ def main() -> None:
         default=REPO_ROOT / "docs" / "evaluations" / "alpha_c_lockin_analysis.md",
         help="output markdown path",
     )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=GRAPH_DB,
+        help="graph.db path, read-only, for the first-upvoted-spoke column",
+    )
     args = parser.parse_args()
 
-    slots: list[Slot] = []
-    for basename, condition, label in RUNS:
-        slots.extend(load_slots(basename, condition, label))
-    supplementary: list[Slot] = []
-    for basename, condition, label in SUPPLEMENTARY_RUNS:
-        supplementary.extend(load_slots(basename, condition, label))
+    mu_to_probe: dict[str, str] = {}
+    if args.db.exists():
+        mu_to_probe = load_mu_to_probe()
+        if not mu_to_probe:
+            logger.warning("probe set unusable — first-upvoted column will be empty")
+    else:
+        logger.warning("graph db not found at %s — skipping first-upvoted column", args.db)
+
+    def collect(runs: list[tuple[str, str, str]]) -> list[Slot]:
+        out: list[Slot] = []
+        for basename, condition, label in runs:
+            upvoted: dict[str, str] = {}
+            if mu_to_probe:
+                upvoted = load_first_upvoted_spokes(
+                    args.db, f"{basename}_learned", mu_to_probe
+                )
+            out.extend(load_slots(basename, condition, label, upvoted))
+        return out
+
+    slots = collect(RUNS)
+    supplementary = collect(SUPPLEMENTARY_RUNS)
 
     if not slots:
         logger.error("no slots loaded — nothing to report")

@@ -5,26 +5,26 @@ Existing data only — no new runs, no DB access.
 
 ## Headline — all slots
 
-| group | slots | preserved (strict) | preserved (lenient) | final aligned | final aligned (excl. pinned) | session-1 aligned |
-|---|---|---|---|---|---|---|
-| baseline | 12 | 7/12 (58%) | 9/12 (75%) | 2/12 (17%) | 2/12 (17%) | 2/12 (17%) |
-| cfgA | 12 | 3/12 (25%) | 4/12 (33%) | 5/12 (42%) | 3/12 (25%) | 3/12 (25%) |
-| cfgB | 8 | 1/8 (12%) | 1/8 (12%) | 2/8 (25%) | 1/8 (12%) | 2/8 (25%) |
-| **pooled** | 32 | 11/32 (34%) | 14/32 (44%) | 9/32 (28%) | 6/32 (19%) | 7/32 (22%) |
-| _chance_ | — | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ |
+| group | slots | preserved (strict) | preserved (lenient) | final = first-upvoted | final aligned | final aligned (excl. pinned) | session-1 aligned |
+|---|---|---|---|---|---|---|---|
+| baseline | 12 | 7/12 (58%) | 9/12 (75%) | 2/12 (17%) | 2/12 (17%) | 2/12 (17%) | 2/12 (17%) |
+| cfgA | 12 | 3/12 (25%) | 4/12 (33%) | 4/12 (33%) | 5/12 (42%) | 3/12 (25%) | 3/12 (25%) |
+| cfgB | 8 | 1/8 (12%) | 1/8 (12%) | 2/8 (25%) | 2/8 (25%) | 1/8 (12%) | 2/8 (25%) |
+| **pooled** | 32 | 11/32 (34%) | 14/32 (44%) | 8/32 (25%) | 9/32 (28%) | 6/32 (19%) | 7/32 (22%) |
+| _chance_ | — | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ |
 
 ## Headline — excluding 1 degenerate slots
 
 _A degenerate slot is one where nothing won: the final winner scored 0.00,
 or the win was a tie across 4+ of the cluster's 7 spokes._
 
-| group | slots | preserved (strict) | preserved (lenient) | final aligned | final aligned (excl. pinned) | session-1 aligned |
-|---|---|---|---|---|---|---|
-| baseline | 12 | 7/12 (58%) | 9/12 (75%) | 2/12 (17%) | 2/12 (17%) | 2/12 (17%) |
-| cfgA | 11 | 3/11 (27%) | 4/11 (36%) | 5/11 (45%) | 3/11 (27%) | 2/11 (18%) |
-| cfgB | 8 | 1/8 (12%) | 1/8 (12%) | 2/8 (25%) | 1/8 (12%) | 2/8 (25%) |
-| **pooled** | 31 | 11/31 (35%) | 14/31 (45%) | 9/31 (29%) | 6/31 (19%) | 6/31 (19%) |
-| _chance_ | — | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ |
+| group | slots | preserved (strict) | preserved (lenient) | final = first-upvoted | final aligned | final aligned (excl. pinned) | session-1 aligned |
+|---|---|---|---|---|---|---|---|
+| baseline | 12 | 7/12 (58%) | 9/12 (75%) | 2/12 (17%) | 2/12 (17%) | 2/12 (17%) | 2/12 (17%) |
+| cfgA | 11 | 3/11 (27%) | 4/11 (36%) | 4/11 (36%) | 5/11 (45%) | 3/11 (27%) | 2/11 (18%) |
+| cfgB | 8 | 1/8 (12%) | 1/8 (12%) | 2/8 (25%) | 2/8 (25%) | 1/8 (12%) | 2/8 (25%) |
+| **pooled** | 31 | 11/31 (35%) | 14/31 (45%) | 8/31 (26%) | 9/31 (29%) | 6/31 (19%) | 6/31 (19%) |
+| _chance_ | — | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ |
 
 ## Alignment transitions — how alignment arrives
 
@@ -42,40 +42,40 @@ overturning an early loss? Degenerate slots excluded._
 _`preserved`: ✅ = same winner at both ends with no ties; ~ = final winner was
 among session 1's tied top scorers; — = not preserved. ⚠ marks a degenerate slot._
 
-| run | cluster | trained | session-1 winner | final winner | preserved? | aligned? |
-|---|---|---|---|---|---|---|
-| exp0b rep1 | a | vs_a1 | vs_a2 (0.52) | vs_a2 (0.52) | ✅ | — |
-| exp0b rep1 | b | vs_b3 | vs_b3 (0.52) | vs_b2 (0.16) | — | — |
-| exp0b rep1 | c | vs_c1 | vs_c3 (0.72) | vs_c3 (0.28) | ✅ | — |
-| exp0b rep1 | d | vs_d5 | vs_d6 (0.48) | vs_d6 (0.84) | ✅ | — |
-| exp0b rep2 | a | vs_a1 | vs_a3 (0.04) tie×3 | vs_a3 (0.08) | ~ | — |
-| exp0b rep2 | b | vs_b3 | vs_b1 (0.88) | vs_b5 (0.36) | — | — |
-| exp0b rep2 | c | vs_c1 | vs_c6 (0.20) tie×2 | vs_c7 (0.24) | ~ | — |
-| exp0b rep2 | d | vs_d5 | vs_d6 (0.64) | vs_d6 (0.44) | ✅ | — |
-| exp0b rep3 | a | vs_a1 | vs_a2 (0.60) | vs_a2 (0.20) | ✅ | — |
-| exp0b rep3 | b | vs_b3 | vs_b3 (0.76) | vs_b3 (0.76) | ✅ | ✅ |
-| exp0b rep3 | c | vs_c1 | vs_c5 (0.24) | vs_c5 (0.12) | ✅ | — |
-| exp0b rep3 | d | vs_d5 | vs_d3 (0.04) tie×2 | vs_d5 (0.68) | — | ✅ |
-| cfgA rep1 | a | vs_a1 | vs_a1 (0.72) | vs_a1 (0.92) | ✅ | ✅ |
-| cfgA rep1 | b | vs_b3 | vs_b3 (0.92) | vs_b1 (0.00) tie×7 ⚠ | — | — |
-| cfgA rep1 | c | vs_c1 | vs_c4 (0.28) | vs_c7 (0.16) | — | — |
-| cfgA rep1 | d | vs_d5 | vs_d1 (1.00) | vs_d3 (0.52) | — | — |
-| cfgA rep2 | a | vs_a1 | vs_a4 (0.20) | vs_a4 (0.08) | ✅ | — |
-| cfgA rep2 | b | vs_b3 | vs_b3 (0.24) | vs_b3 (0.36) | ✅ | ✅ |
-| cfgA rep2 | c | vs_c1 | vs_c7 (0.20) | vs_c1 (0.16) | — | ✅ (pinned) |
-| cfgA rep2 | d | vs_d5 | vs_d1 (0.40) tie×2 | vs_d5 (0.96) | ~ | ✅ |
-| cfgA rep3 | a | vs_a1 | vs_a2 (0.48) | vs_a1 (0.12) | — | ✅ (pinned) |
-| cfgA rep3 | b | vs_b3 | vs_b1 (0.20) tie×2 | vs_b2 (0.24) | — | — |
-| cfgA rep3 | c | vs_c1 | vs_c4 (0.24) | vs_c7 (0.24) | — | — |
-| cfgA rep3 | d | vs_d5 | vs_d3 (0.36) | vs_d4 (0.08) tie×2 | — | — |
-| cfgB rep1 | a | vs_a1 | vs_a7 (0.40) | vs_a1 (0.12) | — | ✅ |
-| cfgB rep1 | b | vs_b3 | vs_b1 (1.00) | vs_b5 (0.44) | — | — |
-| cfgB rep1 | c | vs_c1 | vs_c1 (0.32) | vs_c1 (0.40) | ✅ | ✅ (pinned) |
-| cfgB rep1 | d | vs_d5 | vs_d6 (0.44) | vs_d3 (0.64) | — | — |
-| cfgB rep2 | a | vs_a1 | vs_a5 (0.44) | vs_a2 (0.20) | — | — |
-| cfgB rep2 | b | vs_b3 | vs_b3 (0.72) | vs_b6 (0.28) | — | — |
-| cfgB rep2 | c | vs_c1 | vs_c4 (0.88) | vs_c7 (0.20) | — | — |
-| cfgB rep2 | d | vs_d5 | vs_d6 (0.40) | vs_d1 (0.56) | — | — |
+| run | cluster | trained | session-1 winner | first upvoted | final winner | preserved? | aligned? |
+|---|---|---|---|---|---|---|---|
+| exp0b rep1 | a | vs_a1 | vs_a2 (0.52) | vs_a2 | vs_a2 (0.52) | ✅ | — |
+| exp0b rep1 | b | vs_b3 | vs_b3 (0.52) | vs_b7 | vs_b2 (0.16) | — | — |
+| exp0b rep1 | c | vs_c1 | vs_c3 (0.72) | vs_c5 | vs_c3 (0.28) | ✅ | — |
+| exp0b rep1 | d | vs_d5 | vs_d6 (0.48) | vs_d5 ✅ | vs_d6 (0.84) | ✅ | — |
+| exp0b rep2 | a | vs_a1 | vs_a3 (0.04) tie×3 | vs_a6 | vs_a3 (0.08) | ~ | — |
+| exp0b rep2 | b | vs_b3 | vs_b1 (0.88) | vs_b1 | vs_b5 (0.36) | — | — |
+| exp0b rep2 | c | vs_c1 | vs_c6 (0.20) tie×2 | vs_c5 | vs_c7 (0.24) | ~ | — |
+| exp0b rep2 | d | vs_d5 | vs_d6 (0.64) | vs_d5 ✅ | vs_d6 (0.44) | ✅ | — |
+| exp0b rep3 | a | vs_a1 | vs_a2 (0.60) | vs_a1 ✅ | vs_a2 (0.20) | ✅ | — |
+| exp0b rep3 | b | vs_b3 | vs_b3 (0.76) | vs_b6 | vs_b3 (0.76) | ✅ | ✅ |
+| exp0b rep3 | c | vs_c1 | vs_c5 (0.24) | vs_c2 | vs_c5 (0.12) | ✅ | — |
+| exp0b rep3 | d | vs_d5 | vs_d3 (0.04) tie×2 | vs_d5 ✅ | vs_d5 (0.68) | — | ✅ |
+| cfgA rep1 | a | vs_a1 | vs_a1 (0.72) | vs_a1 ✅ | vs_a1 (0.92) | ✅ | ✅ |
+| cfgA rep1 | b | vs_b3 | vs_b3 (0.92) | vs_b3 ✅ | vs_b1 (0.00) tie×7 ⚠ | — | — |
+| cfgA rep1 | c | vs_c1 | vs_c4 (0.28) | vs_c3 | vs_c7 (0.16) | — | — |
+| cfgA rep1 | d | vs_d5 | vs_d1 (1.00) | vs_d1 | vs_d3 (0.52) | — | — |
+| cfgA rep2 | a | vs_a1 | vs_a4 (0.20) | vs_a4 | vs_a4 (0.08) | ✅ | — |
+| cfgA rep2 | b | vs_b3 | vs_b3 (0.24) | vs_b5 | vs_b3 (0.36) | ✅ | ✅ |
+| cfgA rep2 | c | vs_c1 | vs_c7 (0.20) | vs_c6 | vs_c1 (0.16) | — | ✅ (pinned) |
+| cfgA rep2 | d | vs_d5 | vs_d1 (0.40) tie×2 | vs_d2 | vs_d5 (0.96) | ~ | ✅ |
+| cfgA rep3 | a | vs_a1 | vs_a2 (0.48) | vs_a5 | vs_a1 (0.12) | — | ✅ (pinned) |
+| cfgA rep3 | b | vs_b3 | vs_b1 (0.20) tie×2 | vs_b2 | vs_b2 (0.24) | — | — |
+| cfgA rep3 | c | vs_c1 | vs_c4 (0.24) | vs_c7 | vs_c7 (0.24) | — | — |
+| cfgA rep3 | d | vs_d5 | vs_d3 (0.36) | vs_d3 | vs_d4 (0.08) tie×2 | — | — |
+| cfgB rep1 | a | vs_a1 | vs_a7 (0.40) | vs_a6 | vs_a1 (0.12) | — | ✅ |
+| cfgB rep1 | b | vs_b3 | vs_b1 (1.00) | vs_b5 | vs_b5 (0.44) | — | — |
+| cfgB rep1 | c | vs_c1 | vs_c1 (0.32) | vs_c7 | vs_c1 (0.40) | ✅ | ✅ (pinned) |
+| cfgB rep1 | d | vs_d5 | vs_d6 (0.44) | vs_d6 | vs_d3 (0.64) | — | — |
+| cfgB rep2 | a | vs_a1 | vs_a5 (0.44) | vs_a5 | vs_a2 (0.20) | — | — |
+| cfgB rep2 | b | vs_b3 | vs_b3 (0.72) | vs_b6 | vs_b6 (0.28) | — | — |
+| cfgB rep2 | c | vs_c1 | vs_c4 (0.88) | vs_c3 | vs_c7 (0.20) | — | — |
+| cfgB rep2 | d | vs_d5 | vs_d6 (0.40) | vs_d4 | vs_d1 (0.56) | — | — |
 
 ## Supplementary — outside the pre-registered scope
 
@@ -83,23 +83,14 @@ _`exp0-2026-07-26` is structurally identical (28 probes, 210 runs, same
 trained spokes) but predates the judge-calibration passes, so it is not
 pooled into the headline above._
 
-| run | cluster | trained | session-1 winner | final winner | preserved? | aligned? |
-|---|---|---|---|---|---|---|
-| exp0 (uncalibrated judge) | a | vs_a1 | vs_a4 (0.20) | vs_a3 (0.20) | — | — |
-| exp0 (uncalibrated judge) | b | vs_b3 | vs_b5 (0.28) | vs_b1 (0.00) tie×7 ⚠ | — | — |
-| exp0 (uncalibrated judge) | c | vs_c1 | vs_c1 (0.92) | vs_c1 (0.96) | ✅ | ✅ (pinned) |
-| exp0 (uncalibrated judge) | d | vs_d5 | vs_d5 (0.12) | vs_d4 (0.48) | — | — |
+| run | cluster | trained | session-1 winner | first upvoted | final winner | preserved? | aligned? |
+|---|---|---|---|---|---|---|---|
+| exp0 (uncalibrated judge) | a | vs_a1 | vs_a4 (0.20) | vs_a7 | vs_a3 (0.20) | — | — |
+| exp0 (uncalibrated judge) | b | vs_b3 | vs_b5 (0.28) | vs_b5 | vs_b1 (0.00) tie×7 ⚠ | — | — |
+| exp0 (uncalibrated judge) | c | vs_c1 | vs_c1 (0.92) | vs_c1 ✅ | vs_c1 (0.96) | ✅ | ✅ (pinned) |
+| exp0 (uncalibrated judge) | d | vs_d5 | vs_d5 (0.12) | vs_d1 | vs_d4 (0.48) | — | — |
 
-| group | slots | preserved (strict) | preserved (lenient) | final aligned | final aligned (excl. pinned) | session-1 aligned |
-|---|---|---|---|---|---|---|
-| **pooled** | 4 | 1/4 (25%) | 1/4 (25%) | 1/4 (25%) | 0/4 (0%) | 2/4 (50%) |
-| _chance_ | — | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ |
-
-## Not computed — first-upvoted-spoke column
-
-Item C.a also asks for the first spoke in each cluster to receive an
-upvote-driven edge increase, and C.b for P(final winner = first-upvoted
-spoke). That needs per-update `weight_updates` rows (source/target MU ids,
-`feedback_event_id`, turn ordering) from the run store — the archived
-reports carry only per-edge aggregate deltas with no endpoints, so the
-column cannot be reconstructed from files alone. Requires the backend DB.
+| group | slots | preserved (strict) | preserved (lenient) | final = first-upvoted | final aligned | final aligned (excl. pinned) | session-1 aligned |
+|---|---|---|---|---|---|---|---|
+| **pooled** | 4 | 1/4 (25%) | 1/4 (25%) | 1/4 (25%) | 1/4 (25%) | 0/4 (0%) | 2/4 (50%) |
+| _chance_ | — | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ | _14%_ |

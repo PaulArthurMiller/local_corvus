@@ -1574,6 +1574,40 @@ class GraphStore:
             await db.close()
         return [row[0] for row in rows]
 
+    async def get_full_config_snapshot_for_experiment(
+        self, experiment_id: str
+    ) -> Optional[dict]:
+        """
+        Return the full_config_snapshot (the resolved config a real turn ran
+        on — M43's own 100%-coverage field) from that experiment's earliest
+        run. Any run's snapshot is representative: config_overrides ride a
+        per-condition backend restart, so every run within one experiment_id
+        shares the same resolved config. Returns None if the experiment has
+        no run rows.
+
+        Used by the §6.3 probe-retrieval-geometry check (Milestone 44) to
+        know what K1+K2 the real turns actually resolved, to compare against
+        what probe measurement in the same experiment actually retrieved.
+        """
+        import json as _json
+
+        db = await _open_db()
+        try:
+            async with db.execute(
+                """
+                SELECT full_config_snapshot FROM analytics
+                WHERE experiment_id = ?
+                ORDER BY timestamp ASC LIMIT 1
+                """,
+                (experiment_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        finally:
+            await db.close()
+        if row is None or row[0] is None:
+            return None
+        return _json.loads(row[0])
+
     async def get_earliest_run_timestamp_for_experiment(
         self, experiment_id: str
     ) -> Optional[str]:

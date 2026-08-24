@@ -1509,3 +1509,62 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
     throwaway analytics rows under `m43-live-cfgA/cfgB_dryrun_learned`.
   - 1166 tests passing (15 new beyond the build session's 1151), no regressions.
   - Branch: `milestone-43-plan-declared-config-build` (same PR, updated)
+
+- 2026-08-20: /build — Milestone 44 complete (Probe Measurement Reads the
+  Resolved Config — Phase 1 fix + Phase 2 detection check)
+  - See BUILD-PLAN.md's Milestone 44 section for the full technical
+    record. Summary here:
+  - **Phase 1 (the fix):** `POST /admin/run-probe` (`backend/api/admin.py`)
+    dropped its own `with open(_CONFIG_PATH, ...)` disk read — a second,
+    unrelated loader in the same file that M43's audit missed — and now
+    uses the already-imported, already-resolved `_CONFIG` directly. One-line
+    comments at both of admin.py's loader sites so the deliberately-disk
+    `GET /admin/config` can't get "fixed" the same way by a future reader.
+    `core/config_overrides.py`'s docstring inventory updated to name
+    `api/admin.py` as a resolved-config consumer that inherits by import.
+  - **New regression test** (`tests/test_api/test_run_probe_resolved_config.py`):
+    real end-to-end test against a temp graph store — confirmed FAILING
+    against the pre-fix code (retrieved slate stuck at K1(3)+K2(1)=4 under a
+    K2=2 override) before the fix was applied, then passing after.
+  - **New class fix** (`tests/test_config_loader_inventory.py`): turns M43's
+    docstring-only loader inventory into an enforced allowlist scan of
+    `backend/**/*.py` for `open(_CONFIG_PATH ...)` sites. Includes a live
+    test that writes a throwaway loader file into the real `backend/` tree,
+    confirms the guard flags it, then removes it.
+  - **Phase 1 live verification (real Docker backend, real graph.db):**
+    booted with `CONFIG_OVERRIDES_JSON` setting `retrieval_level2_top_k: 2`;
+    `POST /admin/run-probe` returned a 5-MU retrieved set (baseline, no
+    override: 4 MUs), and both calls' `probe_results` rows were confirmed
+    written with matching slate sizes by direct query against `graph.db`.
+    Backend restored to its original baseline `runtime_config_hash`
+    afterward; `config.yaml` untouched throughout (`git status` clean).
+  - **Phase 2 (the detection check):** `_check_probe_retrieval_geometry()`
+    (`backend/analytics/reports/experiment_report.py`), a fourth §6.3
+    integrity check, compares the maximum observed
+    `probe_results.retrieved_mu_ids` slate size against K1+K2 read from a
+    new `store.get_full_config_snapshot_for_experiment()` method — deliberately
+    checking only the *maximum* observed slate, since short slates are
+    normal and common early in a run. `markdown_renderer.py` gains the
+    "Probe-Retrieval Geometry (M44)" §6.3 subsection.
+  - **Phase 2 live acceptance check — the milestone's own Done-when
+    criterion:** regenerated all 8 archived learned-run experiment reports
+    (`exp0b`/`exp0b-rep2`/`exp0b-rep3` baselines, `exp01-cfgA-rep1/rep2/rep3`,
+    `exp01-cfgB-rep1/rep2`) against the real `graph.db` via a real Docker
+    backend. Result matched the prediction exactly: **FAIL for cfgB rep1 and
+    rep2** (expected K1+K2=5, max observed 4 — the real defect, reproduced
+    from archived production data, not a synthetic fixture) and **PASS for
+    the other six** (all K1+K2=4, matching). Confirmed by direct SQL query
+    against `graph.db` before running the endpoint, then confirmed again via
+    the real endpoint's JSON and rendered Markdown output.
+  - **Open question resolved:** `apply_config_overrides()`'s list-valued-key
+    behavior (flagged unverified in the milestone's own risks section) is
+    replace-not-merge — a plain `node[leaf] = value` assignment, confirmed
+    by a new test (`test_apply_overrides_list_valued_leaf_replaces_not_merges`
+    in `tests/test_core/test_config_overrides.py`). Relevant to any future
+    item F knob run overriding `retrieval_exclude_source_types`.
+  - 34 new tests total, full suite green (1196 passed, 2 pre-existing
+    unrelated skips, no regressions).
+  - Branch: `milestone-44-probe-resolved-config-build`
+  - Milestone 44 status: COMPLETE — both phases built, all Done criteria
+    met with live verification against a real Docker backend and the real
+    `graph.db`. AWAITING PAUL: PR review + merge.

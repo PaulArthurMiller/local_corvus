@@ -659,18 +659,90 @@ async def _check_probe_replay_index(experiment_id: str, store: GraphStore) -> di
     }
 
 
+async def _check_probe_retrieval_geometry(experiment_id: str, store: GraphStore) -> dict:
+    """
+    §6.3 — Probe-retrieval-geometry check (Milestone 44).
+
+    Confirms probe measurement actually ran on the same K1+K2 retrieval
+    geometry the experiment's real turns resolved. Written from a real
+    defect: POST /admin/run-probe re-read config.yaml from disk instead of
+    the orchestrator's resolved config, so a plan's
+    hyperparameters.retrieval_level2_top_k override reached every real turn
+    and never a single probe measurement — exp01-cfgB declared K2=2, its
+    210 real turns retrieved 5-MU slates, and all 3,500 of its probe rows
+    retrieved 4 (see BUILD-PLAN.md's Milestone 44 for the full blast-radius
+    read). Phase 1 fixed the endpoint; this is Phase 2 — the check that
+    would have surfaced the mismatch instead of it going unnoticed for an
+    entire pre-registered run.
+
+    Semantics matter: only the MAXIMUM observed probe slate size is
+    diagnostic. Short slates are legitimate and common — early sessions
+    with a small graph often have too few multi-hit candidates to fill K1,
+    let alone K2 (e.g. baseline rep1 has 25 probe rows of length 3 and 50
+    of length 2). A check requiring every slate to equal K1+K2 would FAIL
+    every healthy run in the program.
+    """
+    snapshot = await store.get_full_config_snapshot_for_experiment(experiment_id)
+    if snapshot is None:
+        return {
+            "status": "SKIP",
+            "reason": "No runs found for this experiment_id — cannot resolve expected K1+K2",
+        }
+
+    hp = snapshot.get("hyperparameters", {})
+    expected_k1 = hp.get("retrieval_level1_top_k")
+    expected_k2 = hp.get("retrieval_level2_top_k")
+    if expected_k1 is None or expected_k2 is None:
+        return {
+            "status": "SKIP",
+            "reason": (
+                "full_config_snapshot missing hyperparameters."
+                "retrieval_level1_top_k/retrieval_level2_top_k"
+            ),
+        }
+    expected_max = expected_k1 + expected_k2
+
+    probe_rows = await store.query_probe_results(experiment_id=experiment_id)
+    if not probe_rows:
+        return {
+            "status": "SKIP",
+            "reason": "No probe results found for this experiment_id",
+            "expected_k1": expected_k1,
+            "expected_k2": expected_k2,
+            "expected_max_slate_size": expected_max,
+        }
+
+    max_observed = max(len(r["retrieved_mu_ids"]) for r in probe_rows)
+    status = "PASS" if max_observed == expected_max else "FAIL"
+
+    logger.info(
+        "experiment_report §6.3 probe_retrieval_geometry: status=%s "
+        "expected_max=%d (K1=%d+K2=%d) max_observed=%d probe_rows=%d",
+        status, expected_max, expected_k1, expected_k2, max_observed, len(probe_rows),
+    )
+    return {
+        "status": status,
+        "expected_k1": expected_k1,
+        "expected_k2": expected_k2,
+        "expected_max_slate_size": expected_max,
+        "max_observed_slate_size": max_observed,
+        "probe_result_count": len(probe_rows),
+    }
+
+
 async def _section_63_integrity_checks(
     experiment_id: str,
     store: GraphStore,
 ) -> dict:
-    """§6.3 — All three data-integrity / confound checks."""
+    """§6.3 — All four data-integrity / confound checks."""
     seed_provenance = await _check_seed_provenance(experiment_id, store)
     graph_wipe = await _check_graph_wipe(experiment_id, store)
     probe_replay = await _check_probe_replay_index(experiment_id, store)
+    probe_retrieval_geometry = await _check_probe_retrieval_geometry(experiment_id, store)
 
     overall_pass = all(
         c.get("status") in ("PASS", "SKIP")
-        for c in (seed_provenance, graph_wipe, probe_replay)
+        for c in (seed_provenance, graph_wipe, probe_replay, probe_retrieval_geometry)
     )
 
     return {
@@ -678,6 +750,7 @@ async def _section_63_integrity_checks(
         "seed_fixture_provenance": seed_provenance,
         "graph_wipe_verification": graph_wipe,
         "probe_replay_index_normalization": probe_replay,
+        "probe_retrieval_geometry": probe_retrieval_geometry,
     }
 
 

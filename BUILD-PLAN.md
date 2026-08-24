@@ -6478,12 +6478,47 @@ before exp01.
 
 ## Probe Measurement Reads the Resolved Config — Milestone 44
 
-**Status:** PROPOSED 2026-08-20, from the Plan Concept Alpha item D
-discussion (metric definitions). Found while reading `retrieve()` to settle
-what "path-back" can mean under the current retrieval geometry. Should land
-before any Alpha item D instrumentation or item F knob run that touches
-`hyperparameters.*` — every read-side candidate in item F is exactly such a
-knob, and would be silently unmeasured.
+**Status:** COMPLETE 2026-08-20 — both phases built same day as the
+proposal. **Phase 1:** `run_probe()` (`backend/api/admin.py`) drops its own
+`with open(_CONFIG_PATH, ...)` read and uses the already-imported `_CONFIG`
+directly; one-line comments at both of admin.py's loader sites (`GET
+/admin/config` stays deliberately disk; `POST /admin/run-probe` now
+inherits the resolved config) so a future reader can't "fix" the
+deliberate one back to a re-read. `core/config_overrides.py`'s docstring
+inventory gains `api/admin.py` as a resolved-config consumer that inherits
+by import rather than merging independently.
+`tests/test_api/test_run_probe_resolved_config.py` (new, 2 tests) is a
+real end-to-end regression test against a temp graph store — confirmed
+**failing against the pre-fix code** before the fix was applied (retrieved
+slate stayed at K1(3)+K2(1)=4 under a K2=2 override), then passing after.
+`tests/test_config_loader_inventory.py` (new, 3 tests) turns M43's
+docstring-only loader inventory into an enforced allowlist scan, including
+a live test that writes a throwaway loader into `backend/`, confirms the
+guard flags it, then removes it. **Live verification (real Docker backend,
+real graph.db):** booted with `CONFIG_OVERRIDES_JSON` setting
+`retrieval_level2_top_k: 2`, `POST /admin/run-probe` returned a 5-MU
+retrieved set (baseline, no override: 4 MUs) and both results' matching
+`probe_results` rows were confirmed written in the DB. Backend restored to
+its original baseline hash afterward; `config.yaml` untouched throughout.
+**Phase 2:** `_check_probe_retrieval_geometry()` (`experiment_report.py`),
+wired into `_section_63_integrity_checks` as a fourth check, compares the
+maximum observed `probe_results.retrieved_mu_ids` slate size against
+K1+K2 read from `store.get_full_config_snapshot_for_experiment()` (new
+store method — any run's `full_config_snapshot` is representative within
+one `experiment_id`). `markdown_renderer.py` gains the "Probe-Retrieval
+Geometry (M44)" §6.3 subsection. 6 new unit/markdown tests. **Live
+acceptance check (the milestone's own Done-when criterion):** regenerated
+all 8 archived learned-run experiment reports
+(`exp0b`/`exp0b-rep2`/`exp0b-rep3`, `exp01-cfgA-rep1/rep2/rep3`,
+`exp01-cfgB-rep1/rep2`) against the real `graph.db` via a real Docker
+backend — result matched exactly: **FAIL for cfgB rep1 and rep2**
+(expected K1+K2=5, max observed 4 — the real defect, reproduced from
+archived data with no synthetic fixture involved) and **PASS for the
+other six** (all K1+K2=4, matching). 1 new test
+(`test_apply_overrides_list_valued_leaf_replaces_not_merges`) answers the
+Phase 1 open question below. 34 new tests total across both phases; full
+suite green (1196 passed, 2 pre-existing unrelated skips, no
+regressions). Branch: `milestone-44-probe-resolved-config-build`.
 
 ### The defect
 
@@ -6688,11 +6723,14 @@ thing it was written from.
 - ⚠ **Keep the inventory guard cheap.** `backend/` only, allowlist keyed by
   path with a one-line reason each, so adding a legitimate loader is a
   two-line edit rather than a reason to delete the test.
-- ? **Does `apply_config_overrides()` handle list-valued keys sanely?**
-  `retrieval_exclude_source_types` is a list, and deep-merge semantics for
-  lists are usually replace-not-merge — probably what we want, but
-  unverified. No current plan overrides it; item F's read-side candidates
-  might. Verify during the Phase 1 build and record the answer here.
+- ✓ **Does `apply_config_overrides()` handle list-valued keys sanely?**
+  Verified during the build: yes, replace-not-merge — `apply_config_overrides()`
+  does a plain `node[leaf] = value` assignment, so a list-valued override
+  (e.g. `retrieval_exclude_source_types`) replaces the committed list
+  wholesale rather than merging/appending/deduplicating against it. Pinned
+  by `test_apply_overrides_list_valued_leaf_replaces_not_merges` in
+  `tests/test_core/test_config_overrides.py`. No current plan overrides a
+  list-valued key; item F's read-side candidates might.
 - ? **Does cfgB get re-run under correct measurement, or written off?** Not a
   build question — it belongs to `EXPERIMENT-PLAN.md` (Plan Concept Alpha),
   and it interacts with item F's base-config decision, which is currently
@@ -7244,3 +7282,5 @@ anyway. Throwaway analytics rows live under `m43-live-cfgA/cfgB_dryrun_learned`
 experiment_ids.
 
 **Milestone 41:** Complete — report-layer only, no schema change, restricted to `backend/analytics/reports/control_shadow.py` + `markdown_renderer.py`. `_compute_session_mean_deltas()` extracted (shared session-mean/final-session-mean arithmetic) so `_compute_trained_subset_comparison()`'s new optional `pinned_probe_ids` param computes the raw mean and an excluding-pinned mean through the identical code path — the same M39 `_aggregate_deltas_by_phenomenon` rationale, applied to the trained-subset number this time. New output keys are purely additive (`pinned_trained_probe_ids`, `matched_probe_count_excluding_pinned`, `mean_delta_by_session_excluding_pinned`, `final_session_mean_delta_excluding_pinned`, `control_pinned` per per_probe row); the existing raw keys are untouched, verified both by unit test (equality assertion, not closeness) and by live regeneration. `generate_control_shadow()` reordered so `pinned_probe_ids` is computed before the trained-subset call, feeding both M39's all-probe pin-adjustment and M41's trained-subset pin-adjustment from one computation. All-pinned degrades to `None`/count-0, never `0.0` (verified by dedicated test — the all-pinned hazard the milestone called out explicitly). Markdown block retitled `(M39/M41)`, gains a control-pinned-trained-probes line and a second headline figure (both means always shown with their probe counts), and an explicit all-pinned note gated on M41-key *presence* (not a defaulted zero) so a pre-M41 stored report can never trigger a false "all pinned" note — the one subtlety the backward-compat tests exist to catch. 10 new tests (1093 total, no regressions) across `test_control_shadow.py`/`test_markdown_renderer.py`, plus the existing M39 end-to-end `generate_experiment_report` test in `test_experiment_report.py` extended (its `vs_a1` fixture — control pinned at 1.0 both sessions, the only trained probe with data — already is the all-pinned case). **Live verification (done-criterion) regenerated exp0-a, exp0b, and both Round 1 replicates against the real `memory/graph.db`.** Confirmed unchanged, exactly: raw trained-subset final Δ (−0.46/−0.20/−0.12 for rep1/rep2/rep3) and the M39 all-probe pin-adjusted finals (+0.096/+0.007/+0.039) — proof this milestone touched nothing outside its scope. **One correction the live run surfaced against the milestone's own pre-build hand-worked example:** rep3 pins only `vs_c1`, not `vs_a1` as the planning-time table assumed (`vs_a1`'s static control reads 0.0 in 2 of rep3's 5 sessions, so the unchanged "1.0 in every session" rule correctly excludes it — the table's author had eyeballed only the final session). Across all three Round 1 replicates, real pin counts are `vs_a1`: 1/3 (exp0b/rep1 only), `vs_c1`: 2/3 (rep1, rep3) — the earlier "`vs_a1` 3/3" claim carried in PROGRESS.md/BUILD-PLAN was a hand-read generalization error, corrected here rather than propagated. **Recomputed pin-adjusted trained-subset Δ envelope across the three replicates: [−0.20, +0.16]** (rep1 0.0, rep2 −0.20 — nothing pinned that replicate — rep3 +0.16), recorded alongside the existing raw envelope [−0.46, −0.12] in M42's decision rule, which now names both and which metric each governs. See PROGRESS.md 2026-08-12 entry for the full read including per-probe detail. Branch: `milestone-41-pin-adjusted-trained-subset-delta`.
+
+**Milestone 44:** Complete — see the "Probe Measurement Reads the Resolved Config" section above for the full technical record. Summary: Phase 1 fixed `POST /admin/run-probe`'s own independent disk read of `config.yaml` (missed by M43's audit) to use the orchestrator's resolved `_CONFIG`, plus a new enforced loader-inventory test so a future miss fails CI instead of waiting for the next milestone to notice by hand. Phase 2 added a §6.3 `probe_retrieval_geometry` check and proved it against real archived data — FAIL on exactly the two runs known to carry the defect (exp01-cfgB rep1/rep2), PASS on the other six. Both phases' Done-when criteria were met with live verification against a real Docker backend and the real `graph.db`, not fakes. Branch: `milestone-44-probe-resolved-config-build`.

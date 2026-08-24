@@ -90,6 +90,20 @@ def test_apply_overrides_multiple_keys_across_sections():
     assert merged["reporting"]["pass_rank_thresholds"]["spoke_retrieval"] == 5
 
 
+def test_apply_overrides_list_valued_leaf_replaces_not_merges():
+    """M44 open question, answered: a list-valued leaf (e.g.
+    hyperparameters.retrieval_exclude_source_types) is REPLACED wholesale
+    by `node[leaf] = value`, not merged/appended/deduplicated against the
+    committed list. No current plan overrides a list-valued key, but a
+    future item F read-side candidate might, so this pins the behavior
+    (see BUILD-PLAN.md's Milestone 44 open questions)."""
+    config = {"hyperparameters": {"retrieval_exclude_source_types": ["prompt", "tool_call"]}}
+    merged = apply_config_overrides(
+        config, {"hyperparameters.retrieval_exclude_source_types": ["prompt"]}
+    )
+    assert merged["hyperparameters"]["retrieval_exclude_source_types"] == ["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # load_config_overrides_from_env
 # ---------------------------------------------------------------------------

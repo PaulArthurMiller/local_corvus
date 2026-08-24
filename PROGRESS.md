@@ -2,6 +2,56 @@
 
 ## Current state
 
+**2026-08-24 update: Alpha item D scoped and filed as Milestones 45 + 46; M44 merged.**
+Milestone 44 is merged (cb39b85) and `main` is clean. The Alpha D metric
+discussion resumed and closed all three open questions from the 2026-08-20
+entry. **Decisions:** (1) D.a adopts a **composite**, not either sketch — a
+four-bucket exclusive partition (reached / outbid / out-of-depth /
+disconnected) as headline, anchor strength retained as a separate
+longitudinal write-side metric, terminal-seed folded in as a conditional
+"chase-down yield" within buckets 2–3, standalone 1-hop rate dropped, plus a
+new cheap **gold-as-K2-runner-up rank distribution** that retrospectively
+prices `retrieval_level2_top_k` — the knob cfgB was supposed to test and
+never did. (2) **Hop horizon 2**; if bucket 3 comes back large, that finding
+is the argument for horizon 3, with data. (3) **Archived-data analysis
+script**, validated on real turns before being applied to probe turns.
+(4) cfgB disposition **deferred** until baseline bucket distributions exist —
+the K2 runner-up distribution is the number that should decide it.
+
+**Two premise corrections made during scoping.** The directive called for a
+standalone highest-priority `admin.py` config-fix milestone gating item F —
+that is **already done**: M44 Phase 1 shipped it (`backend/api/admin.py:375`
+reads `config = _CONFIG`; the only surviving disk read is the deliberate
+`GET /admin/config` at line 261). **Item F's measurement gate is therefore
+already clear**; F remains gated on D only. And the "sensitivity/variance
+baseline doc" the findings were to be recorded in **did not exist** — the
+phrase appears once in the repo, at `BUILD-PLAN.md:4629`, as a forward
+reference to a layer never built. It is now created by M45 Phase 2.
+
+**One feasibility caveat found and designed around.** `config.yaml:357`
+commits `weight_mode: sample` for training turns, so per-turn edge weights
+were Thompson-sampled and cannot be regenerated. The single-criterion
+tie-back was therefore split into **three deterministic components** (α/β,
+topology, slate), and the slate component injects the recorded sampled
+weights from `candidate_set_before_ranking` / `edge_weights_used` rather than
+resampling — a documented limit. D's metrics are RNG-independent regardless:
+buckets read topology, chase-down yield and anchor strength read posterior
+α/β.
+
+**Two structural findings recorded for `docs/sensitivity_baseline.md`** (M45
+Phase 2), both established from archived data during scoping: **~11% of
+created edges are ever traversed and ~6% ever weight-updated**, dead
+consistent across all 8 runs and both configs — co-activation edges are
+structurally near-frozen, making the write side co-binding with `level2_k`
+for item F; and **K1's `edge_weight_sum` is undirected total degree**, a
+centrality term rather than a learned-direction one, so conv MUs gain K1 rank
+mechanically at ~6 edges/turn independent of feedback. Flagged as a knob
+candidate; not changed now.
+
+**Next step: build Milestone 45 Phase 1** — `scripts/alpha_d_pathback.py`,
+the reconstructor, with the three-component tie-back across all 8 learned
+runs as its Done-when. M46 follows.
+
 **2026-08-20 update (2): Plan Alpha item D discussion opened; a measurement defect found and filed as Milestone 44.**
 Reading `retrieve()` to settle item D.a's metric definitions surfaced that
 `POST /admin/run-probe` re-opens `config.yaml` from disk
@@ -1568,3 +1618,40 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
   - Milestone 44 status: COMPLETE — both phases built, all Done criteria
     met with live verification against a real Docker backend and the real
     `graph.db`. AWAITING PAUL: PR review + merge.
+
+- 2026-08-24: /planner — Alpha item D scoped; Milestones 45 + 46 added to
+  BUILD-PLAN.md. No code written.
+  - M44 confirmed merged (cb39b85), `main` clean. Session opened as a read
+    of `EXPERIMENT-PLAN.md` to pick the next step, with an explicit question
+    about whether Alpha item E (judge calibration) should come next.
+  - **Item E assessed and deferred, with its rationale changed.** Verified
+    that probe pass rate is `gold_mu_rank <= threshold`
+    (`experiment_report.py:767`, `_classify_probe_outcome`) — pure retrieval,
+    no judge. So Gemma error has **no path into any headline read**: the 4/8,
+    the 5/12, and item C's lock-in tables are all judge-independent, and E
+    cannot retroactively correct anything. But verdicts drive edge updates,
+    and item F's leading candidate is a write-side upvote multiplier, so E is
+    properly a **pre-flight gate on F's write-side knob**, not a re-read of
+    past runs — a promotion from where `EXPERIMENT-PLAN.md` has it. Also
+    confirmed E is executable on archived data at zero run cost: all 1,680
+    learned-condition responses recover via `memory/audit.log` joined on
+    `analytics.output_mu_id` (210/210 for all 8 runs), verdict split
+    611 up / 745 down / 324 none.
+  - **Alpha D scope decisions** — see the 2026-08-24 current-state entry
+    above for the composite metric design, horizon 2, archived-data scope,
+    and the deferred cfgB disposition.
+  - **Two directive premises corrected:** the `admin.py` fix was already
+    shipped by M44 Phase 1 (no milestone created; item F's measurement gate
+    is already clear), and the sensitivity/variance baseline doc did not
+    exist (now created by M45 Phase 2 rather than appended to).
+  - **`weight_mode: sample` caveat** (`config.yaml:357`) found during
+    scoping; the single-criterion tie-back was split into three deterministic
+    components as a result. Reconstructibility verified in detail:
+    `edge_update_events` covers all 8 learned runs with 0 orphans and 100% of
+    its `edge_id`s resolve via `analytics.traversal_path`; edge creation is
+    deterministic at `orchestrator.py:517/601/621`; `audit.log` survived every
+    graph wipe with 9,372 MUs indexed.
+  - Milestones 45 and 46 written into BUILD-PLAN.md with full specs, ASCII
+    diagrams, Done-when criteria, and risk lists. Status block updated.
+  - Milestone 45 status: PROPOSED — awaiting build. Next action is Phase 1,
+    `scripts/alpha_d_pathback.py`.

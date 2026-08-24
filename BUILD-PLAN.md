@@ -6738,6 +6738,351 @@ thing it was written from.
 
 ---
 
+## Path-Back Instrumentation (Plan Alpha D) — Milestone 45
+
+**Status:** PROPOSED 2026-08-24. Scope agreed in the Alpha D discussion
+session of the same date; supersedes the three-independent-rates sketch in
+`EXPERIMENT-PLAN.md` item D.a. Two phases, sequential. **Does not depend on
+M44** — the archived-data script never calls the probe endpoint — so this
+milestone was buildable the moment the Alpha D scope decisions landed.
+Milestone 46 follows this one.
+
+### What this measures, and why the current instruments can't
+
+Reports show seed-share collapsing to ~4–17% by session 5, but cannot
+distinguish **"conv MUs replaced the seed"** from **"conv MUs are one hop
+from the seed and would lead back to it if retrieval followed edges."** Those
+two worlds call for opposite interventions — the first is a write-side
+problem, the second a read-side one — and every knob in item F's candidate
+list is aimed at one or the other. Item D exists to tell them apart before an
+overnight run is spent guessing.
+
+The shape of the answer is constrained by what `retrieve()`
+(`backend/memory/retrieval.py:104`) actually does:
+
+```
+                    query (probe or real turn)
+                             │
+                             ▼
+                   ┌──────────────────┐
+                   │  BM25 over all   │  source_type filter drops prompt
+                   │  non-excluded MU │  and failed-output MUs from candidacy
+                   └────────┬─────────┘
+                            │  candidates with >= 2 keyword hits
+                            ▼
+              ┌───────────────────────────────┐
+       K1 ──▶ │ rank by edge_weight_sum       │ ◀── undirected TOTAL DEGREE:
+              │      + bm25_score             │     a centrality term, not a
+              └───────────────┬───────────────┘     learned-direction term
+                              │  top retrieval_level1_top_k = 3
+                              ▼
+              ┌───────────────────────────────┐
+       K2 ──▶ │ follow OUTGOING edges, 1 hop  │
+              │ score += weight x dir_mult    │
+              └───────────────┬───────────────┘
+                              │  top retrieval_level2_top_k = 1
+                              ▼
+                    slate = K1(3) + K2(1)
+```
+
+Two consequences fix the metric design. **Traversal is one hop and the K2
+cut is a single slot**, so a "1-hop path-back rate" is close to a restatement
+of K2 selection — it says the gold seed was in the candidate pool and lost an
+argmax. And **anything past one hop is counterfactual**: retrieval has never
+done a 2-hop walk or a greedy per-source chain, so numbers describing those
+walks price a *proposed* intervention and must never be rendered as observed
+behavior.
+
+### The partition (headline metric)
+
+Every turn carrying a known gold seed MU lands in exactly one bucket,
+assigned in priority order. Exclusive and exhaustive by construction:
+
+```
+   gold ∈ retrieved slate ? ──── yes ──▶  (1) REACHED
+        │ no
+        ▼
+   ∃ retrieved MU with a direct
+   outgoing edge to gold ?  ──── yes ──▶  (2) OUTBID
+        │ no                              gold was in the K2 candidate pool
+        ▼                                 and lost a one-slot argmax
+   gold reachable within 2 directed                → read-side problem
+   hops of any retrieved MU ? ── yes ──▶  (3) OUT-OF-DEPTH
+        │ no                              stepping stones exist but no
+        ▼                                 buildable chase-down reaches them
+   (4) DISCONNECTED                              → deeper read-side problem
+   no stepping stone exists at all
+        → write-side problem: edges toward gold were never built or never
+          survived, and no retrieval knob can fix it
+```
+
+The bucket boundary *is* item D.c's question. "Present but unused" is
+buckets 2+3; "absent entirely" is bucket 4. And each bucket names its own
+intervention, which is what makes this a knob-selection instrument for item F
+rather than another descriptive rate.
+
+**Reachability is directed, source→target, and the reconstructor must ignore
+the `direction` column entirely.** `retrieve()` builds `outgoing_edges` keyed
+on `source_mu_id` and never reads `direction`, so a reconstructor that honors
+the schema's `"bidirectional"` intent would measure a graph the retriever
+cannot see. This is exactly the second-code-path drift that M43 and M44 cost
+two milestones to close, arriving from a new direction.
+
+**Horizon is 2.** It matches what a buildable chase-down stage would do. If
+bucket 3 comes back large at horizon 2, that finding is the argument for
+revisiting horizon 3 — with data rather than in advance.
+
+### Supporting metrics
+
+1. **Chase-down yield** — conditional rate *within* buckets 2–3. From each
+   retrieved MU, greedily follow the highest-weight outgoing edge up to 2
+   hops; what fraction of bucket 2–3 turns land on gold? This dry-runs item
+   F's read-side chase-down candidate on archived data before it costs an
+   overnight. **Counterfactual — label at the point of display.**
+2. **Gold-as-K2-runner-up** — of turns where gold entered the K2 candidate
+   pool, its rank in `k2_scores` descending. Report the **full rank
+   distribution**, not just P(rank = 2): the same computation prices
+   `retrieval_level2_top_k` at 2, 3, and 5 instead of only the value cfgB
+   declared. This retrospectively prices the knob cfgB was supposed to test
+   and never did (M44), and it is computable for baseline and cfgA runs too —
+   which is the point, since cfgB is the only condition that ever declared it.
+3. **Anchor strength** — the write-side longitudinal metric, the one the
+   partition structurally cannot express. Two parts: the α/β trajectory of
+   hub→gold seed-fixture edges across sessions, and a census of output→gold
+   co-activation edges (how many exist, and how many ever received credit).
+
+### Why archived data can answer all of this
+
+Everything the metrics need is recoverable, and the RNG boundary is explicit:
+
+```
+   archived source                what it yields                RNG-dependent?
+   ───────────────                ──────────────                ──────────────
+   memory/audit.log          ──▶  MU id → source_type, text          no
+   (append-only, 9,372 MUs,       (conv MUs; seed MUs bypass
+    survived every graph wipe)     the audit boundary by design)
+
+   seed_fixtures/ +          ──▶  seed MU set + seed edges           no
+   seed_fixture_manifest
+
+   analytics.{prompt_mu_id,  ──▶  edge TOPOLOGY, by replaying        no
+     input_mu_id,                 orchestrator.py:517/601/621
+     output_mu_id,                (prompt→input, input→output,
+     activated_mu_ids}            output→each activated MU)
+
+   edge_update_events        ──▶  α/β trajectory per edge            no
+   (all 8 learned runs, 0          (edges never updated sit at
+    orphans, 100% of edge_ids       config priors 1.0/1.0, runtime
+    resolve via traversal_path)     and seed alike)
+
+   analytics.candidate_set   ──▶  the SAMPLED edge_weight_sum      recorded,
+     _before_ranking              actually used for K1 ranking     NOT regenerable
+
+   analytics.edge_weights    ──▶  the SAMPLED weight_used for      recorded,
+     _used                        every K1-outgoing edge (K2)      NOT regenerable
+```
+
+**The `weight_mode: sample` caveat, and why it does not bite.**
+`config.yaml:357` commits `weight_mode: sample` for training turns and no plan
+overrides it, so every real turn's retrieval used Thompson-sampled edge
+weights from a seeded RNG. A reconstructor cannot regenerate those per-turn
+draws. It does not need to: **D's metrics are RNG-independent.** The buckets
+read topology. Chase-down yield and anchor strength read the posterior α/β —
+the evidence counters, not the samples drawn from them. Only the slate
+tie-back touches sampled values, and there the recorded columns above supply
+them exactly.
+
+### Phase 1 — the reconstructor and its tie-back
+
+**Files:**
+
+1. `scripts/alpha_d_pathback.py` (new) — sibling to `scripts/alpha_c_lockin.py`,
+   same standalone-script shape. Rebuilds per-run graph state at any turn
+   index from the six sources above. No backend, no Docker, no network.
+2. `tests/test_scripts/test_alpha_d_reconstructor.py` (new) — the three
+   tie-back components below.
+
+**Done when — all three components pass across all 8 archived learned runs**
+(`exp0b`, `exp0b-rep2`, `exp0b-rep3`, `exp01-cfgA-rep1/rep2/rep3`,
+`exp01-cfgB-rep1/rep2`):
+
+```
+  (1) α/β TIE-BACK        reconstructed (α, β) == recorded edge_weights_used
+                          for every traversed edge, at every turn
+                          → validates the WEIGHT reconstruction
+
+  (2) TOPOLOGY TIE-BACK   every edge_id in a recorded traversal_path exists
+                          in the reconstructed graph at that turn, with
+                          matching source_mu_id and target_mu_id
+                          → validates the TOPOLOGY reconstruction
+
+  (3) SLATE TIE-BACK      replayed K1 + K2 == recorded activated_mu_ids,
+                          all 1,680 real turns
+                          → validates the SELECTION LOGIC
+```
+
+Component 3 injects the recorded sampled weights rather than resampling —
+a documented limit, stated in the script docstring and in the read, not a
+silent one. Components 1 and 2 are fully deterministic and carry no such
+caveat.
+
+**Why this ordering is the whole point.** Real turns record
+`traversal_path`; probe turns record nothing of the sort (see M46). The real
+turns are therefore a **labeled test set for the reconstructor** — validate
+against recorded truth where truth exists, then apply the validated code
+where it doesn't. Building the metrics first and the tie-back second would
+forfeit that and reproduce the M44 pattern: a measurement layer that looks
+clean and is wrong.
+
+**Estimate:** one to two sessions. The reconstruction rules are simple; the
+tie-back across 1,680 turns is where the real work and the real findings are.
+
+### Phase 2 — the metrics, the first read, and the sensitivity baseline
+
+**Files:**
+
+1. `scripts/alpha_d_pathback.py` — metrics layer on the validated
+   reconstructor: the four buckets, chase-down yield, K2 runner-up rank
+   distribution, anchor strength.
+2. `docs/evaluations/alpha_d_pathback_analysis.md` (new) — the deep-dive
+   tables, per the `EVALUATIONS.md` A.a convention (numbers live here, not in
+   the log entry).
+3. `docs/sensitivity_baseline.md` (new) — folded into this milestone rather
+   than shipped as a loose docs commit. This is the doc `BUILD-PLAN.md:4629`
+   forward-references ("analysis lives downstream (sensitivity doc now,
+   Karpathy loop later)") and which was never created.
+4. `EVALUATIONS.md` — the read entry. `EXPERIMENT-PLAN.md` — item D marked
+   done with its findings.
+
+**Required output of the first read:** per-run, per-session bucket
+distributions across all 8 archived runs (baseline / cfgA / cfgB), both
+priced counterfactuals, and anchor-strength trajectories.
+
+**Seed findings for `docs/sensitivity_baseline.md`** (both established during
+the 2026-08-24 Alpha D scoping, from archived data — they do not depend on
+this milestone's output):
+
+- **~11% of created edges are ever traversed; ~6% ever receive a weight
+  update.** Dead consistent across all 8 runs and both configs (~1,260 edges
+  created per run at ~6/turn, ~143–171 ever traversed, ~70–112 ever updated;
+  cfgB ~1,470 created at 11.0/11.6% and 7.6/6.9%). Co-activation edges are
+  structurally near-frozen — the graph builds stepping stones roughly nine
+  times faster than the learning signal can touch them. **The write side is
+  therefore co-binding with `retrieval_level2_top_k` for item F:** widening
+  the K2 slot without also widening what gets credit only samples more of a
+  near-uniform prior.
+- **K1's `edge_weight_sum` is undirected total degree** — a centrality term,
+  not a learned-direction term. A conv MU gains K1 rank mechanically at ~6
+  edges per turn, independent of whether any feedback ever endorsed it.
+  **Flagged as a knob candidate with this rationale attached; not changed
+  now** — it is a plausible explanation for concentration-without-alignment
+  (the untrained-spoke `vs_d3` curves that motivated item C) and should be
+  tested deliberately rather than adjusted in passing.
+
+**Estimate:** one to two sessions.
+
+### Risks and open questions
+
+- ⚠ **A second code path that drifts from `retrieve()` is the primary risk**,
+  and it is the exact failure mode M43 and M44 were spent on. The three-part
+  tie-back is the defense; it is the Done-when for a reason. If any component
+  cannot be made to pass, that is a finding to report, not a criterion to
+  relax.
+- ⚠ **Counterfactual numbers must be labeled where they are displayed**, not
+  in a footnote. Chase-down yield and 2-hop reachability describe walks the
+  system has never performed. An unlabeled counterfactual in a table is how a
+  proposal becomes a "result" three sessions later.
+- ⚠ **Directed reachability, `direction` column ignored** — see the partition
+  section. Worth a dedicated test, because the schema actively invites the
+  wrong choice.
+- ⚠ **Horizon 2 is a judgment call and the headline moves with it**, the same
+  pathology item C flagged for tie handling. Report bucket 3's size
+  prominently so the horizon choice stays auditable.
+- ⚠ **Probe turns are reconstruction-only until M46.** The first read's probe
+  numbers rest on a reconstructor validated against real turns, which is
+  strong but is not the same as validated against probe turns. Say so in the
+  read.
+- ? **Does cfgB get re-run, or written off?** Deferred by decision — revisit
+  once baseline bucket distributions exist, since they may settle whether
+  `level2_k: 2` is worth an overnight at all. The K2 runner-up rank
+  distribution is the specific number that should decide it.
+
+---
+
+## Probe Traversal Instrumentation — Milestone 46
+
+**Status:** PROPOSED 2026-08-24. Follows Milestone 45. Originally scoped to
+bundle with an `admin.py` config fix; that fix **already shipped as M44 Phase
+1**, so this stands alone.
+
+### The gap
+
+Probe measurement records *what was retrieved* and nothing about *how*:
+
+```
+  REAL TURNS (analytics)                PROBE TURNS (probe_results)
+  ──────────────────────                ───────────────────────────
+  activated_mu_ids            ✓         retrieved_mu_ids            ✓
+  traversal_path              ✓         traversal_path              ✗
+  hop_depth_per_retrieved_mu  ✓         hop_depth_per_retrieved_mu  ✗
+  edge_weights_used           ✓         edge_weights_used           ✗
+  candidate_set_before_ranking ✓        candidate_set_before_ranking ✗
+  bm25_scores_per_mu          ✓         bm25_scores_per_mu          ✓
+
+  210 rows per run                      3,640 rows per run
+```
+
+Probe measurement additionally writes **no `analytics` rows at all** —
+`is_probe_turn = 1` returns a count of 0 in every archived run — so this is a
+schema addition on `probe_results`, not a matter of switching on a path that
+already exists.
+
+The consequence: M45's metrics are exactly computable on real turns, where
+the traversal is recorded, and *reconstructed* on probe turns, where it is
+not. That is acceptable once (the reconstructor is validated against real
+turns first), but it should not be permanent. Future runs should not depend
+on reconstruction to answer the question item D was built to answer.
+
+### Scope
+
+1. `backend/memory/store.py` — `probe_results` gains `traversal_path` and
+   `hop_depth_per_retrieved_mu`, following the existing additive-column
+   migration pattern (the same shape as `battery_mode` / `battery_repeat_index`).
+2. `backend/api/admin.py` — `run_probe()` persists both from the
+   `RetrievalResult` it already receives. `retrieve()` returns them today;
+   nothing new is computed, only stored.
+3. Tests — a live probe call writes non-empty traversal data; existing rows
+   with NULL columns still read correctly.
+
+**Done when:** a real `POST /admin/run-probe` against a real Docker backend
+writes a `probe_results` row carrying a traversal path consistent with its
+`retrieved_mu_ids`, and M45's reconstructor, run against that same fresh
+probe row, reproduces it. **That cross-check is the milestone's real value** —
+it converts M45's probe-turn numbers from "validated by analogy with real
+turns" to "validated directly."
+
+**Estimate:** half to one session.
+
+### Risks and open questions
+
+- ⚠ **Storage volume is the one real design question.** `probe_results`
+  already holds 73,916 rows and `memory/graph.db` is ~403 MB; a JSON blob per
+  row at 3,640 rows per run is not free. Prefer the compact form (edge_id,
+  source, target, weight_used per hop) over echoing the full real-turn
+  structure, and size it against one archived run before committing. A config
+  flag to disable capture for measurement-heavy runs is the fallback if the
+  compact form is still too large.
+- ⚠ **Additive columns only, NULL-safe reads.** Archived probe rows predate
+  this and must keep loading — M44's §6.3 geometry check reads this table
+  across all 8 archived runs and must not start failing on NULLs.
+- ⚠ **Do not route probe writes through the analytics path** to close the
+  `is_probe_turn` gap as a side effect. 3,640 probe rows per run against 210
+  real turns would swamp every existing analytics query, including item C's
+  lock-in script and M45's own reconstructor. If probe analytics rows are ever
+  wanted, that is its own milestone with its own argument.
+
+---
+
 ## Status
 
 ```
@@ -7284,3 +7629,7 @@ experiment_ids.
 **Milestone 41:** Complete — report-layer only, no schema change, restricted to `backend/analytics/reports/control_shadow.py` + `markdown_renderer.py`. `_compute_session_mean_deltas()` extracted (shared session-mean/final-session-mean arithmetic) so `_compute_trained_subset_comparison()`'s new optional `pinned_probe_ids` param computes the raw mean and an excluding-pinned mean through the identical code path — the same M39 `_aggregate_deltas_by_phenomenon` rationale, applied to the trained-subset number this time. New output keys are purely additive (`pinned_trained_probe_ids`, `matched_probe_count_excluding_pinned`, `mean_delta_by_session_excluding_pinned`, `final_session_mean_delta_excluding_pinned`, `control_pinned` per per_probe row); the existing raw keys are untouched, verified both by unit test (equality assertion, not closeness) and by live regeneration. `generate_control_shadow()` reordered so `pinned_probe_ids` is computed before the trained-subset call, feeding both M39's all-probe pin-adjustment and M41's trained-subset pin-adjustment from one computation. All-pinned degrades to `None`/count-0, never `0.0` (verified by dedicated test — the all-pinned hazard the milestone called out explicitly). Markdown block retitled `(M39/M41)`, gains a control-pinned-trained-probes line and a second headline figure (both means always shown with their probe counts), and an explicit all-pinned note gated on M41-key *presence* (not a defaulted zero) so a pre-M41 stored report can never trigger a false "all pinned" note — the one subtlety the backward-compat tests exist to catch. 10 new tests (1093 total, no regressions) across `test_control_shadow.py`/`test_markdown_renderer.py`, plus the existing M39 end-to-end `generate_experiment_report` test in `test_experiment_report.py` extended (its `vs_a1` fixture — control pinned at 1.0 both sessions, the only trained probe with data — already is the all-pinned case). **Live verification (done-criterion) regenerated exp0-a, exp0b, and both Round 1 replicates against the real `memory/graph.db`.** Confirmed unchanged, exactly: raw trained-subset final Δ (−0.46/−0.20/−0.12 for rep1/rep2/rep3) and the M39 all-probe pin-adjusted finals (+0.096/+0.007/+0.039) — proof this milestone touched nothing outside its scope. **One correction the live run surfaced against the milestone's own pre-build hand-worked example:** rep3 pins only `vs_c1`, not `vs_a1` as the planning-time table assumed (`vs_a1`'s static control reads 0.0 in 2 of rep3's 5 sessions, so the unchanged "1.0 in every session" rule correctly excludes it — the table's author had eyeballed only the final session). Across all three Round 1 replicates, real pin counts are `vs_a1`: 1/3 (exp0b/rep1 only), `vs_c1`: 2/3 (rep1, rep3) — the earlier "`vs_a1` 3/3" claim carried in PROGRESS.md/BUILD-PLAN was a hand-read generalization error, corrected here rather than propagated. **Recomputed pin-adjusted trained-subset Δ envelope across the three replicates: [−0.20, +0.16]** (rep1 0.0, rep2 −0.20 — nothing pinned that replicate — rep3 +0.16), recorded alongside the existing raw envelope [−0.46, −0.12] in M42's decision rule, which now names both and which metric each governs. See PROGRESS.md 2026-08-12 entry for the full read including per-probe detail. Branch: `milestone-41-pin-adjusted-trained-subset-delta`.
 
 **Milestone 44:** Complete — see the "Probe Measurement Reads the Resolved Config" section above for the full technical record. Summary: Phase 1 fixed `POST /admin/run-probe`'s own independent disk read of `config.yaml` (missed by M43's audit) to use the orchestrator's resolved `_CONFIG`, plus a new enforced loader-inventory test so a future miss fails CI instead of waiting for the next milestone to notice by hand. Phase 2 added a §6.3 `probe_retrieval_geometry` check and proved it against real archived data — FAIL on exactly the two runs known to carry the defect (exp01-cfgB rep1/rep2), PASS on the other six. Both phases' Done-when criteria were met with live verification against a real Docker backend and the real `graph.db`, not fakes. Branch: `milestone-44-probe-resolved-config-build`.
+
+**Milestone 45:** Proposed 2026-08-24 — Path-Back Instrumentation (Plan Alpha D). Two phases: an archived-data graph reconstructor validated by a three-component tie-back (α/β, topology, slate) across all 8 learned runs, then the metrics layer — a four-bucket exclusive partition (reached / outbid / out-of-depth / disconnected) as headline, chase-down yield and K2 runner-up rank distribution as priced counterfactuals, anchor strength as the write-side longitudinal metric. `docs/sensitivity_baseline.md` is created in Phase 2 with the two structural findings from the Alpha D scoping (~6% of created edges ever weight-updated; K1's `edge_weight_sum` is undirected total degree). Not gated on M44 — the script never calls the probe endpoint. **Next milestone to build.**
+
+**Milestone 46:** Proposed 2026-08-24 — Probe Traversal Instrumentation. `probe_results` gains `traversal_path` and `hop_depth_per_retrieved_mu` so future runs need no reconstruction; the Done-when is a live probe row that M45's reconstructor reproduces exactly. Follows M45. The `admin.py` half of its originally-scoped bundle already shipped as M44 Phase 1.

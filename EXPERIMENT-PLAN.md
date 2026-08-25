@@ -202,7 +202,7 @@ its own decision: if baselines lock in and configs don't, then item F's knob
 search should target *which* spoke wins the session-0/1 lottery, rather than
 trying to keep the lottery open longer.
 
-### D. Instrument path-back behavior — *agreed 2026-08-16 (metric definitions to be settled)*
+### D. Instrument path-back behavior — *agreed 2026-08-16; metric definitions settled 2026-08-24, filed as BUILD-PLAN Milestone 45*
 
 **Context — the reframe of "seed-share collapse" (applies to D and F):**
 conversational MUs are not noise to be suppressed — they are a permanent and
@@ -223,7 +223,26 @@ seed-share collapsing to ~4–17% by session 5, but can't distinguish "conv
 MUs replaced the seed" from "conv MUs are one hop from the seed and would
 lead back to it if retrieval followed edges."
 
-**a. Settle metric definitions.** Proposed starting set:
+**a. Settle metric definitions** — *done 2026-08-24.* The three independent
+rates below were **superseded by a composite design**; the full spec lives in
+BUILD-PLAN.md's Milestone 45, and only the reasoning is recorded here.
+Headline is a **four-bucket exclusive partition** — reached / outbid /
+out-of-depth / disconnected — chosen because the bucket boundary *is* D.c's
+question ("present but unused" = buckets 2+3, "absent entirely" = bucket 4)
+and because each bucket names its own intervention, which the independent
+rates could not do. **Anchor strength is retained unchanged** as a separate
+longitudinal metric: it is the only write-side instrument proposed, item C
+pointed the search at write-side knobs, and the partition structurally cannot
+express it. **Terminal-seed rate folded in** as a conditional "chase-down
+yield" within buckets 2–3. **The standalone 1-hop path-back rate was dropped**
+— `retrieve()` performs exactly one hop and cuts K2 to a single slot, so the
+metric is close to a restatement of K2 selection. **Added:** a
+gold-as-K2-runner-up rank distribution, which retrospectively prices
+`retrieval_level2_top_k` at 2/3/5 — the knob cfgB declared and, per M44, never
+actually tested. **Hop horizon is 2**, matching a buildable chase-down stage;
+a large bucket 3 is the argument for revisiting horizon 3 with data.
+
+Superseded starting set, kept for the record:
 
 - **Path-back rate:** fraction of probe-turn retrievals where a retrieved
   conv MU has an edge path (1 hop, and 2 hops as a separate number) to the
@@ -236,8 +255,24 @@ lead back to it if retrieval followed edges."
   sessions. (The M33 conv→seed rows in the edge ledger are the raw material —
   this extends that classification, it doesn't replace it.)
 
-**b. Implement** — a report section or standalone analysis script at first;
-becomes a small BUILD-PLAN milestone once a's definitions are settled.
+**b. Implement** — *filed 2026-08-24 as BUILD-PLAN Milestone 45* (two phases),
+with Milestone 46 following to close the probe-side instrumentation gap.
+Scoped as a **standalone archived-data analysis script**
+(`scripts/alpha_d_pathback.py`, sibling to `alpha_c_lockin.py`), not a report
+section: it needs no backend, costs no run time, and can price item F's
+read-side candidate before an overnight is spent on it. Verified during
+scoping that all eight learned runs are exactly reconstructible.
+
+The Done-when is a **three-component tie-back** (α/β, topology, slate) across
+all 8 runs, rather than the single slate check first proposed — training turns
+ran `weight_mode: sample`, so per-turn Thompson draws cannot be regenerated
+and the slate component injects recorded sampled weights instead. D's metrics
+are unaffected: buckets read topology, chase-down yield and anchor strength
+read posterior α/β. Real turns record `traversal_path` and probe turns do not,
+so the reconstructor is **validated against real turns first** and only then
+applied to probe turns — the real turns are a labeled test set. All
+counterfactual numbers (chase-down yield, 2-hop reachability) are labeled as
+such where displayed, never rendered as observed behavior.
 
 **c. First read:** turn late-session seed-share from symptom into diagnosis —
 are the stepping stones present but unused, or absent entirely?

@@ -2,6 +2,68 @@
 
 ## Current state
 
+**2026-08-26 update (3): Milestone 47 planned — the R3-V6 config knob — and
+the V6 mechanism priced from archived data before any of it runs.**
+`/planner` session, docs only, no code. **M47** (BUILD-PLAN.md) adds
+`hyperparameters.k1_centrality_weight` so `_k1_score()`'s undirected-total-
+degree term becomes a plan override instead of a hard-coded constant. Default
+`1.0` reproduces pre-M47 behavior bit-for-bit; `0.0` is R3-V6's pre-registered
+"flagged off." **Decision: scalar coefficient, not a boolean** — `0.0` *is*
+the pre-registered off value exactly, so V6 is unchanged, and Phase 2 gets a
+dial without a second milestone. ~4 lines of code; the tests and the live
+probe-reaches-the-knob check (the M44 pattern, run twice from one graph state)
+are the milestone. Unblocks `phase_one_experiment_program.md` §7-1a, now
+resolved.
+
+**The planning pass also produced a real finding, written to
+`docs/sensitivity_baseline.md` as a labeled pre-registration entry** (not a
+result — no run stands behind it). Counterfactual replay over 630 archived
+baseline turns / 12,324 candidate rows, re-sorting the recorded
+`candidate_set_before_ranking` by BM25 alone. This is *exact* at the K1 stage,
+not reconstructed: the candidate pool is unaffected by the scoring change and
+every pool member's `bm25_score` and `edge_weight_sum` are both recorded.
+Three things it says:
+
+1. **The term is small and decisive.** Centrality is a median 24.9% of the K1
+   composite score, yet it changes the K1 set on 88.4% of turns and the
+   top-ranked entry point on 71.3%. BM25 scores among multi-hit candidates
+   cluster tightly, so a minority additive term flips the order almost every
+   time. V6 will not be a null for lack of leverage.
+2. **The standing finding is true per-MU and inverted in aggregate.** Of the
+   908 MUs the term promotes into K1, 81.8% are conv — but 96.6% of the 908 it
+   displaces are also conv. Nearly all churn is conv-vs-conv. The term's one
+   systematic effect is holding seed hubs in K1: 9.4% of K1 slots with it,
+   1.3% without. **Turning it off makes K1 *more* conv-dominated (88.8% →
+   95.9%), not less** — the opposite of the naive reading. The standing finding
+   at the foot of the sensitivity doc now carries a cross-reference saying so.
+3. **It is an early-session effect that decays.** Hub share of K1 runs
+   29.9% → 8.7% → 1.9% → 2.6% → 3.7% across the five sessions, because the
+   highest-degree conv MU climbs past a hub's fixed `edge_weight_sum` of 8.0
+   by session 4 (median max 14.60) and doubles it by session 5 (18.39).
+
+**The consequence for R3, and the thing to understand before the overnight:**
+seed_v3 gave every v2 edge a reciprocal partner *specifically* so hub
+centrality would double and "further consolidat[e] hubs as entry points
+(desired)" (`seed_v3_mu_spec.md` §2). Hubs sit at 8.0 vs. spokes at 1.0 — an
+8:1 ratio that exists only through the term V6 switches off. So **V6 also
+tests the fixture's designed entry-point structure**, and a movement is
+ambiguous between "undirected degree was noise" and "the hub route was
+load-bearing" — separable mainly in session 1. **R3-V6 must be read
+per-session**; a pooled headline dilutes exactly where the two mechanisms
+differ. Flagged in the milestone's risks and in the R3 table row.
+
+**Open, deliberately:** out-degree-only (count `source_mu_id` only) is the
+untested middle case — it is *undirected* degree the finding complains about,
+not centrality as such. A scalar coefficient cannot reach it; it needs a mode
+enum. Not pre-registered for R3 (§1-6); flagged for Phase 2 if V6 returns
+*distinguishable*. Also open: whether `scripts/verify_seed_v3.py`'s second
+copy of the K1 formula should mirror the knob (recommendation: no, just
+comment the divergence point — decide during build).
+
+**Next step:** M46 and M47 are independent; M47 is the one on the R3 critical
+path. Analysis script: `scripts/v6_centrality_counterfactual.py`.
+
+
 **2026-08-26 update (2): Milestone 45 Phase 2 built and the milestone is
 complete — item D's first read is in, and it's a clean answer.** Metrics
 layer added to `scripts/alpha_d_pathback.py` (four-bucket partition,

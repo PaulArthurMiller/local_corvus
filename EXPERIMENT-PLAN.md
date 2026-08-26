@@ -202,7 +202,34 @@ its own decision: if baselines lock in and configs don't, then item F's knob
 search should target *which* spoke wins the session-0/1 lottery, rather than
 trying to keep the lottery open longer.
 
-### D. Instrument path-back behavior — *agreed 2026-08-16; metric definitions settled 2026-08-24, filed as BUILD-PLAN Milestone 45*
+### D. Instrument path-back behavior — *done 2026-08-26*
+
+**Outcome:** late-session seed-share collapse is **overwhelmingly a
+read-side problem, not a write-side one**. Pooled across all 8 runs, 80–82%
+of probe turns land in OUTBID (gold one directed hop from a retrieved MU,
+lost the K2 argmax) against only 0–3% DISCONNECTED (no path to gold at all)
+— the stepping stones are present and almost never absent. Cross-validated
+exactly against `probe_results.gold_mu_rank` in every run. Two priced
+counterfactuals qualify the diagnosis rather than undercut it: chase-down
+yield (greedy highest-weight-edge walk, 2 hops) reaches gold only 6% of the
+time even within OUTBID+OUT_OF_DEPTH turns, and gold-as-K2-runner-up
+pricing shows P(rank<=5)=60% against today's P(rank<=1)=11%/7%/10% by
+condition, with 13% of turns never getting gold into the K2 pool at all
+regardless of K. Anchor strength surfaced a clean negative: `cluster_c`'s
+trained spoke (`vs_c1`/`c_spoke1`) never engages its hub edge in any of the
+8 runs, confirming the write-side mechanism behind Alpha C's "vs_c1 never
+wins" finding. Full tables in
+`docs/evaluations/alpha_d_pathback_analysis.md`, structural findings in
+`docs/sensitivity_baseline.md`, read in `EVALUATIONS.md`'s 2026-08-26
+entry. **Item F should prioritize a read-side chase-down candidate over a
+write-side strengthening candidate**, biased by something better than raw
+edge weight (the low chase-down yield rules out a naive highest-weight
+walk), alongside widening `retrieval_level2_top_k` as a cheap, now-priced
+knob that alone cannot rescue the 13% with no path at all.
+
+*Agreed 2026-08-16; metric definitions settled 2026-08-24, filed as
+BUILD-PLAN Milestone 45; Phase 1 (reconstructor + tie-back) merged
+2026-08-26 (PR #82); Phase 2 (metrics + first read) complete 2026-08-26.*
 
 **Context — the reframe of "seed-share collapse" (applies to D and F):**
 conversational MUs are not noise to be suppressed — they are a permanent and
@@ -274,8 +301,9 @@ applied to probe turns — the real turns are a labeled test set. All
 counterfactual numbers (chase-down yield, 2-hop reachability) are labeled as
 such where displayed, never rendered as observed behavior.
 
-**c. First read:** turn late-session seed-share from symptom into diagnosis —
-are the stepping stones present but unused, or absent entirely?
+**c. First read** — *done 2026-08-26.* Present but unused: 80–82% OUTBID
+pooled vs. 0–3% DISCONNECTED. See the Outcome note at the top of this item
+and `EVALUATIONS.md`'s 2026-08-26 entry for the full read.
 
 ### E. Strong-judge post-run calibration loop — *agreed 2026-08-16 (mechanism TBD)*
 
@@ -303,7 +331,7 @@ session. Paul may also do a manual pass alongside.
 **b. Decide on standing adoption:** if disagreement is material, decide
 whether the strong-judge re-grade becomes a standing post-run step.
 
-### F. Positive-path knob experiments — *proposed (gated on B and D)*
+### F. Positive-path knob experiments — *proposed (gated on B; D done 2026-08-26)*
 
 **Goal:** find knob settings under which an upvoted, seed-centered answer
 durably strengthens the path back to that seed, and retrieval actually
@@ -328,6 +356,21 @@ favours the write-side candidate below — it acts on the credit event itself �
 over the read-side chase-down stage, which acts on prior strength. Item C also
 established session-1 alignment as a usable success criterion: no config has
 moved it yet, so any that does is doing something new.
+
+**Revised by item D (2026-08-26).** D's partition outweighs C's directional
+lean: 80–82% of probe turns pooled are OUTBID (gold present, one hop away,
+lost the K2 argmax) against 0–3% DISCONNECTED, so there is far more raw
+material for a read-side chase-down than for write-side strengthening. The
+two aren't actually in tension — C argued from *which spoke wins*, D
+measures *whether the winner's path back to gold survives* — but where a
+choice must be made first, **read-side chase-down goes first**, informed by
+D's chase-down-yield finding that a naive highest-weight-edge walk
+underperforms its own opportunity (6% yield despite ~81% one-hop presence):
+the chase-down design needs a better signal than raw edge weight, not just
+a walk. Widening `retrieval_level2_top_k` is now a priced, cheap adjunct
+(P(rank<=5)=60% vs. today's ~10% at top_k=1) to run alongside whichever
+chase-down design is chosen — not a substitute, since 13% of turns have no
+path to gold at all regardless of K.
 
 Candidate knobs (examples, not commitments):
 

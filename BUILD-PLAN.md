@@ -6740,12 +6740,15 @@ thing it was written from.
 
 ## Path-Back Instrumentation (Plan Alpha D) — Milestone 45
 
-**Status:** Phase 1 COMPLETE 2026-08-26 — the reconstructor and its
-three-component tie-back, verified against all 8 archived learned runs
-(1,680 real turns, zero mismatches in all three components). Phase 2 (the
-metrics layer, the first read, and `docs/sensitivity_baseline.md`) not yet
-built. See the "Phase 1 build notes" subsection below for what the tie-back
-confirmed and one design point the plan didn't fully specify.
+**Status:** MILESTONE COMPLETE 2026-08-26. Phase 1 — the reconstructor and
+its three-component tie-back, verified against all 8 archived learned runs
+(1,680 real turns, zero mismatches in all three components). Phase 2 — the
+metrics layer (four-bucket partition, chase-down yield, K2 runner-up rank
+distribution, anchor strength), the first read
+(`docs/evaluations/alpha_d_pathback_analysis.md`), and
+`docs/sensitivity_baseline.md`. See the "Phase 1 build notes" and "Phase 2
+build notes" subsections below for what each confirmed and the design
+points the plan didn't fully specify.
 
 **Original scope note:** PROPOSED 2026-08-24. Scope agreed in the Alpha D discussion
 session of the same date; supersedes the three-independent-rates sketch in
@@ -7022,6 +7025,62 @@ this milestone's output):
 
 **Estimate:** one to two sessions.
 
+#### Phase 2 build notes (2026-08-26)
+
+Metrics layer added to `scripts/alpha_d_pathback.py` (same file, new
+section — no second script), 33 new tests in
+`tests/test_scripts/test_alpha_d_reconstructor.py` (63 total for this
+milestone). First read in `docs/evaluations/alpha_d_pathback_analysis.md`,
+findings in `docs/sensitivity_baseline.md` (new). Headline: 80–82% OUTBID
+pooled vs. 0–3% DISCONNECTED — read-side problem, confirmed rather than
+inferred. Full outcome recorded in `EXPERIMENT-PLAN.md` item D and
+`EVALUATIONS.md`'s 2026-08-26 entry; not restated here.
+
+**Two design points the Phase 2 spec above didn't fully specify:**
+
+1. **Probes, not real turns, carry "gold."** Real turns (`analytics`) have
+   no gold-MU concept at all — only `probe_results` rows do, via
+   `probe_id` -> `probes/probe_set_v3.yaml`'s `gold_mu_ids`. Every Phase 2
+   metric is therefore computed against `battery_mode="mean"` probe
+   measurements (1,120 = 28 probes x 5 sessions x 8 runs), never against
+   real turns directly — real turns only supply the reconstructor's
+   topology and edge-weight history, exactly as in Phase 1.
+2. **Probe hyperparameters are hardcoded, not read per-run.** `POST
+   /admin/run-probe` served every one of these 8 runs' probes under
+   config.yaml's on-disk `retrieval_level1_top_k`/`retrieval_level2_top_k`/
+   `directional_edge_weight_multiplier` regardless of what the run
+   declared — the exact Milestone 44 bug, predating its fix. Confirmed
+   empirically: cfgB's `retrieved_mu_ids` are length 4 (3+1), not 5 (3+2),
+   matching its declared override having never reached the probe path.
+   Phase 2's K1/K2 slicing therefore uses three `PROBE_*` module constants
+   (values 3, 1, 1.5) for every run, never a run's own
+   `hyperparameters_snapshot` — using the latter would have silently
+   mis-scored cfgB's entire K2 candidate pool.
+
+**One correctness check beyond what the spec asked for.** The REACHED
+bucket (gold in the retrieved slate) is cross-validated against
+`probe_results.gold_mu_rank IS NOT NULL` — two independent computations of
+the same fact — and matches exactly across all 8 runs. Added as its own
+test (`TestPhase2RealDataCrossCheck`) rather than trusted from a single
+manual run, since it's the strongest signal available that `classify_bucket()`
+isn't quietly wrong in a way the synthetic unit tests can't catch.
+
+**One data-quality gap found, not fixed.** The archived report JSONs'
+`learning_measures.trained_probes` field is `{}` in every report checked,
+despite each run's plan declaring `trained_spokes`. Anchor strength
+resolves the trained spoke from the plan file directly
+(`load_trained_spoke_golds()`) rather than depending on this field — out of
+scope to fix the report-generation gap here, but worth a note for whoever
+next reads `trained_probes` expecting it to be populated.
+
+**Probe session -> real-turn graph state, derived not assumed.**
+`compute_session_cutoffs()` reads `analytics.session_turn_index` resets to
+find each bulk-turn session's boundary empirically, rather than assuming a
+constant turns-per-session — consistent with this whole script's approach
+(see Phase 1's build notes). Confirmed to align 1:1 with probe
+`measurement_session_index` for every one of the 8 runs (a logged warning
+would have fired otherwise; none did).
+
 ### Risks and open questions
 
 - ⚠ **A second code path that drifts from `retrieve()` is the primary risk**,
@@ -7038,15 +7097,28 @@ this milestone's output):
   wrong choice.
 - ⚠ **Horizon 2 is a judgment call and the headline moves with it**, the same
   pathology item C flagged for tie handling. Report bucket 3's size
-  prominently so the horizon choice stays auditable.
+  prominently so the horizon choice stays auditable. **Resolved 2026-08-26:**
+  OUT_OF_DEPTH (the horizon-sensitive bucket) came back small — 5–18 turns
+  per run (4–13%), dwarfed by OUTBID's 76–88% — so horizon 2 is not hiding a
+  large hidden population and revisiting horizon 3 is not indicated by this
+  data.
 - ⚠ **Probe turns are reconstruction-only until M46.** The first read's probe
   numbers rest on a reconstructor validated against real turns, which is
-  strong but is not the same as validated against probe turns. Say so in the
-  read.
-- ? **Does cfgB get re-run, or written off?** Deferred by decision — revisit
-  once baseline bucket distributions exist, since they may settle whether
-  `level2_k: 2` is worth an overnight at all. The K2 runner-up rank
-  distribution is the specific number that should decide it.
+  strong but is not the same as validated against probe turns. Said so in
+  the read (`EVALUATIONS.md`'s 2026-08-26 entry, "Next steps"). Still open —
+  M46 is the closing action.
+- ? **Does cfgB get re-run, or written off?** **Resolved 2026-08-26, by the
+  K2 runner-up rank distribution as anticipated:** cfgB's own probes never
+  actually measured `level2_k: 2` (the M44 bug), so there is nothing to
+  validate by re-running it under the same broken measurement path. The
+  pooled distribution (computed once, applies to every run since none of
+  the 8 runs' probes saw an overridden K) already prices `level2_k` at every
+  value that matters — P(rank<=2)=24%, P(rank<=3)=36%, P(rank<=5)=60% — so a
+  cfgB re-run adds no information here. Recommend **writing cfgB off** as an
+  experimental condition in favor of the K2 runner-up pricing above; if
+  `level2_k` widening is adopted, it should ride Milestone 46 (which fixes
+  the probe path to actually honor overrides) rather than repeat cfgB's
+  pre-fix run.
 
 ---
 

@@ -33,6 +33,88 @@ that data.
 
 ---
 
+## 2026-08-26 — Alpha D path-back read: late-session collapse is a read-side problem, not a write-side one
+
+**What ran.** No new runs — Plan Concept Alpha item D, over existing data:
+all 8 learned runs (exp0b x3, exp01 x5), 1,120 `battery_mode="mean"` probe
+measurements. Built as `scripts/alpha_d_pathback.py` (Phase 1: the graph
+reconstructor + three-component tie-back, PR #82, merged; Phase 2: the
+metrics layer, this session), full tables in
+`docs/evaluations/alpha_d_pathback_analysis.md`, structural findings
+recorded in `docs/sensitivity_baseline.md`. Routed here from the 2026-08-20
+cfgA rep3 read and the Alpha C lock-in read, both of which named item D as
+the next gate before any further knob work.
+
+**What it showed.** The four-bucket partition settles the question item D
+was built to answer: **80–82% of probe turns pooled land in OUTBID** — gold
+was a real K2 candidate, one directed hop from a retrieved MU, and lost a
+one-slot argmax — against only 3% (0% for cfgB) landing in DISCONNECTED,
+where no path to gold exists at all. The stepping stones are present and
+almost never absent; retrieval's single K2 slot is what discards them.
+Cross-validated against `probe_results.gold_mu_rank`: the REACHED bucket's
+count matches the recorded non-NULL rank count exactly across all 8 runs,
+which is the strongest available correctness signal short of a second
+independent implementation. Two supporting numbers, both counterfactual and
+labeled as such: chase-down yield (greedily following the strongest edge up
+to 2 hops from an OUTBID/OUT_OF_DEPTH turn) reaches gold only 6% of the
+time pooled, so "present" does not mean "strongest edge points there."
+Gold-as-K2-runner-up pricing shows P(rank<=5) = 60% against today's
+P(rank<=1) = 11%/7%/10% by condition — widening `retrieval_level2_top_k`
+alone would roughly quintuple REACHED on pool-eligible turns, though 13% of
+turns never get gold into the pool at all regardless of K. Anchor strength
+surfaced one clean negative: `cluster_c`'s trained spoke never engages its
+hub edge in any of the 8 runs (flat 1.0/1.0, 0–1 co-activation edges ever
+created) — consistent with Alpha C's finding that `vs_c1` never wins a
+session, now with the write-side mechanism behind that confirmed rather
+than inferred.
+
+**Comparison to prior runs.** This is the first read that separates
+"conv MUs replaced the seed" from "conv MUs are one hop from the seed and
+would lead back to it" — the distinction every prior read since the
+2026-08-16 exp01 read could only gesture at. It resolves in favor of the
+second world, at odds with how seed-share collapse reads as a raw
+percentage: a system that looks like it forgot the seed by session 5 is
+mostly a system whose graph still points at the seed and whose retrieval
+declines to walk there.
+
+**Interpretation.** The read-side/write-side framing item C left open is
+now decided by measurement rather than inference: **item F should
+prioritize a read-side chase-down candidate over a write-side strengthening
+candidate**, because OUTBID is the dominant bucket and DISCONNECTED is
+nearly empty — there is far more raw material for "follow the edges that
+already exist" than for "build edges that don't." The low chase-down yield
+is the caveat on that priority, not a reason to drop it: a naive
+highest-weight-edge chase-down would underperform its own opportunity,
+because the strongest edge from a retrieved conv MU is often a competing
+conv MU, not gold. The ~11%/~6% edge-traversal/update dead zone
+(`docs/sensitivity_baseline.md`) now reads as consistent with this rather
+than contradicting it — most of that untouched majority is directionally
+useful (one hop from something retrieved), just under-credited.
+
+**Implications.** Item F's base config search should be scoped narrower
+than "read-side vs. write-side" — it is now "read-side chase-down, biased
+by something better than raw edge weight" — and `retrieval_level2_top_k`
+is confirmed as a cheap, well-priced knob to widen alongside whatever
+chase-down design is chosen, not a substitute for one (13% of turns can't
+be rescued by K alone). `cluster_c`'s dead anchor is worth a quick content
+check (is `c_spoke1`'s probe/prompt-bank content structurally
+under-favored?) before the next knob run, so a real mechanism finding isn't
+confounded by one cluster's content being unreachable by construction.
+
+**Next steps.** Item F (positive-path / read-side knob experiments) is now
+unblocked on both B and D. Milestone 46 (probe traversal instrumentation)
+should land before F's first overnight — it converts this read's probe
+numbers from "validated by analogy with real turns" to "validated
+directly," which matters more once F starts making decisions from them.
+
+**Longer-term notes.** The reconstructor's zero-mismatch Phase 1 result
+(no silent drift from what `retrieve()` actually does) is what makes this
+read trustworthy without a live run — worth remembering as a template the
+next time a metrics layer is proposed: validate the replay against ground
+truth before building the metric, not after.
+
+---
+
 ## 2026-08-20 — Alpha C lock-in read: the lottery is real, baseline-only, and not decided by the first upvote
 
 **What ran.** No new runs — Plan Concept Alpha item C, the early-feedback

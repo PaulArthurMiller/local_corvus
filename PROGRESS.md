@@ -2,6 +2,47 @@
 
 ## Current state
 
+**2026-08-26 update (2): Milestone 45 Phase 2 built and the milestone is
+complete — item D's first read is in, and it's a clean answer.** Metrics
+layer added to `scripts/alpha_d_pathback.py` (four-bucket partition,
+chase-down yield, K2 runner-up rank distribution, anchor strength), 33 new
+tests (63 total for this file), branch `milestone-45-pathback-reconstructor`
+reused (Phase 1 already merged via PR #82; this is a follow-on commit on a
+fresh branch off main), PR pending. **Headline: 80–82% of probe turns
+pooled land in OUTBID** (gold present, one hop from a retrieved MU, lost the
+K2 argmax) **against only 0–3% DISCONNECTED** (no path at all) — late-session
+seed-share collapse is a read-side problem, not a write-side one, settling
+item D.c. Cross-validated exactly against `probe_results.gold_mu_rank` in
+every one of the 8 runs (own dedicated test, beyond what the plan asked
+for). Two counterfactuals qualify it: chase-down yield (greedy
+highest-weight walk, 2 hops) reaches gold only 6% of the time pooled even
+within OUTBID+OUT_OF_DEPTH turns, and K2 runner-up pricing shows
+P(rank<=5)=60% vs. today's ~10% at top_k=1, with 13% of turns never
+entering the K2 pool regardless of K. Anchor strength found `cluster_c`'s
+trained spoke never engages its hub edge in any of the 8 runs — confirms
+the write-side mechanism behind Alpha C's "vs_c1 never wins" finding.
+**Full tables:** `docs/evaluations/alpha_d_pathback_analysis.md`.
+**Structural findings:** `docs/sensitivity_baseline.md` (new — the doc
+BUILD-PLAN.md had forward-referenced since Milestone 27 and never built).
+**Read:** `EVALUATIONS.md`'s 2026-08-26 entry. **Decision:**
+`EXPERIMENT-PLAN.md` item D marked done; item F revised to prioritize the
+read-side chase-down candidate over the write-side one (reversing item C's
+lean, on stronger evidence), with `retrieval_level2_top_k` widening as a
+priced adjunct, not a substitute. cfgB recommended written off as an
+experimental condition — its probes never actually measured its declared
+`level2_k` override (the M44 bug), so nothing is gained by re-running it,
+and the pooled K2 rank distribution already prices that knob at every value
+that matters. Two design points the Phase 2 spec hadn't fully pinned down,
+both recorded in BUILD-PLAN.md's new "Phase 2 build notes": probe
+hyperparameters had to be hardcoded to the pre-M44 disk-config values
+(never a run's own `hyperparameters_snapshot`, which would have silently
+mis-scored cfgB), and probe measurement sessions map to real-turn graph
+state via an empirically-derived cutoff (`compute_session_cutoffs()`), not
+an assumed turns-per-session constant. **Next step: Milestone 46**
+(probe traversal instrumentation) — converts this read's probe numbers from
+"validated by analogy with real turns" to "validated directly," which
+matters before item F's knob search starts making decisions from them.
+
 **2026-08-26 update: Milestone 45 Phase 1 built — the path-back reconstructor,
 zero mismatches across all 8 archived runs.** `scripts/alpha_d_pathback.py` +
 30 tests (`tests/test_scripts/test_alpha_d_reconstructor.py`), on branch

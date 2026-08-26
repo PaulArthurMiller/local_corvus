@@ -14,6 +14,8 @@ Two tiers, matching test_alpha_c_lockin.py's pattern:
 """
 
 import importlib.util
+import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -388,3 +390,333 @@ class TestFullReconstructorAcceptance:
             f"{len(all_mismatches)} tie-back mismatches: "
             f"{[m.detail for m in all_mismatches[:5]]}"
         )
+
+
+# ===========================================================================
+# Phase 2 — metrics layer
+# ===========================================================================
+
+
+class TestComputeSessionCutoffs:
+    def test_derives_cutoffs_from_session_turn_index_resets(self):
+        turns = [
+            make_turn(turn_index=100, session_turn_index=0),
+            make_turn(turn_index=101, session_turn_index=1),
+            make_turn(turn_index=102, session_turn_index=0),  # session 2 starts
+            make_turn(turn_index=103, session_turn_index=1),
+            make_turn(turn_index=104, session_turn_index=2),
+        ]
+        cutoffs = alpha_d.compute_session_cutoffs(turns)
+        # session 1 ends at turn_index 101 (last of session 1) -> cutoff is
+        # session 2's first turn_index (102); session 2 is the last session
+        # -> cutoff is one past the run's very last turn_index (105).
+        assert cutoffs == {1: 102, 2: 105}
+
+    def test_empty_turns_returns_empty(self):
+        assert alpha_d.compute_session_cutoffs([]) == {}
+
+    def test_single_session_run(self):
+        turns = [make_turn(turn_index=5 + i, session_turn_index=i) for i in range(4)]
+        cutoffs = alpha_d.compute_session_cutoffs(turns)
+        assert cutoffs == {1: 9}  # one past the last turn_index (8)
+
+
+class TestMinHopDistance:
+    def test_direct_hit_is_distance_one(self):
+        seed = make_seed({"e1": ("a", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        assert alpha_d.min_hop_distance(recon, {"a"}, "gold", as_of_turn_index=1) == 1
+
+    def test_two_hop_path_is_distance_two(self):
+        seed = make_seed({"e1": ("a", "mid"), "e2": ("mid", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        assert alpha_d.min_hop_distance(recon, {"a"}, "gold", as_of_turn_index=1) == 2
+
+    def test_unreachable_within_horizon_is_none(self):
+        seed = make_seed({"e1": ("a", "mid"), "e2": ("mid", "far"), "e3": ("far", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        assert alpha_d.min_hop_distance(recon, {"a"}, "gold", as_of_turn_index=1, max_hops=2) is None
+
+    def test_reachable_from_any_source_in_the_set(self):
+        seed = make_seed({"e1": ("a", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        assert alpha_d.min_hop_distance(recon, {"unrelated", "a"}, "gold", as_of_turn_index=1) == 1
+
+    def test_no_outgoing_edges_is_unreachable(self):
+        seed = make_seed({})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        assert alpha_d.min_hop_distance(recon, {"a"}, "gold", as_of_turn_index=1) is None
+
+
+class TestClassifyBucket:
+    def test_gold_in_retrieved_set_is_reached(self):
+        seed = make_seed({})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        bucket = alpha_d.classify_bucket(recon, ["a", "gold"], "gold", as_of_turn_index=1)
+        assert bucket == alpha_d.BUCKET_REACHED
+
+    def test_one_hop_from_a_retrieved_mu_is_outbid(self):
+        seed = make_seed({"e1": ("a", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        bucket = alpha_d.classify_bucket(recon, ["a", "b"], "gold", as_of_turn_index=1)
+        assert bucket == alpha_d.BUCKET_OUTBID
+
+    def test_two_hops_from_a_retrieved_mu_is_out_of_depth(self):
+        seed = make_seed({"e1": ("a", "mid"), "e2": ("mid", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        bucket = alpha_d.classify_bucket(recon, ["a"], "gold", as_of_turn_index=1)
+        assert bucket == alpha_d.BUCKET_OUT_OF_DEPTH
+
+    def test_no_path_within_horizon_is_disconnected(self):
+        seed = make_seed({})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        bucket = alpha_d.classify_bucket(recon, ["a"], "gold", as_of_turn_index=1)
+        assert bucket == alpha_d.BUCKET_DISCONNECTED
+
+
+class TestMeanWeightForPair:
+    def test_seed_pair_uses_event_sourced_alpha_beta(self):
+        seed = make_seed({"e1": ("a", "b")})
+        events = {"e1": [alpha_d.EdgeUpdateEvent("e1", "2026-01-01T00:00:00", 3.0, 1.0, turn_index=5)]}
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events=events)
+        turn = make_turn()
+        assert recon.mean_weight_for_pair("a", "b", as_of_turn_index=10, turn=turn) == 0.75
+
+    def test_conv_pair_never_traversed_falls_back_to_creation_prior(self):
+        """An untraversed conv pair has no recoverable edge_id — provably
+        still at its creation prior (see mean_weight_for_pair's docstring)."""
+        seed = make_seed({})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        turn = make_turn(edge_update_cfg={
+            "prior_alpha": 1.0, "prior_beta": 3.0,
+            "seed_prior_alpha": 1.0, "seed_prior_beta": 1.0,
+        })
+        # prior 1.0/3.0 -> mean 0.25, never touched since the pair was never
+        # traversed by any real turn's traversal_path.
+        assert recon.mean_weight_for_pair("out1", "gold", as_of_turn_index=10, turn=turn) == 0.25
+
+    def test_conv_pair_traversed_uses_its_resolved_edge_id(self):
+        seed = make_seed({})
+        turn_with_hop = make_turn(
+            turn_index=3,
+            traversal_path=[{"source_mu_id": "out1", "edge_id": "conv-e1", "target_mu_id": "gold", "hop_depth": 1}],
+        )
+        events = {"conv-e1": [alpha_d.EdgeUpdateEvent("conv-e1", "t", 4.0, 4.0, turn_index=3)]}
+        recon = alpha_d.GraphReconstructor(seed, turns=[turn_with_hop], edge_events=events)
+        assert recon.mean_weight_for_pair("out1", "gold", as_of_turn_index=10, turn=turn_with_hop) == 0.5
+
+
+class TestChaseDownReachesGold:
+    def test_reaches_gold_in_one_hop(self):
+        seed = make_seed({"e1": ("a", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        turn = make_turn()
+        assert alpha_d.chase_down_reaches_gold(recon, "a", "gold", as_of_turn_index=1, turn=turn) is True
+
+    def test_follows_the_highest_weight_edge_and_reaches_gold_in_two_hops(self):
+        seed = make_seed({
+            "e_weak": ("a", "decoy"),
+            "e_strong": ("a", "mid"),
+            "e_final": ("mid", "gold"),
+        })
+        events = {
+            "e_weak": [alpha_d.EdgeUpdateEvent("e_weak", "t", 1.0, 9.0, turn_index=1)],  # low mean
+            "e_strong": [alpha_d.EdgeUpdateEvent("e_strong", "t", 9.0, 1.0, turn_index=1)],  # high mean
+        }
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events=events)
+        turn = make_turn()
+        assert alpha_d.chase_down_reaches_gold(recon, "a", "gold", as_of_turn_index=10, turn=turn) is True
+
+    def test_dead_end_fails(self):
+        seed = make_seed({"e1": ("a", "dead_end")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        turn = make_turn()
+        assert alpha_d.chase_down_reaches_gold(recon, "a", "gold", as_of_turn_index=1, turn=turn) is False
+
+    def test_gold_beyond_the_horizon_fails(self):
+        seed = make_seed({"e1": ("a", "mid"), "e2": ("mid", "far"), "e3": ("far", "gold")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        turn = make_turn()
+        assert alpha_d.chase_down_reaches_gold(
+            recon, "a", "gold", as_of_turn_index=1, turn=turn, max_hops=2
+        ) is False
+
+
+class TestK2RunnerUpRank:
+    def test_gold_absent_from_pool_is_none(self):
+        seed = make_seed({"e1": ("a", "other")})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        turn = make_turn()
+        rank = alpha_d.k2_runner_up_rank(
+            recon, ["a", "b", "c"], "gold", as_of_turn_index=1, turn=turn, level1_k=3,
+        )
+        assert rank is None
+
+    def test_ranks_by_summed_weight_across_k1_sources(self):
+        seed = make_seed({
+            "e_to_gold_1": ("a", "gold"),
+            "e_to_gold_2": ("b", "gold"),
+            "e_to_rival": ("a", "rival"),
+        })
+        events = {
+            "e_to_gold_1": [alpha_d.EdgeUpdateEvent("e_to_gold_1", "t", 1.0, 9.0, turn_index=1)],  # mean 0.1
+            "e_to_gold_2": [alpha_d.EdgeUpdateEvent("e_to_gold_2", "t", 1.0, 9.0, turn_index=1)],  # mean 0.1
+            "e_to_rival": [alpha_d.EdgeUpdateEvent("e_to_rival", "t", 9.0, 1.0, turn_index=1)],   # mean 0.9
+        }
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events=events)
+        turn = make_turn()
+        # gold: (0.1+0.1)*1.5=0.3 ; rival: 0.9*1.5=1.35 -> rival ranks above gold
+        rank = alpha_d.k2_runner_up_rank(
+            recon, ["a", "b", "c"], "gold", as_of_turn_index=10, turn=turn, level1_k=3,
+        )
+        assert rank == 2
+
+    def test_k1_to_k1_targets_are_excluded_from_the_pool(self):
+        seed = make_seed({"e1": ("a", "b")})  # b is itself in the K1 set
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        turn = make_turn()
+        rank = alpha_d.k2_runner_up_rank(
+            recon, ["a", "b"], "b", as_of_turn_index=1, turn=turn, level1_k=2,
+        )
+        assert rank is None
+
+
+class TestHubMuIdForGold:
+    def test_resolves_the_unique_hub_by_naming_convention(self):
+        seed = make_seed({}, mu_ids={
+            "a0000001-aaaa-4aaa-8aaa-000000000001",
+            "a0000002-aaaa-4aaa-8aaa-000000000002",
+        })
+        hub = alpha_d.hub_mu_id_for_gold(seed, "a0000002-aaaa-4aaa-8aaa-000000000002")
+        assert hub == "a0000001-aaaa-4aaa-8aaa-000000000001"
+
+    def test_no_matching_hub_returns_none(self):
+        seed = make_seed({}, mu_ids={"a0000002-aaaa-4aaa-8aaa-000000000002"})
+        assert alpha_d.hub_mu_id_for_gold(seed, "a0000002-aaaa-4aaa-8aaa-000000000002") is None
+
+    def test_empty_gold_returns_none(self):
+        seed = make_seed({}, mu_ids=set())
+        assert alpha_d.hub_mu_id_for_gold(seed, "") is None
+
+
+class TestGoldCoActivationCensus:
+    def test_counts_created_traversed_and_credited(self):
+        seed = make_seed({})
+        turns = [
+            # output1 -> gold created at turn 1, never traversed later.
+            make_turn(turn_index=1, output_mu_id="output1", activated_mu_ids=["gold"]),
+            # output2 -> gold created at turn 2, traversed at turn 3 (hop
+            # recorded there), and that edge_id receives a credit event.
+            make_turn(turn_index=2, output_mu_id="output2", activated_mu_ids=["gold"]),
+            make_turn(
+                turn_index=3,
+                entry_point_mu_ids=["output2"],
+                traversal_path=[{"source_mu_id": "output2", "edge_id": "conv-e2", "target_mu_id": "gold", "hop_depth": 1}],
+            ),
+        ]
+        events = {"conv-e2": [alpha_d.EdgeUpdateEvent("conv-e2", "t", 2.0, 1.0, turn_index=4)]}
+        recon = alpha_d.GraphReconstructor(seed, turns=turns, edge_events=events)
+        census = alpha_d.gold_co_activation_census(recon, "gold")
+        assert census.created == 2
+        assert census.traversed == 1
+        assert census.credited == 1
+
+    def test_no_co_activation_edges_at_all(self):
+        seed = make_seed({})
+        recon = alpha_d.GraphReconstructor(seed, turns=[], edge_events={})
+        census = alpha_d.gold_co_activation_census(recon, "gold")
+        assert census == alpha_d.CoActivationCensus(created=0, traversed=0, credited=0)
+
+
+class TestLoadProbeSet:
+    def _write_probe_set(self, tmp_path, probes):
+        path = tmp_path / "probe_set_test.yaml"
+        import yaml as _yaml
+        path.write_text(_yaml.safe_dump({"probes": probes}), encoding="utf-8")
+        return path
+
+    def test_extracts_single_gold_per_probe(self, tmp_path):
+        path = self._write_probe_set(tmp_path, [
+            {"probe_id": "vs_a1", "gold_mu_ids": ["gold-a1"]},
+            {"probe_id": "vs_a2", "gold_mu_ids": ["gold-a2"]},
+        ])
+        gold_map = alpha_d.load_probe_set(path=path)
+        assert gold_map == {"vs_a1": "gold-a1", "vs_a2": "gold-a2"}
+
+    def test_skips_probes_with_zero_or_multiple_golds(self, tmp_path):
+        path = self._write_probe_set(tmp_path, [
+            {"probe_id": "vs_a1", "gold_mu_ids": ["gold-a1"]},
+            {"probe_id": "vs_bridge", "gold_mu_ids": ["g1", "g2"]},
+            {"probe_id": "vs_empty", "gold_mu_ids": []},
+        ])
+        gold_map = alpha_d.load_probe_set(path=path)
+        assert gold_map == {"vs_a1": "gold-a1"}
+
+
+class TestPlanPathForBasename:
+    def test_derives_underscore_before_date(self):
+        assert alpha_d.plan_path_for_basename("exp0b-2026-08-06") == alpha_d.PLANS_DIR / "exp0b_2026-08-06.json"
+        assert alpha_d.plan_path_for_basename("exp0b-rep2-2026-08-09") == alpha_d.PLANS_DIR / "exp0b-rep2_2026-08-09.json"
+        assert (
+            alpha_d.plan_path_for_basename("exp01-cfgA-rep1-2026-08-12")
+            == alpha_d.PLANS_DIR / "exp01-cfgA-rep1_2026-08-12.json"
+        )
+
+
+class TestLoadTrainedSpokeGolds:
+    def test_resolves_cluster_to_gold_via_plan_and_probe_set(self, tmp_path, monkeypatch):
+        plan_path = tmp_path / "myrun_2026-01-01.json"
+        plan_path.write_text(json.dumps({"trained_spokes": {"cluster_a": "a_spoke1"}}), encoding="utf-8")
+        monkeypatch.setattr(alpha_d, "PLANS_DIR", tmp_path)
+        gold_map = {"vs_a1": "a0000002-aaaa-4aaa-8aaa-000000000002"}
+        result = alpha_d.load_trained_spoke_golds("myrun-2026-01-01", gold_map)
+        assert result == {"a": "a0000002-aaaa-4aaa-8aaa-000000000002"}
+
+    def test_missing_plan_file_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(alpha_d, "PLANS_DIR", tmp_path)
+        assert alpha_d.load_trained_spoke_golds("nonexistent-2026-01-01", {}) == {}
+
+
+class TestPhase2RealDataCrossCheck:
+    """
+    The bucket partition's REACHED count must exactly equal the count of
+    battery_mode="mean" probe_results rows with a non-NULL gold_mu_rank —
+    both describe "gold was in the retrieved slate," computed two different
+    ways (this script's own retrieved_mu_ids membership check vs. the
+    backend's own recorded rank at measurement time). Agreement across all
+    8 runs is a strong correctness signal for classify_bucket(), independent
+    of Phase 1's tie-back (which never touches probe data at all).
+    """
+
+    def test_reached_bucket_matches_recorded_gold_mu_rank_across_all_runs(self):
+        if not alpha_d.GRAPH_DB.exists():
+            pytest.skip("graph.db not present in this checkout")
+        if not (alpha_d.SEED_FIXTURES_DIR / "seed_v3.json.gz").exists():
+            pytest.skip("seed_v3.json.gz not present in this checkout")
+
+        seed = alpha_d.load_seed_fixture()
+        gold_map = alpha_d.load_probe_set()
+        total_probes = 0
+        for basename, condition, label in alpha_d.RUNS:
+            metrics = alpha_d.compute_run_metrics(alpha_d.GRAPH_DB, seed, gold_map, basename, condition, label)
+            if metrics is None:
+                pytest.skip(f"run {label} not present in this checkout's graph.db")
+
+            con = sqlite3.connect(alpha_d.GRAPH_DB)
+            recorded_reached = con.execute(
+                "SELECT COUNT(*) FROM probe_results "
+                "WHERE experiment_id = ? AND battery_mode = 'mean' AND gold_mu_rank IS NOT NULL",
+                (f"{basename}_learned",),
+            ).fetchone()[0]
+            con.close()
+
+            n = sum(metrics.bucket_counts.values())
+            total_probes += n
+            assert metrics.bucket_counts[alpha_d.BUCKET_REACHED] == recorded_reached, (
+                f"{label}: reconstructed REACHED={metrics.bucket_counts[alpha_d.BUCKET_REACHED]} "
+                f"!= recorded gold_mu_rank-not-null={recorded_reached}"
+            )
+            # Every bucket-eligible probe lands in exactly one bucket.
+            assert n == 140, f"{label}: expected 140 mean-mode probe measurements, got {n}"
+
+        assert total_probes == 1120, f"expected 28 probes x 5 sessions x 8 runs = 1120, got {total_probes}"

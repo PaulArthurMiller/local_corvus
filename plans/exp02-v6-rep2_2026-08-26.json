@@ -1,0 +1,49 @@
+{
+  "plan_id": "exp02-v6-rep2-2026-08-26",
+  "plan_name": "R3-V6 replicate 2 — K1 centrality coefficient flagged off (hyperparameters.k1_centrality_weight: 1.0 -> 0.0). Delivered by BUILD-PLAN.md Milestone 47; the pre-registered R3 variation (phase_one_experiment_program.md §3 V6). Second replicate of exp02-v6-rep1_2026-08-26.json — identical config_overrides/expected_config, distinct plan_id and random_seed per §1-5's replication rule (a new plan_id is a new Thompson stream even at a reused random_seed). Config state is SUPPLIED BY THIS PLAN, not by config.yaml: config_overrides sets hyperparameters.k1_centrality_weight: 0.0 (committed default 1.0), all else inherited from config.yaml unchanged. expected_config asserts the same single key against the live backend before any graph mutation. Read docs/sensitivity_baseline.md's 2026-08-26 V6 pre-registration entry before reading this run's results: the centrality term drives 88.4% K1-set churn on only ~25% of score magnitude, removing it makes K1 MORE conv-dominated (88.8% -> 95.9%) because its one systematic effect is holding seed_v3's designed hubs in K1, and the effect is early-session and decays by session 3 — read per-session, not pooled. Written by BUILD-PLAN.md Milestone 47; NOT run by that milestone (R3 is blocked on R0/R1 per phase_one_experiment_program.md).",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 5,
+  "turns_per_series": 70,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "expected_config": {
+    "hyperparameters.k1_centrality_weight": 0.0
+  },
+  "config_overrides": {
+    "hyperparameters.k1_centrality_weight": 0.0
+  },
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
+  "difficulty": {
+    "hop_distance_levels": [0, 1]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": ["learned", "static_weight"],
+  "condition_order": ["learned", "static_weight"],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": 25.0,
+  "prompt_gen": {
+    "model": "claude-sonnet-5",
+    "max_retries": 2
+  },
+  "dry_run": false,
+  "dry_run_n": 2,
+  "random_seed": 20260827,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
+}

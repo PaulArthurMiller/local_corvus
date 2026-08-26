@@ -1943,3 +1943,29 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
     R0/R1 per `phase_one_experiment_program.md` — this milestone delivers
     only the knob, per its own explicit non-scope. AWAITING PAUL: PR
     review + merge.
+
+- 2026-08-26: /build (same session, Paul-directed follow-up) — closed the
+  queue-preflight `config_overrides` shape gap
+  - Paul flagged the "expected_config verified" Done-when mismatch from
+    the entry above as a real hole, not just a text/code mismatch: queue
+    preflight had zero validation of `config_overrides` itself, so a bad
+    key would only crash hours into an unattended overnight queue.
+  - Proposed a two-check design (offline key-resolution + offline
+    `expected_config`-vs-`config_overrides` value consistency). **Paul
+    scoped it down to key-resolution only** — `config_overrides` *is* the
+    intended value, already provenance-recorded per run via
+    `analytics.full_config_snapshot`; a wrong-but-resolvable value is a
+    data-science question, not an infrastructure failure worth a second
+    field to keep in sync. Agreed and built only the shape check.
+  - `find_unresolvable_override_keys()` added to
+    `scripts/harness/config_assert.py`, wired into `queue.py` step 5 —
+    reuses the live config already fetched in that step (no new I/O).
+    Regression-proven (reverted the fix, confirmed the new test failed —
+    "DID NOT RAISE" — then restored it and confirmed it passes) and
+    live-verified against a real Docker backend via the real
+    `run_experiment_queue.py --dry-run` CLI: a deliberately-typo'd plan
+    hard-stopped naming the exact bad key; both real committed R3-V6
+    plans still pass cleanly.
+  - 10 new tests, 1276 total, no regressions. Same branch/PR as the rest
+    of Milestone 47 (`milestone-47-k1-centrality-coefficient`) — a direct
+    fix to a gap that build's own notes flagged, not new scope.

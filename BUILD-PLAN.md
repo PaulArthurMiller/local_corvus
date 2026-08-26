@@ -7497,6 +7497,42 @@ Full suite: 1266 passed (1260 pre-existing + 6 new — 5 in
 `test_retrieval.py`, 1 in `test_config_overrides_wiring.py`), 2 pre-existing
 unrelated skips, no regressions.
 
+### Follow-up 2026-08-26 (b) — closed the queue-preflight `config_overrides`
+gap the Done-when mismatch above surfaced
+
+Paul's read of the build notes above: the "expected_config verified" gap
+wasn't just a Done-when text mismatch — it was masking a genuine hole.
+`queue.py` step 5 had **no check at all** for `config_overrides` (only for
+`expected_config` on override-empty plans), so a typo'd or renamed dotted
+key sailed through `--dry-run` ("preflight passed") and only surfaced as a
+`ConfigOverrideError` crash at that plan's own restart — potentially hours
+into an unattended overnight queue.
+
+**Scoped down from a two-check design.** The first proposal also included
+an offline `expected_config`-vs-`config_overrides` value-consistency check.
+Paul's call: drop it — `config_overrides` **is** the plan's intended value
+(there's no independent "expected" value to diff it against), its
+provenance is already recorded on every real run row via
+`analytics.full_config_snapshot`, and a wrong-but-resolvable value is a
+data-science correctness question the scientist owns and can audit after
+the fact, not an infrastructure failure preflight should try to adjudicate.
+The *shape* problem (a key that doesn't resolve at all) is the one that
+causes an actual crash, so that's the one check built.
+
+`find_unresolvable_override_keys()` (`scripts/harness/config_assert.py`) —
+a pure shape check against the live config's shape already fetched in step
+5 (no new I/O), mirroring `apply_config_overrides()`'s resolution rule but
+offline and per-key-existence only. Wired into `queue.py` step 5 alongside
+the existing `expected_config`-only branch. Regression-proven: the new test
+was run against the pre-fix `queue.py` first and confirmed to pass silently
+(`DID NOT RAISE`), then against the fix. **Live-verified** via the real
+`run_experiment_queue.py --dry-run` CLI against a real Docker backend: a
+deliberately-typo'd plan (`k1_centrallity_weight`) hard-stopped naming the
+exact bad key; the two real, committed R3-V6 plans still pass cleanly.
+10 new tests (7 `test_config_assert.py`, 3 `test_queue.py`), 1276 total, no
+regressions. Same branch/PR — this is a direct fix to a gap that branch's
+own build notes documented, not new unrelated scope.
+
 Branch: `milestone-47-k1-centrality-coefficient`.
 
 ---

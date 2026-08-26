@@ -56,16 +56,21 @@ def _minimal_config(
     level1_k=3,
     level2_k=1,
     dir_multiplier=1.5,
+    k1_centrality_weight=None,
 ) -> dict:
-    return {
-        "hyperparameters": {
-            "retrieval_keyword_pool_size": pool_size,
-            "retrieval_keyword_count": keyword_count,
-            "retrieval_level1_top_k": level1_k,
-            "retrieval_level2_top_k": level2_k,
-            "directional_edge_weight_multiplier": dir_multiplier,
-        }
+    hp = {
+        "retrieval_keyword_pool_size": pool_size,
+        "retrieval_keyword_count": keyword_count,
+        "retrieval_level1_top_k": level1_k,
+        "retrieval_level2_top_k": level2_k,
+        "directional_edge_weight_multiplier": dir_multiplier,
     }
+    # Omitted unless explicitly requested — TestK1CentralityWeight's
+    # "absent key defaults to 1.0" test relies on this key genuinely not
+    # being present, matching a real minimal test config that predates M47.
+    if k1_centrality_weight is not None:
+        hp["k1_centrality_weight"] = k1_centrality_weight
+    return {"hyperparameters": hp}
 
 
 def _mu_id() -> str:
@@ -586,3 +591,123 @@ class TestFailedOutputExclusionFilter:
             result = run(retrieve("zephyr quokka narwhal", s, cfg))
             print(f"[test] result mus with empty exclusion: {[m['mu_id'] for m in result.mus]}")
             assert failed_id in {m["mu_id"] for m in result.mus}
+
+
+# ---------------------------------------------------------------------------
+# M47 — hyperparameters.k1_centrality_weight (R3-V6 knob)
+# ---------------------------------------------------------------------------
+
+
+def _populate_centrality_disagreement_fixture(store):
+    """
+    Three multi-hit candidates (all matching keywords 'kiwi'/'mango') whose
+    edge_weight_sum and raw BM25 score disagree, engineered so sweeping
+    k1_centrality_weight across its 0.0-1.0 range produces THREE distinct
+    total orderings — not just two — proving the coefficient is a genuine
+    scalar multiplier, not a boolean gate:
+
+      A - no edges, longest/most-repeated text -> highest raw BM25 score.
+      B - short text (lower BM25) but a moderate edge_weight_sum (0.413),
+          enough to overtake A's BM25 lead almost immediately (~0.1).
+      D - text between A and B in raw BM25 score, small edge_weight_sum
+          (0.088) that only overtakes A once the coefficient crosses ~0.8.
+
+    Verified empirically against the real BM25Okapi scores this fixture
+    produces: weight=0.0 -> [A, B, D]; weight=0.5 -> [B, A, D] (the third,
+    genuinely distinct order); weight=1.0 -> [B, D, A]. A filler MU with no
+    shared keywords anchors both edges so A/B/D's own texts don't need to
+    reference each other.
+    """
+    ids = {"A": _mu_id(), "B": _mu_id(), "D": _mu_id()}
+    run(store.create_mu(mu_id=ids["A"], source_type="user_input",
+                         raw_content="kiwi mango kiwi mango kiwi mango kiwi mango"))
+    run(store.create_mu(mu_id=ids["B"], source_type="user_input",
+                         raw_content="kiwi mango"))
+    run(store.create_mu(mu_id=ids["D"], source_type="user_input",
+                         raw_content="kiwi mango banana"))
+    filler_id = _mu_id()
+    run(store.create_mu(mu_id=filler_id, source_type="user_input",
+                         raw_content="filler unrelated content xyzzy"))
+    run(store.create_edge(source_mu_id=ids["B"], target_mu_id=filler_id, weight=0.413))
+    run(store.create_edge(source_mu_id=ids["D"], target_mu_id=filler_id, weight=0.088))
+    return ids
+
+
+class TestK1CentralityWeight:
+    """M47 / R3-V6 - hyperparameters.k1_centrality_weight coefficient on
+    K1's edge_weight_sum centrality term. 1.0 = pre-M47 behavior bit-for-bit;
+    0.0 = BM25-only K1 (the pre-registered "flagged off" value)."""
+
+    def test_default_1_0_matches_pre_m47_formula_exactly(self):
+        """Explicit 1.0 must rank identically to the pre-M47 unconditional
+        formula (edge_weight_sum + bm25) on a fixture where centrality and
+        BM25 disagree - equality, not closeness."""
+        with TempDBStore() as s:
+            ids = _populate_centrality_disagreement_fixture(s)
+            cfg = _minimal_config(level1_k=3, level2_k=0, k1_centrality_weight=1.0)
+            result = run(retrieve("kiwi mango", s, cfg))
+            order = [m["mu_id"] for m in result.mus]
+            print(f"[test] weight=1.0 order: {order}")
+            # Edge-weighted case: B (edge 0.413) > D (edge 0.088) > A (no edges)
+            assert order == [ids["B"], ids["D"], ids["A"]]
+
+    def test_0_0_yields_bm25_only_ordering(self):
+        """0.0 must rank purely by BM25 - the pre-registered "flagged off"
+        value for R3-V6. A (highest raw BM25) ranks first despite having no
+        edges at all - the opposite of the weight=1.0 ordering above."""
+        with TempDBStore() as s:
+            ids = _populate_centrality_disagreement_fixture(s)
+            cfg = _minimal_config(level1_k=3, level2_k=0, k1_centrality_weight=0.0)
+            result = run(retrieve("kiwi mango", s, cfg))
+            order = [m["mu_id"] for m in result.mus]
+            print(f"[test] weight=0.0 order: {order}")
+            assert order == [ids["A"], ids["B"], ids["D"]]
+
+    def test_0_5_lands_between_them(self):
+        """0.5 must produce a THIRD, genuinely distinct ordering from both
+        weight=0.0 and weight=1.0 above - proof the coefficient scales the
+        centrality term proportionally rather than branching between two
+        fixed behaviors (a boolean-gate bug would reproduce the weight=1.0
+        order here, since B's edge already dominates at any nonzero
+        coefficient below D's ~0.8 crossover)."""
+        with TempDBStore() as s:
+            ids = _populate_centrality_disagreement_fixture(s)
+            cfg = _minimal_config(level1_k=3, level2_k=0, k1_centrality_weight=0.5)
+            result = run(retrieve("kiwi mango", s, cfg))
+            order = [m["mu_id"] for m in result.mus]
+            print(f"[test] weight=0.5 order: {order}")
+            assert order == [ids["B"], ids["A"], ids["D"]]
+            assert order != [ids["A"], ids["B"], ids["D"]]  # not the 0.0 order
+            assert order != [ids["B"], ids["D"], ids["A"]]  # not the 1.0 order
+
+    def test_absent_key_defaults_to_1_0(self):
+        """A minimal test config that predates M47 (no k1_centrality_weight
+        key at all) must keep passing with pre-M47 behavior - the default
+        lives in retrieve()'s hp.get(..., 1.0), not just in config.yaml."""
+        with TempDBStore() as s:
+            ids = _populate_centrality_disagreement_fixture(s)
+            cfg = _minimal_config(level1_k=3, level2_k=0)  # no k1_centrality_weight
+            assert "k1_centrality_weight" not in cfg["hyperparameters"]
+            result = run(retrieve("kiwi mango", s, cfg))
+            order = [m["mu_id"] for m in result.mus]
+            print(f"[test] absent-key order: {order}")
+            assert order == [ids["B"], ids["D"], ids["A"]]  # same as explicit 1.0
+
+    def test_raw_edge_weight_sum_and_edge_contributions_unscaled_at_0_0(self):
+        """candidate_set_before_ranking and edge_contributions are
+        MEASUREMENT, not scoring - M45's path-back reconstructor needs raw
+        edge_weight_sum regardless of the coefficient. At weight=0.0 (where
+        a scaling bug would be most visible - everything would read 0.0),
+        both must still carry the true, unscaled per-candidate sums."""
+        with TempDBStore() as s:
+            ids = _populate_centrality_disagreement_fixture(s)
+            cfg = _minimal_config(level1_k=3, level2_k=0, k1_centrality_weight=0.0)
+            result = run(retrieve("kiwi mango", s, cfg))
+            raw_by_id = {c["mu_id"]: c["edge_weight_sum"] for c in result.candidate_set_before_ranking}
+            print(f"[test] raw edge_weight_sum at weight=0.0: {raw_by_id}")
+            assert raw_by_id[ids["A"]] == 0.0
+            assert raw_by_id[ids["B"]] == pytest.approx(0.413)
+            assert raw_by_id[ids["D"]] == pytest.approx(0.088)
+            assert result.edge_contributions[ids["A"]] == 0.0
+            assert result.edge_contributions[ids["B"]] == pytest.approx(0.413)
+            assert result.edge_contributions[ids["D"]] == pytest.approx(0.088)

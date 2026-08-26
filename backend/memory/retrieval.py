@@ -138,6 +138,11 @@ async def retrieve(
     pool_size: int = hp.get("retrieval_keyword_pool_size", 20)
     keyword_count: int = hp.get("retrieval_keyword_count", 5)
     level1_k: int = hp.get("retrieval_level1_top_k", 3)
+    # R3-V6 (M47) — coefficient on K1's edge_weight_sum centrality term.
+    # 1.0 reproduces pre-M47 behavior bit-for-bit; 0.0 is the pre-registered
+    # "flagged off" value (BM25-only K1 ranking). See config.yaml's comment
+    # and docs/sensitivity_baseline.md's V6 entry before changing this.
+    k1_centrality_weight: float = float(hp.get("k1_centrality_weight", 1.0))
     level2_k: int = hp.get("retrieval_level2_top_k", 1)
     dir_multiplier: float = float(hp.get("directional_edge_weight_multiplier", 1.5))
     weight_mode: str = weight_mode_override or config.get("edge_update", {}).get("weight_mode", "mean")
@@ -237,7 +242,10 @@ async def retrieve(
         outgoing_edges.setdefault(src, []).append(edge)
 
     def _k1_score(mu_id: str) -> float:
-        return edge_weight_sum.get(mu_id, 0.0) + candidate_scores.get(mu_id, 0.0)
+        return (
+            k1_centrality_weight * edge_weight_sum.get(mu_id, 0.0)
+            + candidate_scores.get(mu_id, 0.0)
+        )
 
     sorted_candidates = sorted(multi_hit, key=_k1_score, reverse=True)
     k1_ids = sorted_candidates[:level1_k]

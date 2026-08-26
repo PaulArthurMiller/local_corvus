@@ -102,6 +102,17 @@ hyperparameters:
   # candidates to the traversal hop.
   retrieval_level1_top_k: 3
 
+  # Coefficient on K1's edge_weight_sum centrality term (M47 / R3-V6).
+  # _k1_score(mu) = k1_centrality_weight * edge_weight_sum[mu] + cumulative_bm25[mu]
+  # edge_weight_sum is UNDIRECTED TOTAL DEGREE — it accumulates on both
+  # endpoints of every edge, so a conv MU gains K1 rank at ~6 edges/turn
+  # regardless of feedback. Range 0.0-2.0.
+  #   1.0 = pre-M47 behavior, bit-for-bit (the committed default)
+  #   0.0 = BM25-only K1 — R3-V6's pre-registered "flagged off" value
+  # Read docs/sensitivity_baseline.md's V6 pre-registration entry before
+  # changing this: at 0.0, seed_v3's hub entry points essentially vanish.
+  k1_centrality_weight: 1.0
+
   # K2: number of MUs to return after one-hop graph traversal from K1.
   # With K2=1 and K1=3, at most 4 MUs reach the context (3 K1 + 1 K2).
   # Range: 1–5. Keep small; each retrieved MU consumes context budget.

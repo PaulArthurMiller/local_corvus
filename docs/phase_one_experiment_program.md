@@ -97,7 +97,14 @@ known defects, so the fields it consumes must be right *now*.
       probe content for `cluster_c` can ever surface `c_spoke1` on a real
       turn. Outcome goes in `sensitivity_baseline.md` either way — content
       bug or mechanism finding.
-- [ ] R0-6 Errata in §8 applied to `experiment_protocol.md`.
+- [ ] R0-6 Errata in §8 applied to `experiment_protocol.md`. **6 of 7 items
+      applied by BUILD-PLAN M47** (config_overrides/expected_config
+      documented, `tuning_knobs` retired, `seed_fixture_version` added to
+      the schema table, v3-wiring section rewritten, `random_seed`'s
+      non-Thompson-seeding caveat added, two-condition default noted, worked
+      example replaced, and a new "Sweepable hyperparameter knobs" reference
+      table added incl. V6). **Still open:** the "report field list" item —
+      it depends on R0-1's field audit, which has not run yet.
 
 **Done when:** R0-1 through R0-6 checked, and `sensitivity_baseline.md` has
 an entry for R0-5.
@@ -230,6 +237,15 @@ Draft at R5, informed by which metrics actually moved.
 
 ## 6. Progress log (append-only, newest first)
 
+- **2026-08-26 (build)** — BUILD-PLAN M47 built: `config.yaml` gained
+  `hyperparameters.k1_centrality_weight` (default `1.0`), `_k1_score()` in
+  `backend/memory/retrieval.py` reads it, 6 new tests in
+  `tests/test_memory/test_retrieval.py` (a 3-candidate fixture proving the
+  coefficient is a genuine scalar — three distinct total orderings at 0.0 /
+  0.5 / 1.0, not a two-state branch) plus one in
+  `tests/test_core/test_config_overrides_wiring.py` (the leaf resolves
+  through the real orchestrator against the real, committed `config.yaml`).
+  §8 errata pass folded in (6 of 7 items; see §8 for the one still open).
 - **2026-08-26 (later 2)** — V6 knob scoped as BUILD-PLAN M47
   (`hyperparameters.k1_centrality_weight`, scalar, default 1.0); §7-1a
   resolved and the R3 V6 row updated to the concrete override. A **V6
@@ -291,23 +307,30 @@ Draft at R5, informed by which metrics actually moved.
 The schema reference predates several milestones. Update these so the two
 documents do not contradict each other:
 
-- **Hyperparameter variation per plan.** The doc says sweeps are "one
-  `config.yaml` value per plan run in isolation" and that `tuning_knobs` is
-  inert. As of M43 Phase 2, `config_overrides` supplies per-plan config and
-  `expected_config` asserts it against the live backend. Document both
-  fields, their types, and the assertion failure behavior. Retire or
-  re-scope `tuning_knobs`.
-- **`seed_fixture_version`** is a plan field in use; it is absent from the
-  schema table.
-- **v3 wiring.** The "Seed fixture and probe battery version" section says v3
-  is not wired and plans must stay on v2. It is wired; Phase 1 plans use v3
-  for both fixture and probe set. Rewrite the section.
-- **`random_seed` description.** Add that it does *not* seed Thompson draws;
-  those come from `edge_update.rng_seed`, derived from `EXPERIMENT_ID` when
-  null. Add the pairing caveat from §2.
-- **Conditions default.** Note that two-condition plans are accepted and
-  currently in use, and cross-reference §7-1 of this document.
-- **Worked example.** Replace the `pilot_125` example with an exp01-style plan
-  showing `config_overrides` / `expected_config` / `seed_fixture_version`.
-- **Report field list.** Add a short list of the fields the analyst agent
-  consumes (from R0-1) so future report changes know what is load-bearing.
+- [x] **Hyperparameter variation per plan.** *Applied M47.* The doc said
+  sweeps are "one `config.yaml` value per plan run in isolation" and that
+  `tuning_knobs` is inert. As of M43 Phase 2, `config_overrides` supplies
+  per-plan config and `expected_config` asserts it against the live backend
+  — both fields, their types, and the assertion failure behavior are now
+  documented; `tuning_knobs` is marked retired. A new "Sweepable
+  hyperparameter knobs" reference table (V1–V6, incl. M47's own
+  `k1_centrality_weight`) was added, pointing at `sensitivity_baseline.md`.
+- [x] **`seed_fixture_version`** *Applied M47.* Added to the schema table,
+  alongside `trained_spokes`/`expected_config`/`config_overrides`, which were
+  also missing from the table.
+- [x] **v3 wiring.** *Applied M47.* The "Seed fixture and probe battery
+  version" section no longer says v3 is unwired — it is, and every Phase 1
+  plan sets both `seed_fixture_version`/`probe_set_version` to `"v3"`.
+- [x] **`random_seed` description.** *Applied M47.* Now states it does not
+  seed Thompson draws (those come from `edge_update.rng_seed`, derived from
+  `EXPERIMENT_ID` when null) and carries the §2/§7-3 pairing caveat.
+- [x] **Conditions default.** *Applied M47.* Notes two-condition plans are
+  accepted and are the Phase 1 default from Round 1 onward, cross-referencing
+  §1-1/§7-1 of this document.
+- [x] **Worked example.** *Applied M47.* Replaced the `pilot_125` example
+  with an exp01-cfgA-rep1-style plan showing `config_overrides` /
+  `expected_config` / `seed_fixture_version` / two-condition `conditions`.
+- [ ] **Report field list.** Still open — depends on R0-1's field audit,
+  which has not run yet. Add a short list of the fields the analyst agent
+  consumes once R0-1 exists, so future report changes know what is
+  load-bearing.

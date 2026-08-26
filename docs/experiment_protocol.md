@@ -54,12 +54,41 @@ interchangeable:
 | Experimental design (how many turns, which conditions, which judge, probe ratio, budget, …) | Run Plan JSON | One experiment | New plan file, no backend restart needed |
 | Batch scheduling (which plans, in what order, failure handling) | Queue JSON | One unattended session | New queue file |
 
-If a screening series is sweeping a hyperparameter (e.g. K1), that sweep is
-expressed as **one `config.yaml` value per plan run in isolation** — the Run
-Plan schema has no field for retrieval/learning hyperparameters. `tuning_knobs`
-on the Run Plan is a passthrough dict reserved for future use and is not
-currently read by the backend; do not rely on it to vary hyperparameters
-per-plan today.
+**As of M43 Phase 2, a hyperparameter sweep is expressed per-plan, not by
+hand-editing `config.yaml` between runs.** Two Run Plan fields carry it:
+
+- **`config_overrides`** (dict[dotted-key, value]) rides the harness's
+  existing per-condition backend restart as the `CONFIG_OVERRIDES_JSON` env
+  var. The backend merges it onto `config.yaml` at import time, before any
+  derived constant (`_CONFIG_HASH`, `EDGE_UPDATE_CFG`, …) is computed. An
+  unknown dotted key — a typo, or a key that assumes a `config.yaml` shape
+  that has since changed — is a **hard fail at backend startup**, not a
+  silent no-op; a typo can never look like it took effect.
+- **`expected_config`** (same dotted-key shape) is checked against
+  `GET /admin/effective-config` before any graph mutation (`runner.py`
+  preflight, `queue.py` step 5). A mismatch — including a declared key
+  entirely absent from the live config — is an unconditional hard stop, not
+  subject to `error_policy` override. It is deliberately independent of
+  `config_overrides`, not auto-derived from it: a plan can assert without
+  supplying (documenting an assumed baseline), or supply without asserting.
+  §1-3 of `phase_one_experiment_program.md` requires the two to carry
+  identical key sets for any pre-registered R3 variation, so the assertion
+  doubles as proof the injection actually took effect.
+
+Both fields participate in `plan_config_hash` (`compute_config_hash()`) — a
+plan's config state is part of its identity, not external to it. A plan with
+neither field runs against whatever `config.yaml` is committed on disk,
+exactly as before M43.
+
+`tuning_knobs` (dict[string, float]) is a **legacy passthrough field,
+retired in favor of `config_overrides`/`expected_config` above.** It is not
+read by the backend and must not be used to vary hyperparameters per-plan;
+it is kept only for schema backward-compatibility with plan files written
+before M43.
+
+See "Sweepable hyperparameter knobs" below for the specific knobs
+pre-registered for the current sweep round, and their `config_overrides`
+values.
 
 ---
 
@@ -123,12 +152,16 @@ field-identifying error (never a raw stack trace) before any graph mutation.
 | `probe_ratio` | float, 0.0–1.0 | `0.2` | Fraction of each series' turns that are probe turns (`round(turns_per_series * probe_ratio)`), never judged, never eligible for feedback. |
 | `probe_placement` | string | `"end"` | One of `"random"`, `"end"`, `"fixed_checkpoints"`. `"end"` puts all probe turns as the tail of each series (recommended default — every series closes with a full battery pass). `"random"` shuffles probe positions per series (seeded, reproducible). `"fixed_checkpoints"` requires `probe_checkpoint_positions`. |
 | `probe_checkpoint_positions` | list[int] or null | `null` | Required, non-empty, and in range `[0, turns_per_series)` when `probe_placement == "fixed_checkpoints"`. |
-| `probe_set_version` | string, non-empty | `"v2"` | Selects `probes/probe_set_{version}.yaml`. **Currently only `v2` (10 probes) is wired through the harness — see the version note below before setting this to `v3`.** |
+| `probe_set_version` | string, non-empty | `"v2"` | Selects `probes/probe_set_{version}.yaml`. Every Phase 1 plan sets this to `"v3"` — see "Seed fixture and probe battery version" below. |
+| `seed_fixture_version` | string, non-empty | `"v2"` | Selects `seed_fixtures/seed_{version}.json.gz`, wiped and re-seeded per condition (`POST /admin/seed-graph`) and read for prompt-bank cluster content. Every Phase 1 plan sets this to `"v3"` — see below. |
+| `trained_spokes` | dict[string, string] | `{cluster_a: a_spoke1, cluster_b: b_spoke1, cluster_c: c_spoke1, cluster_d: d_spoke1}` | Which spoke in each cluster is the single trained target prompt generation draws from. Shape-validated only (the 4 known cluster ids, values matching `{letter}_spokeN}`) — a value that doesn't resolve to real content in the selected fixture version fails loudly at runtime, not at schema-validation time. |
+| `expected_config` | dict[dotted-key, value] | `{}` | Declared config-state assertion, checked against `GET /admin/effective-config` before any graph mutation. See the architecture section above. |
+| `config_overrides` | dict[dotted-key, value] | `{}` | Per-condition config injection via `CONFIG_OVERRIDES_JSON`. See the architecture section above. |
 | `difficulty` | object | `{hop_distance_levels: [0, 1]}` | See below. |
 | `judge` | object | `{model: "gemma4:e4b", temperature: 0.0}` | See below. |
-| `conditions` | list[string] | `["learned", "static_weight", "random_weight"]` | Each must be one of those three values; non-empty. |
+| `conditions` | list[string] | `["learned", "static_weight", "random_weight"]` | Each must be one of those three values; non-empty. **Two-condition plans (`["learned", "static_weight"]`, dropping `random_weight`) are accepted and are the Phase 1 default from Round 1 onward** — see `phase_one_experiment_program.md` §1-1's re-attach rule and §7-1 for the rationale (control cost, no coherent trajectory in two prior runs). `random_weight` remains fully supported for the confirmation replicate the re-attach rule requires. |
 | `condition_order` | list[string] or null | `= conditions` | If given, must be a permutation of `conditions` — this is the execution order (each condition gets its own container restart + graph wipe/seed). |
-| `tuning_knobs` | dict[string, float] | `{}` | Reserved passthrough, not currently consumed by the backend. Do not use to vary hyperparameters per-plan (see the architecture table above). |
+| `tuning_knobs` | dict[string, float] | `{}` | **Retired as of M43** — legacy passthrough, not read by the backend. Use `config_overrides`/`expected_config` instead (see the architecture section above). Kept only for schema backward-compatibility with pre-M43 plan files. |
 | `error_policy` | dict[string, string] | `{}` | Overrides on top of the default policy below. Each value must be `"hard_stop"` or `"soft_continue"`. |
 | `notification` | object | `{enabled: true, channel: "log"}` | See below. |
 | `budget_cap` | float ≥ 0 or null | `null` (uncapped) | Pre-run hard stop: if the estimated cost (prompt-bank generation + judge calls) exceeds this, the harness refuses to start. With a pre-generated bank and the local Ollama judge, actual marginal cost is ~$0 today — this is a guardrail for future hosted-judge/API configurations, not a real spend limiter yet. |
@@ -136,7 +169,7 @@ field-identifying error (never a raw stack trace) before any graph mutation.
 | `prompt_gen` | object | `{model: "claude-sonnet-5", max_retries: 2}` | See below. Irrelevant if `prompt_bank_path` is already set. |
 | `dry_run` | bool | `false` | Scopes execution to `dry_run_n` turns per condition; also suffixes the run identity with `_dryrun` so dry-run analytics never contaminate a later real run's reports. |
 | `dry_run_n` | int > 0 | `2` | Turns per condition when `dry_run` is true. |
-| `random_seed` | int | `0` | Drives deterministic probe placement (`"random"`) and prompt-id assignment. **Replicate plans must use distinct `random_seed` values** — two plans with an identical fully-resolved config (including `random_seed`) hash to the same `config_hash`, and both the single-run harness and the queue preflight treat that as an error, not a valid replicate. |
+| `random_seed` | int | `0` | Drives deterministic probe placement (`"random"`) and prompt-id assignment **only — it does NOT seed Thompson draws on training turns.** Those come from `edge_update.rng_seed`, which defaults to `null` and is then derived from `EXPERIMENT_ID` (`{plan_id}_{condition}`) — meaning **a new `plan_id` is a new Thompson stream even when `random_seed` is reused.** Reusing a `random_seed` across plans only pairs the turn/probe sequence ("quasi-paired"); to actually pair the Thompson draws too, set `edge_update.rng_seed` explicitly via `config_overrides` (see `phase_one_experiment_program.md` §7-3, open as of this writing). **Replicate plans must use distinct `random_seed` values** — two plans with an identical fully-resolved config (including `random_seed`) hash to the same `config_hash`, and both the single-run harness and the queue preflight treat that as an error, not a valid replicate. |
 
 ### `conceptual_fields`
 
@@ -185,35 +218,87 @@ duplicate a key unless you're intentionally changing its action:
 | `judge_unparseable` | `soft_continue` | Judge response yields no usable **verdict** even after one re-ask (malformed JSON, unknown verdict value, Ollama unreachable). |
 | `report_generation` | `soft_continue` | Series/experiment report call failed — regenerable later; must never abort an otherwise-successful run. |
 
-### Worked example (single plan, matches `plans/pilot_125_2026-07-05.json`)
+### Worked example (single plan, matches `plans/exp01-cfgA-rep1_2026-08-12.json`)
+
+A Phase 1-shaped plan — v3 fixture/probes, a two-condition sweep, and a
+config sweep expressed via `config_overrides`/`expected_config` rather than a
+manual `config.yaml` edit:
 
 ```json
 {
-  "plan_id": "pilot-125-2026-07-05",
-  "plan_name": "Full pilot — 125 prompts x 3 conditions",
+  "plan_id": "exp01-cfgA-rep1-2026-08-12",
+  "plan_name": "Experiment Round 2 (exp01) config A replicate 1 — slow-evidence seed priors",
   "conceptual_fields": { "count": 4, "subjects": "auto" },
   "series_count": 5,
-  "turns_per_series": 25,
+  "turns_per_series": 70,
   "probe_ratio": 0.4,
   "probe_placement": "end",
-  "probe_set_version": "v2",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "expected_config": {
+    "edge_update.seed_prior_alpha": 3.0,
+    "edge_update.seed_prior_beta": 3.0
+  },
+  "config_overrides": {
+    "edge_update.seed_prior_alpha": 3.0,
+    "edge_update.seed_prior_beta": 3.0
+  },
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
   "difficulty": { "hop_distance_levels": [0, 1] },
   "judge": { "model": "gemma4:e4b", "temperature": 0.0 },
-  "conditions": ["learned", "static_weight", "random_weight"],
-  "condition_order": ["learned", "static_weight", "random_weight"],
+  "conditions": ["learned", "static_weight"],
+  "condition_order": ["learned", "static_weight"],
   "error_policy": {},
   "notification": { "enabled": true, "channel": "log" },
   "budget_cap": 25.0,
-  "prompt_gen": { "model": "session-authored-offline", "max_retries": 2 },
+  "prompt_gen": { "model": "claude-sonnet-5", "max_retries": 2 },
   "dry_run": false,
-  "random_seed": 20260705,
-  "prompt_bank_path": "prompt_banks/prompt_bank_e75058b6....json"
+  "random_seed": 20260809,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
 }
 ```
 
 Note `total_prompts` is *absent* here — it's legally derivable from
-`series_count * turns_per_series` (5 × 25 = 125), so only two of the three
-count fields need to be supplied.
+`series_count * turns_per_series` (5 × 70 = 350), so only two of the three
+count fields need to be supplied. `config_overrides` and `expected_config`
+carry identical key sets (§1-3 of `phase_one_experiment_program.md`), and
+`conditions` drops `random_weight` per the Phase 1 default noted above.
+
+---
+
+## Sweepable hyperparameter knobs
+
+The knobs currently pre-registered for the Phase 1 R3 sweep
+(`phase_one_experiment_program.md` §3), each expressed as a
+`config_overrides`/`expected_config` pair against the Round 1 baseline. Read
+the named `sensitivity_baseline.md` entry before running any of these — each
+carries mechanism findings from archived-data counterfactual analysis, not
+just the knob's numeric range.
+
+| # | `config.yaml` leaf | Baseline | R3 value(s) | `sensitivity_baseline.md` entry |
+|---|---|---|---|---|
+| V1 | `hyperparameters.retrieval_level2_top_k` | `1` | `3`, `5` | "M45 Phase 2" — K2 knob pricing (~5× REACHED). |
+| V2 | `edge_update.credit_lambda` | `0.6` | `0.3`, `0.9` | "M45 Phase 2" — write-side near-frozen finding. |
+| V3 | `edge_update.credit_scale` | `1.0` | `3.0` | Same entry — stands in for `decay` until implemented. |
+| V4 | `edge_update.negative_scope` | `path` | `terminal` | Same entry — tests path-wide negative credit suppression. |
+| V5 | `edge_update.evidence_cap.enabled` / `.n_max` | `false` | `true` / `50` | Same entry — constant-effective-learning-rate variant. |
+| V6 | `hyperparameters.k1_centrality_weight` | `1.0` | `0.0` | "2026-08-26 — V6 pre-registration" — 88% K1-set churn on ~25% of score magnitude; removing it makes K1 *more* conv-dominated (88.8% → 95.9%); effect decays after session 2. Added Milestone 47. |
+
+`k1_centrality_weight`'s `config_overrides` pair (V6, both replicates):
+
+```json
+"expected_config": { "hyperparameters.k1_centrality_weight": 0.0 },
+"config_overrides": { "hyperparameters.k1_centrality_weight": 0.0 }
+```
+
+This table is pre-registered per §1-6 — additions go in
+`phase_one_experiment_program.md` §7 with a rationale and a date before they
+appear here.
 
 ---
 
@@ -371,15 +456,16 @@ single-plan run — the queue changes nothing about the harness layer.
 
 ## Seed fixture and probe battery version
 
-The harness's default seed fixture is **`seed_fixtures/seed_v2.json.gz`**
-(34 MUs) and the schema default `probe_set_version` is **`"v2"`**
-(`probes/probe_set_v2.yaml`, 10 probes). `seed_fixtures/seed_v3.json.gz`
-(counterfactual content, 34 MUs, 64 reciprocal edges) exists, but **the
-harness's `SEED_FIXTURE_PATH` constant, prompt generation, and probe set are
-not yet wired to consume it** — do not set `probe_set_version: "v3"` or point
-`prompt_bank_path` at a v3-derived bank until that wiring lands (tracked as
-the deferred "v3 cascade" in `PROGRESS.md`). Plans for the current long
-series run should stay on the `v2` fixture/probe defaults.
+The schema default for both `seed_fixture_version` and `probe_set_version`
+is still `"v2"` (backward compatibility with pre-v3 plan files), but **every
+Phase 1 plan sets both explicitly to `"v3"`**
+(`seed_fixtures/seed_v3.json.gz` — counterfactual content, 34 MUs, 64
+reciprocal edges; `probes/probe_set_v3.yaml`). The "v3 cascade" wiring
+(harness fixture load, prompt generation reading v3 cluster content, and the
+probe endpoint resolving `probe_set_v3.yaml`) is complete and has been
+exercised by every archived Phase 1 run (exp0, exp0b, exp01) — do not leave
+`seed_fixture_version`/`probe_set_version` unset on a new Phase 1 plan
+expecting them to default correctly; set both to `"v3"` explicitly.
 
 ---
 

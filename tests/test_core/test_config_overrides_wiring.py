@@ -105,6 +105,31 @@ def test_experiment_report_load_config_applies_override(monkeypatch):
     assert overridden["reporting"]["pass_rank_thresholds"]["spoke_retrieval"] == 999
 
 
+def test_orchestrator_k1_centrality_weight_override_resolves(monkeypatch):
+    """M47 / R3-V6 — the new hyperparameters.k1_centrality_weight leaf must
+    genuinely exist in the real, committed config.yaml (not just a test
+    fixture dict): a CONFIG_OVERRIDES_JSON override of it must resolve
+    through apply_config_overrides() without raising, and the orchestrator's
+    resolved _HP must reflect the override, not the committed 1.0 default."""
+    import core.orchestrator as orchestrator
+
+    monkeypatch.delenv("CONFIG_OVERRIDES_JSON", raising=False)
+    importlib.reload(orchestrator)
+    assert orchestrator._HP.get("k1_centrality_weight") == 1.0  # config.yaml's committed default
+
+    monkeypatch.setenv(
+        "CONFIG_OVERRIDES_JSON",
+        '{"hyperparameters.k1_centrality_weight": 0.0}',
+    )
+    try:
+        importlib.reload(orchestrator)
+        assert orchestrator._HP["k1_centrality_weight"] == 0.0
+    finally:
+        monkeypatch.delenv("CONFIG_OVERRIDES_JSON", raising=False)
+        importlib.reload(orchestrator)
+        assert orchestrator._HP.get("k1_centrality_weight") == 1.0
+
+
 def test_orchestrator_malformed_override_hard_fails_at_import(monkeypatch):
     """Malformed CONFIG_OVERRIDES_JSON must crash the backend at import
     (before any run state exists), not silently ignore the override or

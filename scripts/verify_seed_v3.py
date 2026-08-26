@@ -252,6 +252,15 @@ def _simulate_retrieval(query: str, mus: list[dict], edges: list[dict]) -> dict:
         outgoing_edges.setdefault(s, []).append(edge)
 
     def k1_score(mid: str) -> float:
+        # M47 divergence point: backend/memory/retrieval.py's _k1_score()
+        # gained a hyperparameters.k1_centrality_weight coefficient on the
+        # edge_weight_sum term (default 1.0, so this formula still matches
+        # bit-for-bit at the committed default). Deliberately NOT mirrored
+        # here — this function verifies a frozen fixture under fixed
+        # assumptions (BM25 + unweighted centrality), not a runtime sweep;
+        # see BUILD-PLAN.md Milestone 47's open questions for the reasoning.
+        # If a future change moves the default off 1.0, this comment is the
+        # place that would need to change too.
         return edge_weight_sum.get(mid, 0.0) + candidate_scores.get(mid, 0.0)
 
     sorted_cands = sorted(multi_hit, key=k1_score, reverse=True)

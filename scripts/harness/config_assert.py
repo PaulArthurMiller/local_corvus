@@ -63,6 +63,45 @@ def format_config_mismatches(mismatches: list[str]) -> str:
     return f"expected_config mismatch — {detail}"
 
 
+def find_unresolvable_override_keys(overrides: dict[str, Any], live_config: dict) -> list[str]:
+    """
+    Return the dotted keys in a RunPlan.config_overrides dict that do NOT
+    resolve to an existing leaf in `live_config` (the "config" key of a GET
+    /admin/effective-config response, fetched once at queue preflight,
+    before any plan's own restart) — a shape check, not a value check.
+
+    Mirrors, on the host and offline, the resolution rule
+    backend/core/config_overrides.py's apply_config_overrides() enforces at
+    container startup: an unresolvable key is a hard fail there too, but
+    only once that plan's own per-condition restart actually runs — which
+    for a queue can be hours into an unattended overnight session. Catching
+    it here instead means a typo'd or renamed key is a preflight hard stop
+    at minute zero, not a crash mid-run (Milestone 47 follow-up: the queue
+    preflight had no check at all for config_overrides, only for
+    expected_config on override-empty plans).
+
+    Deliberately does NOT check values, only key existence: config_overrides
+    IS the plan's own intended value at that key, and its provenance is
+    already recorded on every real run row via analytics.full_config_snapshot
+    — a wrong-but-resolvable value is a data-science correctness question the
+    scientist owns and can audit after the fact, not an infrastructure
+    failure a preflight step should try to adjudicate. Empty list means every
+    key resolves.
+    """
+    return [key for key in overrides if get_dotted(live_config, key) is _MISSING]
+
+
+def format_unresolvable_override_keys(keys: list[str]) -> str:
+    """Render find_unresolvable_override_keys()'s output as one hard-stop message."""
+    detail = ", ".join(repr(k) for k in keys)
+    return (
+        f"config_overrides declares {len(keys)} key(s) that do not resolve to an "
+        f"existing config.yaml leaf ({detail}) — this would hard-fail at backend "
+        f"startup once this plan's own restart runs, hours into an unattended "
+        f"queue; fix the key(s) (or config.yaml, if a leaf was renamed) before launching"
+    )
+
+
 def find_dotted_key_collisions(live_config: dict, _prefix: str = "") -> list[str]:
     """
     Return the dotted paths of any live-config key that contains a literal

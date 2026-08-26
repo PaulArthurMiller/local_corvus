@@ -2,6 +2,35 @@
 
 ## Current state
 
+**2026-08-26 update (4): Milestone 47 built and complete — the R3-V6 config
+knob is live, tested, and verified against a real backend; not run.**
+`/build` session. `hyperparameters.k1_centrality_weight` added to
+`config.yaml` (default `1.0`); `backend/memory/retrieval.py`'s `_k1_score()`
+applies it. 6 new tests: a 3-candidate fixture in `test_retrieval.py` proving
+the coefficient is a genuine scalar (three distinct total K1 orderings across
+0.0/0.5/1.0 — a two-item fixture couldn't have distinguished a real
+coefficient from a boolean gate), plus a config-override wiring test proving
+the leaf resolves through the real orchestrator against the real, committed
+`config.yaml`. **Live verification (M44 pattern, real Docker backend, same
+`graph.db` state both times):** the same probe (`vs_a1`) returned a different
+slate under the override — seed hub `a0000001…` dropped out of the K1+K2
+slate entirely and `gold_mu_rank` moved from 4 to `None` — a direct,
+real-data confirmation of the planning pass's prediction that hub entry
+points would essentially vanish at `0.0`. Backend restored to its original
+baseline hash afterward; `git status` clean; `config.yaml` committed at
+`1.0`. Also folded in 6 of 7 `docs/experiment_protocol.md` §8 errata items
+(the report-field-list item stays open, pending R0-1) and wrote (not ran) the
+two-replicate R3-V6 plan file (`plans/exp02-v6-rep1/rep2_2026-08-26.json`).
+One Done-when text/code mismatch found and worked around: queue-level
+`--dry-run` doesn't print `expected_config verified` for a plan that also
+carries `config_overrides` (by design — that assertion runs at real
+per-condition execution instead); verified the same assertion function
+directly against a live backend rather than mutating the graph to force the
+literal CLI path. Full suite 1266 passed, no regressions. Branch:
+`milestone-47-k1-centrality-coefficient`. AWAITING PAUL: PR review + merge.
+R3 remains blocked on R0/R1 per `phase_one_experiment_program.md` — this
+milestone only delivers the knob, per its own explicit non-scope.
+
 **2026-08-26 update (3): Milestone 47 planned — the R3-V6 config knob — and
 the V6 mechanism priced from archived data before any of it runs.**
 `/planner` session, docs only, no code. **M47** (BUILD-PLAN.md) adds
@@ -1828,3 +1857,115 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
   - Milestone 45 Phase 1 status: COMPLETE. Phase 2 (metrics layer, first
     read, `docs/sensitivity_baseline.md`) not yet built. AWAITING PAUL: PR
     review + merge.
+
+- 2026-08-26: /build — Milestone 47 complete (K1 Centrality Coefficient,
+  R3-V6 knob)
+  - `config.yaml` gained `hyperparameters.k1_centrality_weight` (default
+    `1.0`, beside `retrieval_level1_top_k`); `_k1_score()` in
+    `backend/memory/retrieval.py` reads it with the other `hp.get` calls
+    and applies it only to the `edge_weight_sum` term.
+    `candidate_set_before_ranking`/`edge_contributions` already read
+    `edge_weight_sum` directly (not through `_k1_score()`), confirmed by a
+    dedicated test to stay raw/unscaled rather than assumed.
+  - 6 new tests. `tests/test_memory/test_retrieval.py`: a 3-candidate
+    fixture (BM25 and `edge_weight_sum` deliberately disagree) proving the
+    coefficient is a genuine scalar multiplier — three DISTINCT total K1
+    orderings across 0.0/0.5/1.0, verified empirically against the real
+    `BM25Okapi` scores before writing the assertions. A 2-item fixture
+    would not have distinguished a real coefficient from a boolean gate at
+    0.5 (the dominant-edge item wins either way); this one does.
+    `tests/test_core/test_config_overrides_wiring.py`: the leaf resolves
+    through the real `core.orchestrator` against the real, committed
+    `config.yaml` (not a synthetic `apply_config_overrides()` call),
+    matching the file's existing per-leaf pattern.
+  - `scripts/verify_seed_v3.py`'s open question resolved as recommended
+    (option a): its own copy of the K1 formula stays unmirrored; a comment
+    now names M47 as the point the two formulas can diverge.
+  - **§8 errata pass folded into `docs/experiment_protocol.md`, 6 of 7
+    items** — documented `config_overrides`/`expected_config` (types,
+    merge/assertion behavior), retired `tuning_knobs`, added
+    `seed_fixture_version`/`config_overrides`/`expected_config` to the
+    schema table, rewrote the v3-wiring section (v3 has been in use since
+    exp0), added `random_seed`'s non-Thompson-seeding caveat, noted the
+    two-condition Phase 1 default, replaced the worked example with an
+    exp01-cfgA-rep1-style plan, and added a new "Sweepable hyperparameter
+    knobs" reference table (V1–V6). The 7th item (analyst-consumed field
+    list) stays open — depends on R0-1's field audit, not yet run;
+    `phase_one_experiment_program.md` §8/§6 record the split explicitly.
+  - Wrote (did not run) the R3-V6 plan file as two replicates —
+    `plans/exp02-v6-rep1_2026-08-26.json` / `exp02-v6-rep2_2026-08-26.json`
+    — identical `config_overrides`/`expected_config`
+    (`hyperparameters.k1_centrality_weight: 0.0`), distinct `plan_id`/
+    `random_seed`, otherwise matching the Round 1 baseline shape.
+  - **Done-when text/code mismatch found and worked around, not silently
+    fudged.** The milestone's own Done-when bullet describes
+    `run_experiment_queue.py --dry-run` printing
+    `expected_config verified … N key(s) matched` for the plan file.
+    Tracing `queue.py`'s preflight step 5 shows that print only fires for
+    a plan supplying `expected_config` *without* `config_overrides` — a
+    plan with both (as required here) is deliberately exempted at the
+    queue layer, since an override-carrying plan's config is only
+    established by its own per-condition restart, and the message that
+    actually verifies it (`runner.py`'s `check_and_record_effective_
+    config()`) only runs during real per-condition execution, which
+    mutates the graph — contradicting the same bullet's "zero mutation."
+    Resolved with two checks instead of one forced-fit: `--dry-run`
+    against both plans confirmed zero-mutation preflight passes with
+    distinct `config_hash` (proving valid replicates); the real
+    `find_config_mismatches()` assertion was then run directly against
+    the plan's `expected_config` and a live, override-active backend's
+    actual `GET /admin/effective-config` — same function, same message
+    format, zero additional mutation — printing
+    `expected_config verified: 1 key(s) matched`.
+  - **Live verification (M44 pattern, real Docker backend, real
+    `graph.db`, same graph state both times — 678 pre-existing MUs from
+    prior archived runs):** baseline `POST /admin/run-probe` (`vs_a1`,
+    `weight_mode: mean`) returned seed hub `a0000001-aaaa-…-000000000001`
+    in the slate at `gold_mu_rank=4`. Restarted with
+    `CONFIG_OVERRIDES_JSON={"hyperparameters.k1_centrality_weight": 0.0}`
+    — `GET /admin/effective-config` reported `0.0` with
+    `overridden_keys=["hyperparameters.k1_centrality_weight"]` and a
+    distinct `runtime_config_hash`. The same probe on the same graph state
+    then returned a **different** slate: the seed hub dropped out
+    entirely and `gold_mu_rank` went from `4` to `None` — a direct,
+    real-data confirmation of the planning pass's prediction that hub
+    entry points would essentially vanish at `0.0`. Backend restarted a
+    third time with no override; `GET /admin/effective-config` confirmed
+    the original `runtime_config_hash` (`fd71fc92…`) and
+    `overridden_keys: []`. `git status` clean throughout; `config.yaml`
+    never touched on disk.
+  - Full suite: 1266 passed (1260 pre-existing + 6 new), 2 pre-existing
+    unrelated skips, no regressions.
+  - Branch: `milestone-47-k1-centrality-coefficient`.
+  - Milestone 47 status: COMPLETE — all Done-when criteria met (one with
+    a documented substitution, see above) with live verification against
+    a real Docker backend and the real `graph.db`. R3 remains blocked on
+    R0/R1 per `phase_one_experiment_program.md` — this milestone delivers
+    only the knob, per its own explicit non-scope. AWAITING PAUL: PR
+    review + merge.
+
+- 2026-08-26: /build (same session, Paul-directed follow-up) — closed the
+  queue-preflight `config_overrides` shape gap
+  - Paul flagged the "expected_config verified" Done-when mismatch from
+    the entry above as a real hole, not just a text/code mismatch: queue
+    preflight had zero validation of `config_overrides` itself, so a bad
+    key would only crash hours into an unattended overnight queue.
+  - Proposed a two-check design (offline key-resolution + offline
+    `expected_config`-vs-`config_overrides` value consistency). **Paul
+    scoped it down to key-resolution only** — `config_overrides` *is* the
+    intended value, already provenance-recorded per run via
+    `analytics.full_config_snapshot`; a wrong-but-resolvable value is a
+    data-science question, not an infrastructure failure worth a second
+    field to keep in sync. Agreed and built only the shape check.
+  - `find_unresolvable_override_keys()` added to
+    `scripts/harness/config_assert.py`, wired into `queue.py` step 5 —
+    reuses the live config already fetched in that step (no new I/O).
+    Regression-proven (reverted the fix, confirmed the new test failed —
+    "DID NOT RAISE" — then restored it and confirmed it passes) and
+    live-verified against a real Docker backend via the real
+    `run_experiment_queue.py --dry-run` CLI: a deliberately-typo'd plan
+    hard-stopped naming the exact bad key; both real committed R3-V6
+    plans still pass cleanly.
+  - 10 new tests, 1276 total, no regressions. Same branch/PR as the rest
+    of Milestone 47 (`milestone-47-k1-centrality-coefficient`) — a direct
+    fix to a gap that build's own notes flagged, not new scope.

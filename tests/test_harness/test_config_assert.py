@@ -10,8 +10,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"
 from harness.config_assert import (
     find_config_mismatches,
     find_dotted_key_collisions,
+    find_unresolvable_override_keys,
     format_config_mismatches,
     format_dotted_key_collisions,
+    format_unresolvable_override_keys,
     get_dotted,
 )
 
@@ -140,3 +142,64 @@ def test_format_dotted_key_collisions_names_every_offender():
     assert "'a.b'" in formatted
     assert "'c.d.e'" in formatted
     assert "literal '.'" in formatted
+
+
+# ---------------------------------------------------------------------------
+# Milestone 47 follow-up — find_unresolvable_override_keys (shape check
+# for config_overrides, the queue preflight gap the milestone's own build
+# left open)
+# ---------------------------------------------------------------------------
+
+def test_no_unresolvable_keys_when_every_override_resolves():
+    overrides = {"edge_update.seed_prior_alpha": 3.0}
+    live_config = {"edge_update": {"seed_prior_alpha": 1.0}}
+    assert find_unresolvable_override_keys(overrides, live_config) == []
+
+
+def test_unresolvable_top_level_key_is_reported():
+    overrides = {"nonexistent_section.some_key": 1.0}
+    live_config = {"edge_update": {"seed_prior_alpha": 1.0}}
+    assert find_unresolvable_override_keys(overrides, live_config) == [
+        "nonexistent_section.some_key"
+    ]
+
+
+def test_unresolvable_leaf_key_is_reported():
+    """A typo'd leaf under an otherwise-real section — the exact class of
+    mistake the M47 build note flagged: sails through --dry-run today,
+    crashes hours into an unattended queue at that plan's own restart."""
+    overrides = {"hyperparameters.k1_centrallity_weight": 0.0}  # typo
+    live_config = {"hyperparameters": {"k1_centrality_weight": 1.0}}
+    assert find_unresolvable_override_keys(overrides, live_config) == [
+        "hyperparameters.k1_centrallity_weight"
+    ]
+
+
+def test_multiple_unresolvable_keys_all_reported():
+    overrides = {"a.bad": 1, "edge_update.seed_prior_alpha": 3.0, "c.also_bad": 2}
+    live_config = {"edge_update": {"seed_prior_alpha": 1.0}}
+    assert sorted(find_unresolvable_override_keys(overrides, live_config)) == [
+        "a.bad", "c.also_bad",
+    ]
+
+
+def test_unresolvable_keys_is_a_shape_check_not_a_value_check():
+    """A resolvable key with a DIFFERENT value than what's currently live is
+    not reported — config_overrides IS the plan's own intended value; a
+    wrong-but-resolvable value is a data-science question the run's own
+    analytics.full_config_snapshot provenance answers, not a preflight
+    shape failure."""
+    overrides = {"edge_update.seed_prior_alpha": 999.0}
+    live_config = {"edge_update": {"seed_prior_alpha": 1.0}}
+    assert find_unresolvable_override_keys(overrides, live_config) == []
+
+
+def test_empty_overrides_never_unresolvable():
+    assert find_unresolvable_override_keys({}, {}) == []
+
+
+def test_format_unresolvable_override_keys_names_every_offender():
+    formatted = format_unresolvable_override_keys(["a.bad", "c.also_bad"])
+    assert "'a.bad'" in formatted
+    assert "'c.also_bad'" in formatted
+    assert "config_overrides declares 2 key(s)" in formatted

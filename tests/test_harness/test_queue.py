@@ -742,3 +742,82 @@ def test_preflight_hard_stops_on_live_config_key_containing_a_dot(tmp_path):
 
     with pytest.raises(QueuePreflightError, match="literal"):
         run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Milestone 47 follow-up — config_overrides shape validation at preflight
+# (the queue preflight had NO check at all for config_overrides; a bad key
+# sailed through --dry-run and only crashed hours in, at that plan's own
+# restart)
+# ---------------------------------------------------------------------------
+
+def test_preflight_unresolvable_override_key_hard_stops(tmp_path):
+    """A typo'd config_overrides key must fail at preflight (minute zero),
+    not hours into an unattended queue at that plan's own restart."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", prompt_bank_path=str(bank_path),
+        config_overrides={"hyperparameters.k1_centrallity_weight": 0.0},  # typo
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_response={
+        "config": {"hyperparameters": {"k1_centrality_weight": 1.0}},
+        "runtime_config_hash": "h",
+    })
+    judge = FakeJudgeClient()
+
+    with pytest.raises(QueuePreflightError, match="k1_centrallity_weight"):
+        run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+
+
+def test_preflight_resolvable_override_keys_do_not_hard_stop(tmp_path):
+    """A plan whose config_overrides keys all resolve — even to a value
+    different from what's currently live — passes this check. Companion to
+    test_preflight_skips_enforcement_for_plans_with_config_overrides: that
+    test proves the VALUE isn't asserted against the pre-restart backend;
+    this one proves the KEY still has to be real."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", prompt_bank_path=str(bank_path),
+        config_overrides={"hyperparameters.k1_centrality_weight": 0.0},
+    )
+    queue_path = _write_queue(tmp_path / "q.json", [{"plan_path": "planA.json"}])
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_response={
+        "config": {"hyperparameters": {"k1_centrality_weight": 1.0}},  # different value — fine
+        "runtime_config_hash": "h",
+    })
+    judge = FakeJudgeClient()
+
+    resolution = run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)
+    assert resolution.manifest.plans[0].status == MANIFEST_STATUS_RESOLVED
+
+
+def test_preflight_unresolvable_override_key_checked_before_bad_plan_would_run(tmp_path):
+    """In a multi-plan queue, a bad key on the SECOND plan still hard-stops
+    preflight before either plan runs — the whole point of a queue-level
+    check over a per-condition one."""
+    bank_path = _dummy_bank_path(tmp_path)
+    _write_plan(
+        tmp_path / "planA.json", plan_id="p1", prompt_bank_path=str(bank_path),
+        random_seed=1,
+    )
+    _write_plan(
+        tmp_path / "planB.json", plan_id="p2", prompt_bank_path=str(bank_path),
+        config_overrides={"hyperparameters.nonexistent_leaf": 1.0},
+        random_seed=2,
+    )
+    queue_path = _write_queue(
+        tmp_path / "q.json",
+        [{"plan_path": "planA.json"}, {"plan_path": "planB.json"}],
+    )
+    qf = load_queue_file(queue_path)
+    client = FakeBackendClient(effective_config_response={
+        "config": {"hyperparameters": {"retrieval_level2_top_k": 1}},
+        "runtime_config_hash": "h",
+    })
+    judge = FakeJudgeClient()
+
+    with pytest.raises(QueuePreflightError, match="nonexistent_leaf"):
+        run_preflight(qf, queue_path, client, judge, tmp_path / "unused", tmp_path / "banks", tmp_path)

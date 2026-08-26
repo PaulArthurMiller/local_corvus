@@ -19,8 +19,25 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
 
-from core.orchestrator import _build_ollama_messages, _scrub_prompt_for_storage
+from core.orchestrator import (
+    EDGE_RNG_SEED,
+    _build_ollama_messages,
+    _ollama_request_payload,
+    _resolved_config_snapshot,
+    _scrub_prompt_for_storage,
+)
 from analytics.run_log import RunRecord
+
+
+def test_bulk_turn_server_default_sampling_is_recorded_without_pinning():
+    payload = _ollama_request_payload([{"role": "user", "content": "hi"}], [])
+    snapshot = _resolved_config_snapshot()
+
+    assert "temperature" not in payload
+    assert "temperature" not in snapshot["model"]
+    assert snapshot["runtime"]["ollama_request"]["sampling_parameters"] == {}
+    assert snapshot["runtime"]["ollama_request"]["sampling_source"] == "ollama_server_default"
+    assert snapshot["runtime"]["edge_update_rng_seed"] == EDGE_RNG_SEED
 
 
 # ---------------------------------------------------------------------------

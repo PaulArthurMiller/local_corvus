@@ -1931,6 +1931,22 @@ async def generate_experiment_report(
     # §6.3 integrity checks
     integrity_checks = await _section_63_integrity_checks(experiment_id, store)
 
+    # Load-bearing provenance belongs at report top level. An autonomous
+    # consumer should not have to select an arbitrary analytics row, and a
+    # configured null RNG seed is not the seed that produced the run.
+    config_snapshot = await store.get_full_config_snapshot_for_experiment(experiment_id)
+    runtime = (config_snapshot or {}).get("runtime", {})
+    provenance = {
+        "config_hash": None,
+        "full_config_snapshot": config_snapshot,
+        "resolved_edge_update_rng_seed": runtime.get("edge_update_rng_seed"),
+        "ollama_request": runtime.get("ollama_request"),
+    }
+    if series_ids:
+        first_runs = await store.get_all_runs_for_series(series_ids[0])
+        if first_runs:
+            provenance["config_hash"] = first_runs[0].get("config_hash")
+
     # §6.1 learning measures
     learning_measures = await _section_61_learning_measures(
         experiment_id, store, config,
@@ -1962,6 +1978,7 @@ async def generate_experiment_report(
         "experiment_id": experiment_id,
         "condition_label": condition_label,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "provenance": provenance,
         "series_summary": series_summary,
         "integrity_checks": integrity_checks,
         "learning_measures": learning_measures,

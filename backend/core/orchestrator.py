@@ -8,6 +8,7 @@ Does not implement business logic; routes data between modules.
 """
 
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -164,6 +165,36 @@ logger.info("orchestrator: RUN_CONDITION=%s", RUN_CONDITION)
 EDGE_RNG_SEED: int = resolve_rng_seed(EDGE_UPDATE_CFG, EXPERIMENT_ID)
 EDGE_RNG: random.Random = random.Random(EDGE_RNG_SEED)
 logger.info("orchestrator: edge_update rng_seed=%s weight_mode=%s", EDGE_RNG_SEED, EDGE_UPDATE_CFG["weight_mode"])
+
+
+def _resolved_config_snapshot() -> dict:
+    """Return configured inputs plus values resolved only at runtime."""
+    snapshot = copy.deepcopy(_CONFIG)
+    snapshot["runtime"] = {
+        "experiment_id": EXPERIMENT_ID,
+        "run_condition": RUN_CONDITION,
+        "edge_update_rng_seed": EDGE_RNG_SEED,
+        "ollama_request": {
+            "model": MODEL_NAME,
+            "stream": False,
+            # No sampling options are currently sent. Ollama therefore
+            # applies its server/model defaults; pinning them is an
+            # experiment-design decision, not a reporting-layer change.
+            "sampling_parameters": {},
+            "sampling_source": "ollama_server_default",
+        },
+    }
+    return snapshot
+
+
+def _ollama_request_payload(messages: list[dict], tool_schemas: list[dict]) -> dict:
+    """Build the explicitly sampled Ollama request shape."""
+    return {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "tools": tool_schemas,
+        "stream": False,
+    }
 
 # --- Failure detection constants ---
 # finish_reason value Ollama returns when the model exhausted its token budget
@@ -679,7 +710,7 @@ async def _run_interaction_inner(
         edge_weights_used=retrieval.edge_weights_used,
         assembled_prompt_json=assembled_prompt_json,
         config_hash=_CONFIG_HASH,
-        full_config_snapshot=_CONFIG,
+        full_config_snapshot=_resolved_config_snapshot(),
         condition_label=os.getenv("CONDITION_LABEL") or _CONFIG.get("experiment", {}).get("condition_label"),
         turn_index=turn_index,
         session_turn_index=session_turn_index,
@@ -798,12 +829,7 @@ async def _run_tool_loop(
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     f"{OLLAMA_HOST}/v1/chat/completions",
-                    json={
-                        "model": MODEL_NAME,
-                        "messages": messages,
-                        "tools": tool_schemas,
-                        "stream": False,
-                    },
+                    json=_ollama_request_payload(messages, tool_schemas),
                     timeout=OLLAMA_TIMEOUT,
                 )
                 resp.raise_for_status()

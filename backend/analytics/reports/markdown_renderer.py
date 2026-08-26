@@ -798,12 +798,20 @@ def render_experiment_report_markdown(report: dict) -> str:
     generated_at = report.get("generated_at", "unknown")
     ss = report.get("series_summary") or {}
     ic = report.get("integrity_checks") or {}
+    provenance = report.get("provenance") or {}
+    ollama_request = provenance.get("ollama_request") or {}
 
     header = (
         f"# Experiment Report\n\n"
         f"**Experiment:** `{experiment_id}`  \n"
         f"**Condition:** `{condition_label}`  \n"
         f"**Generated:** {generated_at}  \n"
+        f"**Runtime config hash:** `{provenance.get('config_hash') or 'unavailable'}`  \n"
+        f"**Resolved edge RNG seed:** "
+        f"`{provenance.get('resolved_edge_update_rng_seed', 'unavailable')}`  \n"
+        f"**Bulk model sampling:** `{ollama_request.get('model', 'unavailable')}`; "
+        f"source `{ollama_request.get('sampling_source', 'unavailable')}`; parameters "
+        f"`{ollama_request.get('sampling_parameters', 'unavailable')}`  \n"
         f"**Series:** {ss.get('series_count', 0)} | "
         f"**Total runs:** {ss.get('total_run_count', 0)}\n"
     )

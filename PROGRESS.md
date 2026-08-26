@@ -2,6 +2,23 @@
 
 ## Current state
 
+**2026-08-26 update: Milestone 45 Phase 1 built — the path-back reconstructor,
+zero mismatches across all 8 archived runs.** `scripts/alpha_d_pathback.py` +
+30 tests (`tests/test_scripts/test_alpha_d_reconstructor.py`), on branch
+`milestone-45-pathback-reconstructor`, PR pending. All three tie-back
+components (α/β, topology, slate) passed clean on the first full run against
+real data — 1,680 real turns, 0 mismatches — confirming `retrieve()` has had
+no silent drift from what the archived sources can reconstruct. One design
+point the plan hadn't nailed down: conv edges (prompt→input, input→output,
+output→activated) get random UUIDs at creation that nothing downstream
+records once the graph is wiped, so the reconstructor tracks them by
+`(source_mu_id, target_mu_id)` pair instead — sound because every conv pair
+is created at most once ever. Full rationale in the script's module
+docstring and in BUILD-PLAN.md's new "Phase 1 build notes" subsection.
+**Next step: Milestone 45 Phase 2** — the metrics layer (four-bucket
+partition, chase-down yield, K2 runner-up rank distribution, anchor
+strength), the first read, and `docs/sensitivity_baseline.md`.
+
 **2026-08-24 update: Alpha item D scoped and filed as Milestones 45 + 46; M44 merged.**
 Milestone 44 is merged (cb39b85) and `main` is clean. The Alpha D metric
 discussion resumed and closed all three open questions from the 2026-08-20
@@ -48,9 +65,8 @@ centrality term rather than a learned-direction one, so conv MUs gain K1 rank
 mechanically at ~6 edges/turn independent of feedback. Flagged as a knob
 candidate; not changed now.
 
-**Next step: build Milestone 45 Phase 1** — `scripts/alpha_d_pathback.py`,
-the reconstructor, with the three-component tie-back across all 8 learned
-runs as its Done-when. M46 follows.
+**Next step (superseded — see the 2026-08-26 update above): build Milestone
+45 Phase 1.** Phase 1 is now complete; Phase 2 is next. M46 follows M45.
 
 **2026-08-20 update (2): Plan Alpha item D discussion opened; a measurement defect found and filed as Milestone 44.**
 Reading `retrieve()` to settle item D.a's metric definitions surfaced that
@@ -1655,3 +1671,57 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
     diagrams, Done-when criteria, and risk lists. Status block updated.
   - Milestone 45 status: PROPOSED — awaiting build. Next action is Phase 1,
     `scripts/alpha_d_pathback.py`.
+
+- 2026-08-26: /build — Milestone 45 Phase 1 complete (the path-back
+  reconstructor and its three-component tie-back)
+  - `scripts/alpha_d_pathback.py` rebuilds per-run graph topology and edge
+    (alpha, beta) trajectories from sources that survive a graph wipe:
+    `analytics` + `edge_update_events` in `memory/graph.db`, and
+    `seed_fixtures/seed_v3.json.gz`. Deliberately never reads the live
+    `edges` / `memory_units` tables — those hold only the most recent
+    wipe+reseed's state (34 seed MUs today; none of the 8 archived runs'
+    conversation topology survives there).
+  - **Design point the milestone spec left open: conv edges have no
+    recoverable `edge_id`.** `graph_store.create_edge()` for prompt→input,
+    input→output, and output→activated-MU edges never passes an `edge_id`
+    — the store assigns a random UUID, and that UUID is gone once the live
+    edges table is wiped. The reconstructor tracks conv edges by
+    `(source_mu_id, target_mu_id)` pair instead of by id — sound because
+    every conv pair is created at most once ever (prompt/input/output MUs
+    are unique to their own turn, never reused as a source later).
+    Topology existence/completeness (component 2) is checked by pair; a
+    turn's own recorded `traversal_path` (which carries the real edge_id
+    alongside the pair) is then trusted as the enumeration for the K1→K2
+    replay (component 3) — trusted because component 2 just validated that
+    enumeration is topologically sound. Full rationale in the script's
+    module docstring; recorded in BUILD-PLAN.md's Phase 1 build notes.
+  - **All three tie-back components passed clean on the first full run
+    against real data** — no debugging iteration needed once the pair-
+    identity design was worked out. 1,680 real turns across all 8 archived
+    learned runs (exp0b rep1/2/3, exp01-cfgA rep1/2/3, exp01-cfgB rep1/2),
+    zero mismatches in alpha/beta, topology, or slate. Full run takes
+    ~0.5s (`py -3 scripts/alpha_d_pathback.py`).
+  - Confirmed empirically (not assumed): all 8 runs used seed fixture v3
+    — `memory_units` currently holds only 34 "seed:v3" MUs (v2's rows are
+    gone from a later wipe), and the v3 fixture's known MU ids (e.g.
+    `a0000001-...`) appear directly in the runs' own `activated_mu_ids`.
+  - `tests/test_scripts/test_alpha_d_reconstructor.py`: 30 tests — unit
+    coverage of each reconstruction rule (seed vs. conv creation priors,
+    conv-pair visibility timing, directedness — the schema's `direction`
+    column is never read, only `source_mu_id` /`target_mu_id`) and every
+    mismatch-detection branch of the three `verify_*` functions against
+    synthetic data, plus real-data tests (skip if the archived DB/fixture
+    aren't present in the checkout) including the full 8-run acceptance
+    check that is the milestone's actual Done-when.
+  - `memory/audit.log` (one of the six sources the milestone plan names)
+    turned out not load-bearing for any of the three Phase 1 components —
+    none need MU source_type or text, only ids and edge topology. Still
+    built as `load_audit_registry()`, a reusable utility for Phase 2.
+  - Full suite: 1,257 passed (1,227 pre-existing + 30 new), 2 pre-existing
+    unrelated skips, no regressions.
+  - Branch: `milestone-45-pathback-reconstructor` (fresh branch off main
+    post-PR-#81-merge — the M45/M46 planning-docs branch/PR from
+    2026-08-24 was separate and is already merged).
+  - Milestone 45 Phase 1 status: COMPLETE. Phase 2 (metrics layer, first
+    read, `docs/sensitivity_baseline.md`) not yet built. AWAITING PAUL: PR
+    review + merge.

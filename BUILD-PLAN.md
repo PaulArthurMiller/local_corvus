@@ -6740,7 +6740,14 @@ thing it was written from.
 
 ## Path-Back Instrumentation (Plan Alpha D) — Milestone 45
 
-**Status:** PROPOSED 2026-08-24. Scope agreed in the Alpha D discussion
+**Status:** Phase 1 COMPLETE 2026-08-26 — the reconstructor and its
+three-component tie-back, verified against all 8 archived learned runs
+(1,680 real turns, zero mismatches in all three components). Phase 2 (the
+metrics layer, the first read, and `docs/sensitivity_baseline.md`) not yet
+built. See the "Phase 1 build notes" subsection below for what the tie-back
+confirmed and one design point the plan didn't fully specify.
+
+**Original scope note:** PROPOSED 2026-08-24. Scope agreed in the Alpha D discussion
 session of the same date; supersedes the three-independent-rates sketch in
 `EXPERIMENT-PLAN.md` item D.a. Two phases, sequential. **Does not depend on
 M44** — the archived-data script never calls the probe endpoint — so this
@@ -6936,6 +6943,40 @@ clean and is wrong.
 
 **Estimate:** one to two sessions. The reconstruction rules are simple; the
 tie-back across 1,680 turns is where the real work and the real findings are.
+
+#### Phase 1 build notes (2026-08-26)
+
+`scripts/alpha_d_pathback.py` + `tests/test_scripts/test_alpha_d_reconstructor.py`
+(30 tests). Ran clean against real data on the first full pass — all three
+components, zero mismatches, across all 8 runs — which is itself informative:
+it confirms `retrieve()`'s selection logic has had no silent drift from what
+the six archived sources can reconstruct, the exact drift risk this
+milestone's Done-when exists to catch.
+
+**One design point the plan didn't fully specify: conv edges have no
+recoverable `edge_id`.** `graph_store.create_edge()` calls for prompt->input,
+input->output, and output->activated-MU edges never pass an `edge_id` — the
+store assigns a random UUID internally, and the live `edges` table that once
+held it has been wiped and reseeded several times since (today it holds only
+the 34 seed MUs from the most recent reseed). So the reconstructor can't key
+conv edges by id the way it keys seed edges (deterministic, known upfront
+from the fixture file). It instead tracks conv edges by `(source_mu_id,
+target_mu_id)` pair — sound because every conv pair is created **at most
+once ever**: prompt/input/output MUs are unique to their own turn and are
+never reused as a source in a later turn's creation step. Topology existence
+and completeness (component 2) are checked by pair; a turn's own recorded
+`traversal_path` (which carries the real edge_id alongside the pair) is then
+trusted as the enumeration for the K1->K2 replay (component 3) — trusted
+specifically because component 2 just validated that enumeration is
+topologically correct, not invented or missing anything. Full rationale is
+in the script's module docstring.
+
+A second consequence of this: `memory/audit.log` (one of the six sources the
+plan names) turned out **not load-bearing for any of the three Phase 1
+tie-back components** — none of them need MU source_type or text, only ids
+and edge topology. It's still loaded via `load_audit_registry()` as a
+reusable "six sources" utility for Phase 2, which may want MU text/type for
+display.
 
 ### Phase 2 — the metrics, the first read, and the sensitivity baseline
 
@@ -7630,6 +7671,6 @@ experiment_ids.
 
 **Milestone 44:** Complete — see the "Probe Measurement Reads the Resolved Config" section above for the full technical record. Summary: Phase 1 fixed `POST /admin/run-probe`'s own independent disk read of `config.yaml` (missed by M43's audit) to use the orchestrator's resolved `_CONFIG`, plus a new enforced loader-inventory test so a future miss fails CI instead of waiting for the next milestone to notice by hand. Phase 2 added a §6.3 `probe_retrieval_geometry` check and proved it against real archived data — FAIL on exactly the two runs known to carry the defect (exp01-cfgB rep1/rep2), PASS on the other six. Both phases' Done-when criteria were met with live verification against a real Docker backend and the real `graph.db`, not fakes. Branch: `milestone-44-probe-resolved-config-build`.
 
-**Milestone 45:** Proposed 2026-08-24 — Path-Back Instrumentation (Plan Alpha D). Two phases: an archived-data graph reconstructor validated by a three-component tie-back (α/β, topology, slate) across all 8 learned runs, then the metrics layer — a four-bucket exclusive partition (reached / outbid / out-of-depth / disconnected) as headline, chase-down yield and K2 runner-up rank distribution as priced counterfactuals, anchor strength as the write-side longitudinal metric. `docs/sensitivity_baseline.md` is created in Phase 2 with the two structural findings from the Alpha D scoping (~6% of created edges ever weight-updated; K1's `edge_weight_sum` is undirected total degree). Not gated on M44 — the script never calls the probe endpoint. **Next milestone to build.**
+**Milestone 45:** Proposed 2026-08-24 — Path-Back Instrumentation (Plan Alpha D). Two phases: an archived-data graph reconstructor validated by a three-component tie-back (α/β, topology, slate) across all 8 learned runs, then the metrics layer — a four-bucket exclusive partition (reached / outbid / out-of-depth / disconnected) as headline, chase-down yield and K2 runner-up rank distribution as priced counterfactuals, anchor strength as the write-side longitudinal metric. `docs/sensitivity_baseline.md` is created in Phase 2 with the two structural findings from the Alpha D scoping (~6% of created edges ever weight-updated; K1's `edge_weight_sum` is undirected total degree). Not gated on M44 — the script never calls the probe endpoint. **Phase 1 COMPLETE 2026-08-26** (`scripts/alpha_d_pathback.py`, 30 tests, zero mismatches across all 8 runs/1,680 turns — see the Phase 1 build notes in the milestone's own section for the conv-edge-identity design point). **Phase 2 next to build.**
 
 **Milestone 46:** Proposed 2026-08-24 — Probe Traversal Instrumentation. `probe_results` gains `traversal_path` and `hop_depth_per_retrieved_mu` so future runs need no reconstruction; the Done-when is a live probe row that M45's reconstructor reproduces exactly. Follows M45. The `admin.py` half of its originally-scoped bundle already shipped as M44 Phase 1.

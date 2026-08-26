@@ -63,7 +63,10 @@ hand-editing `config.yaml` between runs.** Two Run Plan fields carry it:
   derived constant (`_CONFIG_HASH`, `EDGE_UPDATE_CFG`, …) is computed. An
   unknown dotted key — a typo, or a key that assumes a `config.yaml` shape
   that has since changed — is a **hard fail at backend startup**, not a
-  silent no-op; a typo can never look like it took effect.
+  silent no-op; a typo can never look like it took effect. For a **queue**
+  run this same check also runs offline at preflight (see "Queue preflight"
+  below) — a bad key is a `--dry-run` hard stop, not a crash hours into an
+  unattended session at that plan's own restart.
 - **`expected_config`** (same dotted-key shape) is checked against
   `GET /admin/effective-config` before any graph mutation (`runner.py`
   preflight, `queue.py` step 5). A mismatch — including a declared key
@@ -347,8 +350,21 @@ Each entry in `plans`:
    distinct `random_seed` values").
 4. Per-plan prompt-bank resolution (see below) → hard stop if any plan would
    need fresh Sonnet generation.
-5. Backend health check + judge model availability for every distinct judge
-   model referenced.
+5. Backend health check; for every enabled plan, `expected_config` is asserted
+   against the live backend **only when that plan has no `config_overrides`**
+   (an override-carrying plan's config only becomes real once its own
+   per-condition restart applies it — asserting against whatever the
+   *previous* plan left running would false-positive). A plan **with**
+   `config_overrides` instead gets a shape check: every dotted key must
+   resolve to an existing `config.yaml` leaf (checked against the live
+   config's shape, not its values) — a typo'd or renamed key is a hard stop
+   here, not a `ConfigOverrideError` crash hours into an unattended queue at
+   that plan's own restart. This is a shape check only; a resolvable key
+   holding the *wrong* value is not caught here — `config_overrides` **is**
+   the plan's intended value, and its provenance is recorded on every real
+   run row via `analytics.full_config_snapshot` for after-the-fact audit.
+   Judge model availability is checked for every distinct judge model
+   referenced in the same step.
 6. Aggregate budget check against `max_total_budget_usd`.
 7. Disk-space note: projected archive count (enabled plans × their condition
    counts) is logged; a free-space WARN fires below a conservative threshold

@@ -29,8 +29,10 @@ from harness.client import BackendConnectivityError
 from harness.config_assert import (
     find_config_mismatches,
     find_dotted_key_collisions,
+    find_unresolvable_override_keys,
     format_config_mismatches,
     format_dotted_key_collisions,
+    format_unresolvable_override_keys,
 )
 from harness.cost import JUDGE_COST_PER_CALL_USD, estimate_prerun_cost
 from harness.manifest import compute_config_hash, compute_run_id, now_iso
@@ -498,6 +500,21 @@ def run_preflight(
             if mismatches:
                 raise QueuePreflightError(
                     f"plan {item['entry'].plan_path!r}: {format_config_mismatches(mismatches)}"
+                )
+        # Milestone 47 follow-up — a plan's config_overrides is exempt from
+        # the expected_config comparison above (its config only becomes real
+        # once its own restart runs), but that left NO preflight check at all
+        # for config_overrides itself: a typo'd or renamed dotted key would
+        # sail through --dry-run and only surface as a ConfigOverrideError
+        # crash hours into an unattended overnight queue. This is a shape
+        # check only (does the key resolve), not a value check — see
+        # find_unresolvable_override_keys()'s docstring for why a wrong-but-
+        # resolvable value is deliberately left unchecked here.
+        if plan.config_overrides:
+            unresolvable = find_unresolvable_override_keys(plan.config_overrides, live_config)
+            if unresolvable:
+                raise QueuePreflightError(
+                    f"plan {item['entry'].plan_path!r}: {format_unresolvable_override_keys(unresolvable)}"
                 )
 
     distinct_judge_models = sorted({item["plan"].judge.model for item in loaded})

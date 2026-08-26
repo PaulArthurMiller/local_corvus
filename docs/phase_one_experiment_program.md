@@ -144,7 +144,7 @@ is one the theorizer will care about. Baseline reference is R1.
 | V3 | `credit_scale` | 3.0 | Learning-rate knob; equivalence to counter discounting means this stands in for decay until `decay` is implemented. |
 | V4 | `negative_scope` | `terminal` | Tests whether path-wide negative credit is suppressing the stepping stones F1 says are present. |
 | V5 | `evidence_cap.enabled` | `true`, `n_max: 50` | Constant-effective-learning-rate variant; keeps late-session priors movable. |
-| V6 | K1 `edge_weight_sum` centrality term | flagged off (needs a config knob — CC) | Standing finding: undirected degree rewards conv-MU accumulation independent of feedback. Must be a flag, not a deletion. |
+| V6 | `k1_centrality_weight` | `0.0` | Standing finding: undirected degree rewards conv-MU accumulation independent of feedback. Knob delivered by BUILD-PLAN M47 (default `1.0` = pre-M47 behavior). **Read the V6 pre-registration entry in `sensitivity_baseline.md` first** — the term drives 88% K1-set churn, its removal makes K1 *more* conv-dominated, and it also carries seed_v3's designed hub entry points. Report per-session: the effect decays after session 2. |
 
 Not in R3, with rationale: `weight_mode: mean` (already characterized as a
 structural null for seed_v3); `decay.*` (not implemented; backend refuses
@@ -230,6 +230,20 @@ Draft at R5, informed by which metrics actually moved.
 
 ## 6. Progress log (append-only, newest first)
 
+- **2026-08-26 (later 2)** — V6 knob scoped as BUILD-PLAN M47
+  (`hyperparameters.k1_centrality_weight`, scalar, default 1.0); §7-1a
+  resolved and the R3 V6 row updated to the concrete override. A **V6
+  pre-registration entry** was written to `sensitivity_baseline.md` ahead of
+  the run, from a counterfactual replay of 630 archived baseline turns: the
+  centrality term is ~25% of the K1 score by magnitude but changes the K1 set
+  on 88.4% of turns and the top entry point on 71.3%; removing it makes K1
+  *more* conv-dominated (88.8% → 95.9%) because its one systematic effect is
+  holding seed_v3's hubs in K1; and the effect is an early-session effect that
+  decays by session 3 as conv MUs' degree overtakes a hub's fixed 8.0. Two
+  consequences for R3: V6 will not be a null for lack of leverage, and it must
+  be read per-session or the pooled headline will dilute it. The standing
+  finding at the foot of `sensitivity_baseline.md` gained a cross-reference
+  noting the aggregate inversion.
 - **2026-08-26 (later)** — §7-1 resolved from BUILD-PLAN M40; re-attach
   rule added to §1-1 and R3 done-when. V6 knob milestone requested. §5
   distinguishability rule left as draft until the theorizer is built.
@@ -249,9 +263,13 @@ Draft at R5, informed by which metrics actually moved.
    Kept as a confirmation arm — now codified as the re-attach rule in §1-1.
    `experiment_protocol.md` still documents three conditions as the standard;
    §8 asks it to cross-reference this.
-1a. **V6 knob (K1 centrality term flag).** Planner to add as a milestone
-   before R3 opens. R3 cannot start with V6 in the queue until it lands;
-   V1–V5 may run ahead of it if needed.
+1a. **V6 knob (K1 centrality term flag).** *Resolved 2026-08-26* —
+   scoped as **BUILD-PLAN.md Milestone 47**, `hyperparameters.k1_centrality_weight`
+   (scalar coefficient, default `1.0` = pre-M47 behavior bit-for-bit, `0.0` =
+   this variation's "flagged off"). Scalar rather than boolean so Phase 2 gets
+   a dial without a second milestone; §1-6 pre-registration is what keeps
+   intermediate values out of R3. Not yet built. R3 cannot start with V6 in
+   the queue until M47 lands; V1–V5 may run ahead of it if needed.
 2. **cfgB disposition.** Re-run under fixed wiring as R3-V1, or archive as
    invalid. Recommendation: archive; V1 supersedes it. *Owner: Paul, after
    R1.*

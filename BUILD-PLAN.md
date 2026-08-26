@@ -7196,6 +7196,212 @@ turns" to "validated directly."
 
 ---
 
+## K1 Centrality Coefficient (R3-V6 Knob) — Milestone 47
+
+**Status:** PROPOSED 2026-08-26. Gates `phase_one_experiment_program.md`
+§3 R3-V6 (§7-1a: "Planner to add as a milestone before R3 opens. R3 cannot
+start with V6 in the queue until it lands; V1–V5 may run ahead of it if
+needed."). Independent of M46 — different files, no shared surface. Either
+order works; M47 is the one on the R3 critical path.
+
+### What R3 needs and cannot currently express
+
+`_k1_score()` (`backend/memory/retrieval.py:239-240`) hard-codes the
+centrality term:
+
+```
+def _k1_score(mu_id: str) -> float:
+    return edge_weight_sum.get(mu_id, 0.0) + candidate_scores.get(mu_id, 0.0)
+           └────── V6's target, unconditional ──────┘
+```
+
+There is no config leaf for it, and `apply_config_overrides()` **hard-fails
+on a dotted key that does not resolve to an existing `config.yaml` leaf**
+(`core/config_overrides.py`) — deliberately, so a typo can never look like it
+took effect. So V6 cannot be expressed as a plan override until the leaf
+exists. That failure mode is loud, not silent; this milestone is about
+capability, not about a bug.
+
+The program doc's constraint is explicit: **"Must be a flag, not a
+deletion."** The term stays, defaulted to today's behavior, and the plan
+turns it down.
+
+### Where the term sits
+
+```
+retrieve()  —  backend/memory/retrieval.py
+──────────────────────────────────────────────────────────────────────
+
+  all_edges ──▶ weight_cache[edge_id] = compute_effective_weight(...)
+                     │                    (one draw per edge per turn)
+        ┌────────────┴──────────────┐
+        ▼                           ▼
+ ┌──────────────────────┐   ┌────────────────────────┐
+ │ edge_weight_sum[src] │   │ K2: w * dir_multiplier │ ◀── UNTOUCHED
+ │ edge_weight_sum[tgt] │   │ from K1's outgoing     │     by M47
+ │  = UNDIRECTED DEGREE │   └────────────────────────┘
+ └──────────┬───────────┘
+            │
+            ▼
+  _k1_score(mu) = C * edge_weight_sum[mu] + cumulative_bm25[mu]
+                  ▲                                        M47 adds C
+            hyperparameters.k1_centrality_weight
+            (1.0 = pre-M47 exactly · 0.0 = V6's "flagged off")
+            │
+            ▼
+  sorted_candidates ──▶ k1_ids = [:level1_k]        ← ranking changes
+                    └─▶ candidate_set_before_ranking ← ORDER changes,
+                        (edge_weight_sum still recorded verbatim)
+```
+
+Two boundaries this must not cross:
+
+- **K2 scoring is out of scope.** `weight * directional_edge_weight_multiplier`
+  is a separate use of the same weights. V6 is a K1-ranking factor; touching
+  K2 would break §1-3 (one factor per plan).
+- **`weight_cache` is out of scope.** The Thompson draw must stay one draw per
+  edge per turn, shared across every scoring site (M20's invariant). The
+  coefficient applies to the *sum*, downstream of the cache — never to the draw.
+
+### Scope
+
+1. **`config.yaml`** — new leaf under `hyperparameters`, in the Retrieval block
+   beside `retrieval_level1_top_k`:
+
+   ```yaml
+   # Coefficient on K1's edge_weight_sum centrality term (M47 / R3-V6).
+   # _k1_score(mu) = k1_centrality_weight * edge_weight_sum[mu] + cumulative_bm25[mu]
+   # edge_weight_sum is UNDIRECTED TOTAL DEGREE — it accumulates on both
+   # endpoints of every edge, so a conv MU gains K1 rank at ~6 edges/turn
+   # regardless of feedback. Range 0.0-2.0.
+   #   1.0 = pre-M47 behavior, bit-for-bit (the committed default)
+   #   0.0 = BM25-only K1 — R3-V6's pre-registered "flagged off" value
+   # Read docs/sensitivity_baseline.md's V6 pre-registration entry before
+   # changing this: at 0.0, seed_v3's hub entry points essentially vanish.
+   k1_centrality_weight: 1.0
+   ```
+
+   Scalar rather than boolean: `0.0` *is* the pre-registered off value exactly,
+   so nothing about V6 changes, and Phase 2 gets a dial without a second
+   milestone. §1-6 pre-registration is what keeps intermediate values out of
+   R3.
+
+2. **`backend/memory/retrieval.py`** — read the leaf beside the other `hp.get`
+   reads at the top of `retrieve()`, apply it inside `_k1_score()`. Nothing else
+   moves. `candidate_set_before_ranking` keeps recording raw `edge_weight_sum`
+   per candidate — **it is measurement, not scoring**, and path-back analysis
+   needs it to price what the term would have done. Same for
+   `RetrievalResult.edge_contributions`.
+
+3. **Tests** (`tests/test_memory/test_retrieval.py`):
+   - `k1_centrality_weight: 1.0` reproduces the pre-M47 K1 slate **exactly** on
+     a fixture where centrality and BM25 disagree — equality, not closeness.
+   - `0.0` yields the BM25-only ordering on that same fixture.
+   - `0.5` lands between them (proves the coefficient is applied, not branched).
+   - Absent key defaults to 1.0 (minimal test configs must keep passing).
+   - `candidate_set_before_ranking[*].edge_weight_sum` and `edge_contributions`
+     are unchanged at `0.0` — the recorded centrality is raw, not scaled.
+   - A `CONFIG_OVERRIDES_JSON` of `hyperparameters.k1_centrality_weight: 0.0`
+     resolves through `apply_config_overrides()` without raising (the leaf
+     genuinely exists).
+
+4. **`docs/experiment_protocol.md`** — add the knob to the sweepable-knob
+   reference, pointing at the sensitivity entry. Fold into the §8 errata pass
+   if that is still open.
+
+5. **The R3-V6 plan file** — `config_overrides` and `expected_config` both
+   carrying `hyperparameters.k1_centrality_weight: 0.0`, identical key sets per
+   §1-3. Two replicates, distinct `plan_id` and `random_seed`. Written but
+   **not run** by this milestone.
+
+### What this milestone does NOT do
+
+- Does not run V6. That is R3.
+- Does not change the committed default. Every existing run, report, and
+  archived comparison stays valid; `config.yaml`'s hash changes, its behavior
+  does not.
+- Does not touch `scripts/verify_seed_v3.py`, which carries its own copy of the
+  K1 formula (lines 246-256) for fixture verification. See the open question.
+
+### Why the blast radius is small — three things already hold
+
+- **M45's reconstructor is formula-agnostic.** Its slate component replays K1 as
+  `candidate_set_before_ranking[:level1_k]` off the *already-sorted* recorded
+  list (`alpha_d_pathback.py:730`). As long as that list keeps coming from
+  `sorted_candidates`, tie-back component 3 passes unchanged at any coefficient.
+  **Keep that ordering guarantee** — it is the reason no reconstructor work
+  appears in this scope.
+- **§6.3's `probe_retrieval_geometry` check tests slate *size*** (K1+K2), not
+  composition. A coefficient change cannot trip it.
+- **Probe measurement already inherits the resolved config** (M44 Phase 1:
+  `run_probe()` uses `orchestrator._CONFIG`). The knob reaches probe turns
+  without new wiring — the exact gap that invalidated cfgB. **Verify it live
+  anyway**; that is the done-criterion below.
+
+### Done when
+
+- [ ] Full suite green (`python -m pytest tests/ --ignore=tests/integration`),
+      no regressions.
+- [ ] **Live, against a real Docker backend and the real graph.db** — the M44
+      pattern, run twice from the same graph state: boot with no override,
+      `POST /admin/run-probe`, record the slate; boot with
+      `CONFIG_OVERRIDES_JSON={"hyperparameters.k1_centrality_weight": 0.0}`,
+      same probe, record the slate. **The two must differ**, and
+      `GET /admin/effective-config` must report `0.0` on the second. A probe
+      whose slate is identical across the two means the knob did not reach
+      measurement — treat that as the M44 defect recurring, not as a null.
+- [ ] `git status` clean afterward; backend restored to its baseline hash;
+      `config.yaml` committed at `1.0`.
+- [ ] The R3-V6 plan file passes `--dry-run` preflight with zero mutation and
+      prints `expected_config verified … 1 key(s) matched`.
+- [ ] `phase_one_experiment_program.md` §3 R3 V6 row updated from "needs a
+      config knob — CC" to the concrete override, §7-1a resolved, §6 appended.
+
+**Estimate:** half a session. The code is roughly four lines; the tests and the
+live check are the milestone.
+
+### Risks and open questions
+
+- ⚠ **This knob is not marginal, and the direction is genuinely open.** The
+  pre-registration analysis measured it: centrality is only ~25% of the K1
+  score by magnitude but changes the K1 set on 88% of turns and the top entry
+  point on 71%. Removing it makes K1 *more* conv-dominated (88.8% → 95.9%),
+  because its one systematic effect is holding seed hubs in K1 — and hubs sit
+  at `edge_weight_sum` 8.0 by seed_v3's explicit design (`seed_v3_mu_spec.md`
+  §2: "hub K1 centrality roughly doubles … (desired)"). V6 therefore also tests
+  the fixture's designed entry-point structure. Full numbers and the per-session
+  decay in `docs/sensitivity_baseline.md`'s V6 entry. **Nothing to fix here —
+  it must simply be read before the run, not after.**
+- ⚠ **Effect concentrates in sessions 1–2 and decays** (hub share of K1:
+  29.9% → 3.7% across five sessions, as the top conv MU's degree climbs past
+  a hub's fixed 8.0). A pooled headline will dilute exactly where the
+  mechanisms differ. **R3-V6's read should be per-session**, and if §5's
+  distinguishability rule is still pooled-only when V6 runs, say so in the
+  entry rather than quietly reporting a diluted null.
+- ? **`scripts/verify_seed_v3.py` carries a second copy of the K1 formula.**
+  It verifies the frozen fixture, reads no override, and is unaffected while
+  the default stays 1.0 — but the two formulas can now silently diverge, which
+  is the bug class `test_config_loader_inventory.py` exists to kill. Options:
+  (a) leave it, add a comment naming M47 as the divergence point; (b) mirror
+  the coefficient from disk config. Recommend **(a)** — it is a fixture-integrity
+  tool measuring a frozen artifact under fixed assumptions, and mirroring would
+  imply the fixture's verification should track a runtime sweep. *Decide during
+  build; record whichever, and do not leave it undecided.*
+- ? **Out-degree-only is the untested middle case.** The complaint in the
+  standing finding is *undirected* degree, not centrality as such — counting
+  only `source_mu_id` would keep a learned-direction centrality signal while
+  removing the accumulate-on-both-endpoints effect. Deliberately **not**
+  pre-registered for R3 (§1-6: additions go in §7 with a rationale and a date).
+  A scalar coefficient does not reach it; it needs a mode enum. Flag for Phase 2
+  if V6 comes back *distinguishable* — that is when the middle case becomes
+  worth its own knob.
+- ⚠ **Do not let the coefficient reach the weight cache.** Applying it per-edge
+  rather than to the summed degree would rescale K2 scoring too and silently
+  make V6 a two-factor variation, violating §1-3. The tests above pin K2 by
+  asserting the pre-M47 slate at 1.0.
+
+---
+
 ## Status
 
 ```
@@ -7746,3 +7952,5 @@ experiment_ids.
 **Milestone 45:** Proposed 2026-08-24 — Path-Back Instrumentation (Plan Alpha D). Two phases: an archived-data graph reconstructor validated by a three-component tie-back (α/β, topology, slate) across all 8 learned runs, then the metrics layer — a four-bucket exclusive partition (reached / outbid / out-of-depth / disconnected) as headline, chase-down yield and K2 runner-up rank distribution as priced counterfactuals, anchor strength as the write-side longitudinal metric. `docs/sensitivity_baseline.md` is created in Phase 2 with the two structural findings from the Alpha D scoping (~6% of created edges ever weight-updated; K1's `edge_weight_sum` is undirected total degree). Not gated on M44 — the script never calls the probe endpoint. **Phase 1 COMPLETE 2026-08-26** (`scripts/alpha_d_pathback.py`, 30 tests, zero mismatches across all 8 runs/1,680 turns — see the Phase 1 build notes in the milestone's own section for the conv-edge-identity design point). **Phase 2 next to build.**
 
 **Milestone 46:** Proposed 2026-08-24 — Probe Traversal Instrumentation. `probe_results` gains `traversal_path` and `hop_depth_per_retrieved_mu` so future runs need no reconstruction; the Done-when is a live probe row that M45's reconstructor reproduces exactly. Follows M45. The `admin.py` half of its originally-scoped bundle already shipped as M44 Phase 1.
+
+**Milestone 47:** Proposed 2026-08-26 — K1 Centrality Coefficient (R3-V6 Knob). Adds `hyperparameters.k1_centrality_weight` (default 1.0 = pre-M47 behavior bit-for-bit; 0.0 = the pre-registered "flagged off" value) so `_k1_score()`'s undirected-total-degree term becomes a plan override instead of a hard-coded constant. Gates `docs/phase_one_experiment_program.md` §3 R3-V6 per its §7-1a; independent of M46. ~4 lines of code — the tests and the live probe-reaches-the-knob check (the M44 pattern) are the milestone. Scoped alongside a pre-registration entry in `docs/sensitivity_baseline.md` measuring the term from archived data before the run: 88% K1-set churn on only ~25% of score magnitude, and removing it makes K1 *more* conv-dominated (88.8% → 95.9%) because its one systematic effect is holding seed_v3's hubs in K1.

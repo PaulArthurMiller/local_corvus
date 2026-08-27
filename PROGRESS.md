@@ -2,6 +2,60 @@
 
 ## Current state
 
+**2026-08-27 update (1): Codex's reporting audit salvaged; two control-shadow
+sanity checks found reporting unearned verdicts and fixed.**
+Review session, not a milestone. Codex ran a reporting/data-suitability audit
+online (PR #86, `codex/review-reporting-features-and-data-collection`) ahead of
+the autonomous Karpathy loop, and made code changes beyond the report that was
+asked for. **Decision: close #86 without merging, keep only the document.** Its
+provenance code (runtime block in `full_config_snapshot`, top-level
+`provenance` in the experiment report, Markdown header fields) was correct and
+behavior-neutral — the Ollama payload was verified byte-identical — but it is
+**forward-only**: every existing analytics row predates the `runtime` block, so
+it buys nothing for the Alpha A-D corpus. Deferred so provenance can be built
+once against the audit's fuller "Still required" list (plan_id, content hashes
+rather than version labels, harness/backend git SHAs, schema versions) instead
+of extended piecemeal. Two defects in the audit's PR were noted and not
+inherited: a Markdown field mislabelled "Runtime config hash" when the value is
+`sha256(_CONFIG)` and excludes the runtime block, and a
+`.get(key, 'unavailable')` fallback that never fires because the key is always
+set (renders `None` for every pre-PR experiment).
+
+**A separate temperature pin was split out of that PR first**, at review
+request: bulk turns send no sampling params, so all of exp0/exp0b/exp01 ran at
+Ollama's model default. Pinning to 0.0 would change the data-generating process
+mid-programme — collapsing the sampling-noise floor the Phase 1 rule compares
+against, and gutting the replicate variance the same audit wants to measure. If
+it is ever pinned, `backend/memory/extractor.py`'s summarisation call needs the
+same treatment (it also sends none, and its summary MU is wired into the graph
+and into `activated_mu_ids`), and exp02 must be treated as a new baseline
+rather than pooled with exp01. Not done; recorded as an open decision.
+
+**Two real defects were found by verifying the audit's P1 claims** and are
+fixed on `claude-reporting-audit-and-control-fixes` (PR #87):
+`_check_random_weights_rerandomized` took std-dev **across different edges** of
+their **present-day** weights from the live `edges` table — neither the right
+quantity (re-randomisation is per-edge across turns) nor the right source. All
+1324 live edges now sit at `0.5` after a later reseed, so the check returned
+**FAIL for both real random-control experiments**, whose weights did vary. Now
+computed per-edge from each run's own `edge_weights_used`; verified through the
+real code path against the real `graph.db` (random 0.128987 / 0.114395 PASS,
+static 0.0 FAIL). `random_control_variance_floor` stays 0.05 — it already
+separates 0.11-0.13 from 0.0, so `config.yaml` is untouched. Second defect:
+malformed `weight_updates` JSON was coerced to `[]` in both the static and
+feedback-correlation checks, and `[]` is exactly their PASS condition, so
+corrupted evidence scored as a clean control; now an integrity FAIL naming the
+run_ids. The two replaced tests had encoded the first bug — the old "PASS" case
+built five distinct edges with one weight each and called that
+re-randomisation. Full suite 1282 passed, 2 skipped. AWAITING PAUL: PR #87
+review + merge, and close #86.
+
+**Next step:** the audit's remaining P0/P1 items belong to the Karpathy-loop
+milestone, in its recommended order — promote Alpha D outputs to versioned
+report JSON, then immutable provenance + coverage checks, then the cross-plan
+replicate/noise-floor artifact, then the plan-contract validator. See
+`docs/reporting_data_audit_2026-08-26.md`.
+
 **2026-08-26 update (4): Milestone 47 built and complete — the R3-V6 config
 knob is live, tested, and verified against a real backend; not run.**
 `/build` session. `hyperparameters.k1_centrality_weight` added to

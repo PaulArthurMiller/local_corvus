@@ -85,6 +85,7 @@ def _make_record(
     activated_edge_ids=None,
     turn_index: int = 1,
     condition_label: str = "static-weight",
+    edge_weights_used=None,
 ) -> dict:
     """Build a minimal run record dict ready for store.insert_run()."""
     return {
@@ -111,6 +112,7 @@ def _make_record(
         "traversal_path": [],
         "hop_depth_per_retrieved_mu": {},
         "edge_contributions": {},
+        "edge_weights_used": edge_weights_used or {},
         "assembled_prompt_json": [],
         "config_hash": None,
         "full_config_snapshot": {},
@@ -173,6 +175,24 @@ class TestCheckStaticZeroWeightChanges:
             assert result["status"] == "FAIL"
             assert result["violation_count"] == 3
 
+    def test_malformed_weight_updates_is_a_failure_not_an_empty_reading(self):
+        """
+        Regression: unparseable weight_updates used to be coerced to [], which
+        reads as "no weight updates" — the exact PASS condition. Corrupted
+        evidence must fail the control, not silently satisfy it.
+        """
+        with TempDB() as store:
+            clean = _make_record(experiment_id="exp-static", weight_updates=[], turn_index=1)
+            async_run(store.insert_run(clean))
+            bad = _make_record(experiment_id="exp-static", weight_updates=[], turn_index=2)
+            bad["weight_updates"] = "[{truncated"
+            async_run(store.insert_run(bad))
+
+            result = async_run(_check_static_zero_weight_changes(store, "exp-static"))
+            assert result["status"] == "FAIL"
+            assert result["malformed_run_ids"] == [bad["run_id"]]
+            assert "unparseable" in result["reason"]
+
 
 # ---------------------------------------------------------------------------
 # _check_random_weights_rerandomized
@@ -180,47 +200,113 @@ class TestCheckStaticZeroWeightChanges:
 
 
 class TestCheckRandomWeightsRerandomized:
-    def test_skip_when_no_edges(self):
-        """No activated edges → SKIP (can't compute variance)."""
+    """
+    The property under test is per-edge variance ACROSS TURNS, which is what
+    "re-randomized" means. Dispersion across *different* edges is a different
+    quantity entirely: a frozen static control whose edges merely differ from
+    one another produces a large cross-edge spread while being, correctly, not
+    re-randomized at all.
+    """
+
+    @staticmethod
+    def _turn(edge_weights: dict, turn_index: int, experiment_id="exp-random"):
+        """One run row recording the weight actually used per traversed edge."""
+        return _make_record(
+            experiment_id=experiment_id,
+            condition_label="random-weight",
+            turn_index=turn_index,
+            edge_weights_used={
+                eid: {"alpha": 1.0, "beta": 1.0, "weight_used": w, "mode": "sample"}
+                for eid, w in edge_weights.items()
+            },
+        )
+
+    def test_skip_when_no_edge_weights_recorded(self):
+        """No edge weights recorded at all → SKIP (nothing to compute)."""
         with TempDB() as store:
-            rec = _make_record(
-                experiment_id="exp-random",
-                activated_edge_ids=[],
-                condition_label="random-weight",
-            )
-            async_run(store.insert_run(rec))
+            async_run(store.insert_run(self._turn({}, 1)))
 
             result = async_run(
                 _check_random_weights_rerandomized(store, "exp-random", 0.05)
             )
             assert result["status"] == "SKIP"
+            assert result["weight_std_dev"] is None
 
-    def test_pass_when_variance_above_floor(self):
+    def test_skip_when_no_edge_seen_more_than_once(self):
         """
-        Edges with varied weights (std-dev ≈ 0.28 > 0.05 floor) → PASS.
-        Weights [0.1, 0.3, 0.5, 0.7, 0.9] have std-dev ≈ 0.283.
+        Every edge traversed exactly once → across-turn variance is undefined,
+        so the honest answer is SKIP, not a number.
         """
         with TempDB() as store:
-            src = _mu_id()
-            tgt = _mu_id()
-            async_run(store.create_mu(src, "user_input", "source content"))
-            async_run(store.create_mu(tgt, "agent_output", "target content"))
+            async_run(store.insert_run(self._turn({"e1": 0.1}, 1)))
+            async_run(store.insert_run(self._turn({"e2": 0.9}, 2)))
 
-            weights = [0.1, 0.3, 0.5, 0.7, 0.9]
-            edge_ids = []
-            for w in weights:
-                eid = _edge_id()
-                edge_ids.append(eid)
-                async_run(
-                    store.create_edge(src, tgt, w, "forward", edge_id=eid)
-                )
-
-            rec = _make_record(
-                experiment_id="exp-random",
-                activated_edge_ids=edge_ids,
-                condition_label="random-weight",
+            result = async_run(
+                _check_random_weights_rerandomized(store, "exp-random", 0.05)
             )
-            async_run(store.insert_run(rec))
+            assert result["status"] == "SKIP"
+            assert result["observed_edge_count"] == 2
+            assert result["sample_size"] == 0
+
+    def test_pass_when_same_edge_varies_across_turns(self):
+        """One edge redrawn each turn: [0.1, 0.3, 0.5, 0.7, 0.9] → sd ≈ 0.283."""
+        with TempDB() as store:
+            for i, w in enumerate([0.1, 0.3, 0.5, 0.7, 0.9], start=1):
+                async_run(store.insert_run(self._turn({"e1": w}, i)))
+
+            result = async_run(
+                _check_random_weights_rerandomized(store, "exp-random", 0.05)
+            )
+            assert result["status"] == "PASS"
+            assert result["weight_std_dev"] > 0.05
+            assert result["sample_size"] == 1
+
+    def test_fail_when_same_edge_frozen_across_turns(self):
+        """The bug this check exists to catch: weights never redrawn → FAIL."""
+        with TempDB() as store:
+            for i in range(1, 6):
+                async_run(store.insert_run(self._turn({"e1": 0.5}, i)))
+
+            result = async_run(
+                _check_random_weights_rerandomized(store, "exp-random", 0.05)
+            )
+            assert result["status"] == "FAIL"
+            assert result["weight_std_dev"] == 0.0
+
+    def test_fail_when_edges_differ_but_none_is_redrawn(self):
+        """
+        Regression for the original defect. Five distinct edges, each frozen at
+        its own value, spread wide across edges (0.1..0.9). The old cross-edge
+        statistic scored this PASS; across-turn variance is zero, so it FAILs.
+        """
+        with TempDB() as store:
+            frozen = {"e1": 0.1, "e2": 0.3, "e3": 0.5, "e4": 0.7, "e5": 0.9}
+            for i in range(1, 4):
+                async_run(store.insert_run(self._turn(frozen, i)))
+
+            result = async_run(
+                _check_random_weights_rerandomized(store, "exp-random", 0.05)
+            )
+            assert result["status"] == "FAIL"
+            assert result["weight_std_dev"] == 0.0
+            assert result["sample_size"] == 5
+
+    def test_live_edges_table_does_not_affect_verdict(self):
+        """
+        Regression for the second half of the defect: the verdict must come
+        from the historical record, not present-day `edges`. A reseed that
+        flattens every live edge to 0.5 must not turn a varying control into
+        a FAIL.
+        """
+        with TempDB() as store:
+            src_mu, tgt_mu = _mu_id(), _mu_id()
+            async_run(store.create_mu(src_mu, "user_input", "source"))
+            async_run(store.create_mu(tgt_mu, "agent_output", "target"))
+            # Post-reseed live state: one uniform weight everywhere.
+            async_run(store.create_edge(src_mu, tgt_mu, 0.5, "forward", edge_id="e1"))
+
+            for i, w in enumerate([0.05, 0.42, 0.88, 0.21], start=1):
+                async_run(store.insert_run(self._turn({"e1": w}, i)))
 
             result = async_run(
                 _check_random_weights_rerandomized(store, "exp-random", 0.05)
@@ -228,34 +314,21 @@ class TestCheckRandomWeightsRerandomized:
             assert result["status"] == "PASS"
             assert result["weight_std_dev"] > 0.05
 
-    def test_fail_when_all_weights_identical(self):
-        """All edges at weight 0.5 → zero variance → FAIL."""
+    def test_malformed_edge_weights_used_is_a_failure_not_an_empty_reading(self):
+        """Corrupted evidence must never be scored as a passing control."""
         with TempDB() as store:
-            src = _mu_id()
-            tgt = _mu_id()
-            async_run(store.create_mu(src, "user_input", "source"))
-            async_run(store.create_mu(tgt, "agent_output", "target"))
-
-            edge_ids = []
-            for _ in range(5):
-                eid = _edge_id()
-                edge_ids.append(eid)
-                async_run(
-                    store.create_edge(src, tgt, 0.5, "forward", edge_id=eid)
-                )
-
-            rec = _make_record(
-                experiment_id="exp-random",
-                activated_edge_ids=edge_ids,
-                condition_label="random-weight",
-            )
-            async_run(store.insert_run(rec))
+            for i in range(1, 4):
+                async_run(store.insert_run(self._turn({"e1": 0.1 * i}, i)))
+            bad = self._turn({}, 4)
+            bad["edge_weights_used"] = "{not valid json"
+            async_run(store.insert_run(bad))
 
             result = async_run(
                 _check_random_weights_rerandomized(store, "exp-random", 0.05)
             )
             assert result["status"] == "FAIL"
-            assert result["weight_std_dev"] == 0.0
+            assert len(result["malformed_run_ids"]) == 1
+            assert "unparseable" in result["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +365,36 @@ class TestCheckZeroFeedbackEdgeCorrelation:
             )
             assert result["status"] == "PASS"
             assert result["violation_count"] == 0
+
+    def test_malformed_weight_updates_is_a_failure_not_an_empty_reading(self):
+        """Same regression as the static check: corruption must not read PASS."""
+        with TempDB() as store:
+            rid = _run_id()
+            rec = _make_record(
+                run_id=rid,
+                experiment_id="exp-ctrl",
+                weight_updates=[],
+                condition_label="static-weight",
+            )
+            rec["weight_updates"] = "[{truncated"
+            async_run(store.insert_run(rec))
+
+            fe = {
+                "feedback_event_id": str(uuid.uuid4()),
+                "run_id": rid,
+                "verdict": "thumbs_up",
+                "verdict_basis": None,
+                "turn_index": 1,
+                "is_probe_turn": False,
+            }
+            async_run(store.insert_feedback_event(fe))
+
+            result = async_run(
+                _check_zero_feedback_edge_correlation(store, "exp-ctrl")
+            )
+            assert result["status"] == "FAIL"
+            assert result["malformed_run_ids"] == [rid]
+            assert "unparseable" in result["reason"]
 
     def test_fail_when_feedback_run_has_weight_updates(self):
         """Feedback event AND non-empty weight_updates on the same run → FAIL."""

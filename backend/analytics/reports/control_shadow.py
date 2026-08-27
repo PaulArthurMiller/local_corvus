@@ -40,16 +40,40 @@ async def _check_static_zero_weight_changes(
     violation_count = 0
     violating_run_ids: list[str] = []
 
+    malformed_run_ids: list[str] = []
+
     for run in all_runs:
         wupdates = run.get("weight_updates") or []
         if isinstance(wupdates, str):
             try:
                 wupdates = json.loads(wupdates)
             except (ValueError, TypeError):
-                wupdates = []
+                # Unparseable weight_updates is corrupted evidence, not proof
+                # of zero updates. Coercing it to [] would score corruption as
+                # a clean static control — the exact bug this check exists to
+                # catch.
+                malformed_run_ids.append(run.get("run_id", ""))
+                continue
         if wupdates:
             violation_count += 1
             violating_run_ids.append(run.get("run_id", ""))
+
+    if malformed_run_ids:
+        logger.error(
+            "control_shadow static zero_weight_changes: experiment=%s FAIL "
+            "malformed weight_updates in %d run(s)",
+            control_experiment_id, len(malformed_run_ids),
+        )
+        return {
+            "status": "FAIL",
+            "violation_count": violation_count,
+            "violating_run_ids": violating_run_ids,
+            "malformed_run_ids": sorted(set(malformed_run_ids))[:20],
+            "reason": (
+                f"Malformed weight_updates in {len(malformed_run_ids)} run(s) — "
+                "unparseable evidence cannot be scored as a passing control"
+            ),
+        }
 
     status = "PASS" if violation_count == 0 else "FAIL"
     logger.info(
@@ -69,68 +93,130 @@ async def _check_random_weights_rerandomized(
     variance_floor: float,
 ) -> dict:
     """
-    Random-control sanity check: edge weights should have meaningful variance
-    across runs (std-dev > variance_floor).
+    Random-control sanity check: each edge's weight should vary across the
+    turns that used it (median per-edge std-dev >= variance_floor).
 
-    Near-zero variance means weights were accidentally frozen (static, not random).
+    Near-zero variance means weights were accidentally frozen (static, not
+    random).
 
-    Samples edge weights from activated_edge_ids across all runs in the experiment.
+    Reads the weight actually used on each turn from the run's own
+    `edge_weights_used` record. The live `edges` table must NOT be used here:
+    it holds present-day weights, so a later condition wipe/reseed flattens
+    every edge to its seed value and this check then reports FAIL for a
+    control whose weights did vary. It also cannot answer the question at all
+    — dispersion across *different* edges is not dispersion of *one* edge
+    across turns, and only the latter is what "re-randomized" means.
+
+    Malformed `edge_weights_used` JSON is an integrity failure, not an empty
+    reading: silently treating unparseable evidence as absent evidence would
+    let corruption pass as a clean result.
     """
     all_runs = await store.get_all_runs_for_experiment(control_experiment_id)
 
-    all_edge_ids: set[str] = set()
-    for run in all_runs:
-        edge_ids = run.get("activated_edge_ids") or []
-        if isinstance(edge_ids, str):
-            try:
-                edge_ids = json.loads(edge_ids)
-            except (ValueError, TypeError):
-                edge_ids = []
-        all_edge_ids.update(edge_ids)
+    # edge_id -> the weight used on each turn that traversed it
+    weights_by_edge: dict[str, list[float]] = {}
+    malformed_run_ids: list[str] = []
 
-    if not all_edge_ids:
+    for run in all_runs:
+        raw = run.get("edge_weights_used") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                malformed_run_ids.append(run.get("run_id", ""))
+                continue
+        if not isinstance(raw, dict):
+            malformed_run_ids.append(run.get("run_id", ""))
+            continue
+        for edge_id, entry in raw.items():
+            if not isinstance(entry, dict):
+                malformed_run_ids.append(run.get("run_id", ""))
+                continue
+            weight_used = entry.get("weight_used")
+            if weight_used is None:
+                continue
+            try:
+                weights_by_edge.setdefault(edge_id, []).append(float(weight_used))
+            except (TypeError, ValueError):
+                malformed_run_ids.append(run.get("run_id", ""))
+
+    if malformed_run_ids:
+        logger.error(
+            "control_shadow random weights_rerandomized: experiment=%s FAIL "
+            "malformed edge_weights_used in %d run(s)",
+            control_experiment_id, len(malformed_run_ids),
+        )
+        return {
+            "status": "FAIL",
+            "reason": (
+                f"Malformed edge_weights_used in {len(malformed_run_ids)} run(s) — "
+                "unparseable evidence cannot be scored as a passing control"
+            ),
+            "sample_size": 0,
+            "weight_std_dev": None,
+            "variance_floor": variance_floor,
+            "malformed_run_ids": sorted(set(malformed_run_ids))[:20],
+        }
+
+    # Only edges traversed on 2+ turns can show across-turn variance at all.
+    repeated = {e: w for e, w in weights_by_edge.items() if len(w) >= 2}
+
+    if not weights_by_edge:
         logger.info(
             "control_shadow random weights_rerandomized: experiment=%s no_edges SKIP",
             control_experiment_id,
         )
         return {
             "status": "SKIP",
-            "reason": "No activated edges found in control experiment",
+            "reason": "No edge weights recorded in control experiment",
             "sample_size": 0,
             "weight_std_dev": None,
             "variance_floor": variance_floor,
         }
 
-    # Fetch current weight for each unique edge
-    sampled_weights: list[float] = []
-    for edge_id in list(all_edge_ids)[:200]:  # cap at 200 for performance
-        edge = await store.get_edge(edge_id)
-        if edge is not None:
-            sampled_weights.append(edge.get("weight", 0.0))
-
-    if len(sampled_weights) < 2:
+    if not repeated:
+        logger.info(
+            "control_shadow random weights_rerandomized: experiment=%s "
+            "no_repeated_edges SKIP observed_edges=%d",
+            control_experiment_id, len(weights_by_edge),
+        )
         return {
             "status": "SKIP",
-            "reason": "Insufficient edge samples for variance computation",
-            "sample_size": len(sampled_weights),
+            "reason": (
+                "No edge was traversed on more than one turn, so across-turn "
+                "re-randomization cannot be observed"
+            ),
+            "sample_size": 0,
+            "observed_edge_count": len(weights_by_edge),
             "weight_std_dev": None,
             "variance_floor": variance_floor,
         }
 
-    mean_w = sum(sampled_weights) / len(sampled_weights)
-    variance = sum((w - mean_w) ** 2 for w in sampled_weights) / len(sampled_weights)
-    std_dev = math.sqrt(variance)
+    per_edge_std_devs = sorted(
+        math.sqrt(
+            sum((w - (sum(ws) / len(ws))) ** 2 for w in ws) / len(ws)
+        )
+        for ws in repeated.values()
+    )
+    mid = len(per_edge_std_devs) // 2
+    median_std_dev = (
+        per_edge_std_devs[mid]
+        if len(per_edge_std_devs) % 2
+        else (per_edge_std_devs[mid - 1] + per_edge_std_devs[mid]) / 2
+    )
 
-    status = "PASS" if std_dev >= variance_floor else "FAIL"
+    status = "PASS" if median_std_dev >= variance_floor else "FAIL"
     logger.info(
         "control_shadow random weights_rerandomized: experiment=%s status=%s "
-        "sample_size=%d std_dev=%.4f floor=%.4f",
-        control_experiment_id, status, len(sampled_weights), std_dev, variance_floor,
+        "repeated_edges=%d observed_edges=%d median_std_dev=%.4f floor=%.4f",
+        control_experiment_id, status, len(repeated), len(weights_by_edge),
+        median_std_dev, variance_floor,
     )
     return {
         "status": status,
-        "sample_size": len(sampled_weights),
-        "weight_std_dev": round(std_dev, 6),
+        "sample_size": len(repeated),
+        "observed_edge_count": len(weights_by_edge),
+        "weight_std_dev": round(median_std_dev, 6),
         "variance_floor": variance_floor,
     }
 
@@ -154,24 +240,47 @@ async def _check_zero_feedback_edge_correlation(
     violation_count = 0
     violating_feedback_event_ids: list[str] = []
 
+    malformed_run_ids: list[str] = []
+
     for run in all_runs:
         run_id = run.get("run_id")
         if not run_id:
             continue
+        # Parse once per run, not once per feedback event.
+        wupdates = run.get("weight_updates") or []
+        if isinstance(wupdates, str):
+            try:
+                wupdates = json.loads(wupdates)
+            except (ValueError, TypeError):
+                # See _check_static_zero_weight_changes: corrupted evidence
+                # must not read as "no weight updates".
+                malformed_run_ids.append(run_id)
+                continue
         feedback_events = await store.get_feedback_events_for_run(run_id)
         for event in feedback_events:
             # If this run has a feedback event, it should have no weight_updates
-            wupdates = run.get("weight_updates") or []
-            if isinstance(wupdates, str):
-                try:
-                    wupdates = json.loads(wupdates)
-                except (ValueError, TypeError):
-                    wupdates = []
             if wupdates:
                 violation_count += 1
                 violating_feedback_event_ids.append(
                     event.get("feedback_event_id", "")
                 )
+
+    if malformed_run_ids:
+        logger.error(
+            "control_shadow zero_feedback_edge_correlation: experiment=%s FAIL "
+            "malformed weight_updates in %d run(s)",
+            control_experiment_id, len(malformed_run_ids),
+        )
+        return {
+            "status": "FAIL",
+            "violation_count": violation_count,
+            "violating_feedback_event_ids": violating_feedback_event_ids,
+            "malformed_run_ids": sorted(set(malformed_run_ids))[:20],
+            "reason": (
+                f"Malformed weight_updates in {len(malformed_run_ids)} run(s) — "
+                "unparseable evidence cannot be scored as a passing control"
+            ),
+        }
 
     status = "PASS" if violation_count == 0 else "FAIL"
     logger.info(

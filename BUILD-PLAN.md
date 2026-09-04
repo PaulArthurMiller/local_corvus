@@ -6740,11 +6740,12 @@ thing it was written from.
 
 ## Path-Back Instrumentation (Plan Alpha D) — Milestone 45
 
-**Status:** MILESTONE COMPLETE 2026-08-26. Phase 1 — the reconstructor and
-its three-component tie-back, verified against all 8 archived learned runs
-(1,680 real turns, zero mismatches in all three components). Phase 2 — the
-metrics layer (four-bucket partition, chase-down yield, K2 runner-up rank
-distribution, anchor strength), the first read
+**Status:** MILESTONE COMPLETE 2026-08-26 (both phases; PR #82 and PR #83,
+both merged). Phase 1 — the reconstructor and its three-component tie-back,
+verified against all 8 archived learned runs (1,680 real turns, zero
+mismatches in all three components). Phase 2 — the metrics layer
+(four-bucket partition, chase-down yield, K2 runner-up rank distribution,
+anchor strength), the first read
 (`docs/evaluations/alpha_d_pathback_analysis.md`), and
 `docs/sensitivity_baseline.md`. See the "Phase 1 build notes" and "Phase 2
 build notes" subsections below for what each confirmed and the design
@@ -8084,7 +8085,7 @@ experiment_ids.
 
 **Milestone 44:** Complete — see the "Probe Measurement Reads the Resolved Config" section above for the full technical record. Summary: Phase 1 fixed `POST /admin/run-probe`'s own independent disk read of `config.yaml` (missed by M43's audit) to use the orchestrator's resolved `_CONFIG`, plus a new enforced loader-inventory test so a future miss fails CI instead of waiting for the next milestone to notice by hand. Phase 2 added a §6.3 `probe_retrieval_geometry` check and proved it against real archived data — FAIL on exactly the two runs known to carry the defect (exp01-cfgB rep1/rep2), PASS on the other six. Both phases' Done-when criteria were met with live verification against a real Docker backend and the real `graph.db`, not fakes. Branch: `milestone-44-probe-resolved-config-build`.
 
-**Milestone 45:** Proposed 2026-08-24 — Path-Back Instrumentation (Plan Alpha D). Two phases: an archived-data graph reconstructor validated by a three-component tie-back (α/β, topology, slate) across all 8 learned runs, then the metrics layer — a four-bucket exclusive partition (reached / outbid / out-of-depth / disconnected) as headline, chase-down yield and K2 runner-up rank distribution as priced counterfactuals, anchor strength as the write-side longitudinal metric. `docs/sensitivity_baseline.md` is created in Phase 2 with the two structural findings from the Alpha D scoping (~6% of created edges ever weight-updated; K1's `edge_weight_sum` is undirected total degree). Not gated on M44 — the script never calls the probe endpoint. **Phase 1 COMPLETE 2026-08-26** (`scripts/alpha_d_pathback.py`, 30 tests, zero mismatches across all 8 runs/1,680 turns — see the Phase 1 build notes in the milestone's own section for the conv-edge-identity design point). **Phase 2 next to build.**
+**Milestone 45:** Proposed 2026-08-24 — Path-Back Instrumentation (Plan Alpha D). Two phases: an archived-data graph reconstructor validated by a three-component tie-back (α/β, topology, slate) across all 8 learned runs, then the metrics layer — a four-bucket exclusive partition (reached / outbid / out-of-depth / disconnected) as headline, chase-down yield and K2 runner-up rank distribution as priced counterfactuals, anchor strength as the write-side longitudinal metric. `docs/sensitivity_baseline.md` is created in Phase 2 with the two structural findings from the Alpha D scoping (~6% of created edges ever weight-updated; K1's `edge_weight_sum` is undirected total degree). Not gated on M44 — the script never calls the probe endpoint. **Phase 1 COMPLETE 2026-08-26** (`scripts/alpha_d_pathback.py`, 30 tests, zero mismatches across all 8 runs/1,680 turns — see the Phase 1 build notes in the milestone's own section for the conv-edge-identity design point). **Phase 2 COMPLETE 2026-08-26** (PR #83, merged) — the metrics layer, 33 more tests (63 total), `docs/evaluations/alpha_d_pathback_analysis.md`, and `docs/sensitivity_baseline.md`. Headline: 80–82% OUTBID pooled vs. 0–3% DISCONNECTED — the late-session collapse is a read-side problem, not a write-side one. See the Phase 2 build notes in the milestone's own section. **Milestone 45 fully COMPLETE.**
 
 **Milestone 46:** Proposed 2026-08-24 — Probe Traversal Instrumentation. `probe_results` gains `traversal_path` and `hop_depth_per_retrieved_mu` so future runs need no reconstruction; the Done-when is a live probe row that M45's reconstructor reproduces exactly. Follows M45. The `admin.py` half of its originally-scoped bundle already shipped as M44 Phase 1.
 

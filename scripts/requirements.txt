@@ -1,0 +1,10 @@
+# Dependencies for the offline harness scripts under scripts/ (prompt-bank
+# generation, the Sequential Batch Queue Runner, and their tests). Separate
+# from backend/requirements.txt because these run on the host, never inside
+# the backend's Docker container.
+#
+# anthropic: scripts/harness/prompt_gen.py calls the Claude API to generate
+# bulk-turn prompts for prompt banks (offline, never during an experiment
+# turn). Was previously installed ad-hoc and undeclared anywhere in the
+# repo — found broken (ModuleNotFoundError) after a fresh environment setup.
+anthropic==1.3.0

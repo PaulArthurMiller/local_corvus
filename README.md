@@ -204,6 +204,16 @@ npm install
 VITE_API_URL=http://localhost:8000 npm run dev -- --host 0.0.0.0 --port 3001
 ```
 
+### Experiment harness scripts
+
+The offline harness (`scripts/`, `tests/test_harness/`) has its own
+dependencies — installed on the host, never inside the backend's Docker
+container:
+
+```bash
+pip install -r scripts/requirements.txt
+```
+
 ## Chat UI usage
 
 The chat UI is a minimal research interface:

@@ -2,6 +2,34 @@
 
 ## Current state
 
+**2026-09-04 update: `/catchup` + `/build` session — fixed an undeclared
+harness dependency and a stale Milestone 45 status line; no new milestone
+built.**
+`/build` was asked to build "Milestone 45 Phase 2" per an earlier `/catchup`
+briefing that turned out wrong — Phase 2 was already complete (PR #83,
+merged 2026-08-26T13:13:19Z), just recorded incompletely. **Root cause of
+the wrong briefing:** BUILD-PLAN.md's Milestone 45 trailer line and its own
+status header still said "Phase 2 next to build" / omitted Phase 2 despite
+the section's own "Phase 2 build notes" subsection documenting it as done —
+both now corrected to reference PR #82/#83. Separately, PROGRESS.md's
+chronological session log (not the Current-state section above, which was
+already accurate) was missing the Phase 2 entry entirely; added, backdated
+to 2026-08-26 to sit in its correct chronological position.
+**Real, separate defect found and fixed:** `scripts/harness/prompt_gen.py`
+imports `anthropic`, which was installed ad-hoc at some point and declared
+in no requirements file anywhere in the repo — 4 test files / ~125 tests
+(`tests/test_harness/*`) failed at collection with `ModuleNotFoundError`.
+Installed `anthropic==1.3.0`, pinned in a new `scripts/requirements.txt`
+(separate from `backend/requirements.txt` — these run on the host, never
+in the backend's Docker container), and pointed to it from `README.md`.
+Full suite: 1282 passed, 2 pre-existing unrelated skips, 0 failed — matches
+the last-known-good count, confirming no regression, just a missing
+dependency declaration. No branch/PR — doc and environment fixes only, made
+directly since nothing here changes runtime behavior.
+**Next step:** Milestone 46 (probe traversal instrumentation) is the next
+unbuilt item in the plan; confirm with Paul before starting it, since it
+wasn't what was asked for this session.
+
 **2026-08-27 update (1): Codex's reporting audit salvaged; two control-shadow
 sanity checks found reporting unearned verdicts and fixed.**
 Review session, not a milestone. Codex ran a reporting/data-suitability audit
@@ -1911,6 +1939,50 @@ A real experiment must start from a wiped graph + re-seeded state per condition.
   - Milestone 45 Phase 1 status: COMPLETE. Phase 2 (metrics layer, first
     read, `docs/sensitivity_baseline.md`) not yet built. AWAITING PAUL: PR
     review + merge.
+
+- 2026-08-26: /build — Milestone 45 Phase 2 complete (metrics layer, first
+  read, and the milestone as a whole)
+  - Metrics layer added to `scripts/alpha_d_pathback.py`: the four-bucket
+    partition (reached / outbid / out-of-depth / disconnected), chase-down
+    yield, K2 runner-up rank distribution, and anchor strength. 33 new
+    tests (63 total in the file), including a real-data cross-check of the
+    REACHED bucket against `probe_results.gold_mu_rank` — two independent
+    computations of the same fact, matching exactly across all 8 runs.
+  - **Headline: 80–82% of probe turns pooled land in OUTBID (gold present,
+    one hop away, lost the K2 argmax) against only 0–3% DISCONNECTED (no
+    path to gold at all).** Late-session seed-share collapse is a
+    read-side problem, not a write-side one — settles item D.c.
+    Chase-down yield (greedy 2-hop walk) reaches gold only 6% of the time
+    pooled even within OUTBID+OUT_OF_DEPTH; K2 runner-up pricing shows
+    P(rank<=5)=60% vs. today's ~10% at top_k=1, with 13% of turns never
+    entering the K2 pool regardless of K. Anchor strength found
+    `cluster_c`'s trained spoke never engages its hub edge in any of the 8
+    runs, confirming the write-side mechanism behind Alpha C's "vs_c1
+    never wins" finding.
+  - Full tables: `docs/evaluations/alpha_d_pathback_analysis.md`.
+    Structural findings: `docs/sensitivity_baseline.md` (new — the doc
+    `BUILD-PLAN.md` had forward-referenced since Milestone 27 and never
+    built). Read: `EVALUATIONS.md`'s 2026-08-26 entry.
+  - **Decision:** `EXPERIMENT-PLAN.md` item D marked done; item F revised
+    to prioritize the read-side chase-down candidate over the write-side
+    one (reversing item C's lean, on stronger evidence), with
+    `retrieval_level2_top_k` widening priced as an adjunct, not a
+    substitute. cfgB recommended written off as an experimental condition
+    — its probes never actually measured its declared `level2_k` override
+    (the M44 bug), so nothing is gained by re-running it.
+  - Two design points the Phase 2 spec hadn't fully pinned down, both
+    recorded in BUILD-PLAN.md's "Phase 2 build notes": probe
+    hyperparameters had to be hardcoded to the pre-M44 disk-config values
+    (never a run's own `hyperparameters_snapshot`, which would have
+    silently mis-scored cfgB), and probe measurement sessions map to
+    real-turn graph state via an empirically-derived cutoff
+    (`compute_session_cutoffs()`), not an assumed turns-per-session
+    constant.
+  - Branch: `milestone-45-pathback-reconstructor` (follow-on commit,
+    Phase 1 already merged via PR #82). PR #83, merged 2026-08-26. Full
+    suite: 1260 passed, 2 pre-existing unrelated skips, no regressions.
+  - Milestone 45 status: COMPLETE — both phases built and merged (PR #82,
+    PR #83). Next step: Milestone 46 (probe traversal instrumentation).
 
 - 2026-08-26: /build — Milestone 47 complete (K1 Centrality Coefficient,
   R3-V6 knob)

@@ -45,7 +45,12 @@ def _make_probe_yaml(tmp_path: Path, probes: list, version: str = "v1") -> Path:
     return tmp_path
 
 
-def _make_retrieval_result(activated_mu_ids: list, bm25_scores: dict = None) -> RetrievalResult:
+def _make_retrieval_result(
+    activated_mu_ids: list,
+    bm25_scores: dict = None,
+    traversal_path: list = None,
+    hop_depth_per_retrieved_mu: dict = None,
+) -> RetrievalResult:
     """Build a minimal RetrievalResult with the given activated MU IDs."""
     return RetrievalResult(
         mus=[{"mu_id": mid, "raw_content": f"content of {mid}"} for mid in activated_mu_ids],
@@ -53,6 +58,10 @@ def _make_retrieval_result(activated_mu_ids: list, bm25_scores: dict = None) -> 
         activated_mu_ids=activated_mu_ids,
         activated_edge_ids=[],
         bm25_scores_per_mu=bm25_scores or {mid: 1.0 for mid in activated_mu_ids},
+        traversal_path=traversal_path if traversal_path is not None else [],
+        hop_depth_per_retrieved_mu=(
+            hop_depth_per_retrieved_mu if hop_depth_per_retrieved_mu is not None else {}
+        ),
     )
 
 
@@ -497,3 +506,99 @@ def test_record_probe_result_includes_m30_fields():
         assert call_arg["battery_repeat_index"] == 3
 
     print("[PASS] record_probe_result includes M30 dual-mode battery fields")
+
+
+# ---------------------------------------------------------------------------
+# M46 — probe traversal instrumentation: traversal_path / hop_depth_per_retrieved_mu
+# ---------------------------------------------------------------------------
+
+def test_compute_probe_result_carries_traversal_path_and_hop_depth():
+    """compute_probe_result() carries traversal_path/hop_depth_per_retrieved_mu
+    straight through from the RetrievalResult — nothing new computed, only
+    stored, per BUILD-PLAN.md's Milestone 46 scope."""
+    probe = ProbeDefinition(
+        probe_id="p01",
+        phenomenon_type="ranking_improvement",
+        prompt_text="test prompt",
+        gold_mu_ids=["mu-gold"],
+        is_bridge_probe=False,
+        probe_set_version="v1",
+    )
+    traversal_path = [
+        {"source_mu_id": "mu-k1", "edge_id": "edge-1", "target_mu_id": "mu-gold", "hop_depth": 1},
+    ]
+    hop_depth = {"mu-k1": 0, "mu-gold": 1}
+    retrieval_result = _make_retrieval_result(
+        ["mu-k1", "mu-gold"],
+        traversal_path=traversal_path,
+        hop_depth_per_retrieved_mu=hop_depth,
+    )
+
+    result = run(compute_probe_result(
+        probe=probe,
+        retrieval_result=retrieval_result,
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learning",
+    ))
+
+    assert result.traversal_path == traversal_path
+    assert result.hop_depth_per_retrieved_mu == hop_depth
+    print("[PASS] compute_probe_result carries traversal_path/hop_depth_per_retrieved_mu through")
+
+
+def test_compute_probe_result_traversal_fields_default_empty():
+    """A RetrievalResult with no traversal (e.g. gold reached at K1, no K2 hop
+    ever taken) yields empty traversal_path/hop_depth_per_retrieved_mu, not
+    an error — matches RetrievalResult's own defaults."""
+    probe = ProbeDefinition(
+        probe_id="p01",
+        phenomenon_type="ranking_improvement",
+        prompt_text="test prompt",
+        gold_mu_ids=["mu-gold"],
+        is_bridge_probe=False,
+        probe_set_version="v1",
+    )
+    retrieval_result = _make_retrieval_result(["mu-gold"])
+
+    result = run(compute_probe_result(
+        probe=probe,
+        retrieval_result=retrieval_result,
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learning",
+    ))
+
+    assert result.traversal_path == []
+    assert result.hop_depth_per_retrieved_mu == {}
+    print("[PASS] traversal_path/hop_depth_per_retrieved_mu default to empty when the RetrievalResult carries none")
+
+
+def test_record_probe_result_includes_m46_fields():
+    """record_probe_result() passes traversal_path/hop_depth_per_retrieved_mu
+    through to graph_store.insert_probe_result."""
+    traversal_path = [
+        {"source_mu_id": "mu-a", "edge_id": "edge-1", "target_mu_id": "mu-b", "hop_depth": 1},
+    ]
+    hop_depth = {"mu-a": 0, "mu-b": 1}
+    probe_result = ProbeResult(
+        probe_id="p01",
+        run_id=None,
+        measurement_session_index=1,
+        condition_label="learning",
+        retrieved_mu_ids=["mu-a", "mu-b"],
+        gold_mu_rank=2,
+        retrieval_precision=1.0,
+        retrieval_recall=1.0,
+        traversal_path=traversal_path,
+        hop_depth_per_retrieved_mu=hop_depth,
+    )
+
+    with patch("analytics.probes.graph_store") as mock_store:
+        mock_store.insert_probe_result = AsyncMock()
+        run(record_probe_result(probe_result))
+        call_arg = mock_store.insert_probe_result.call_args[0][0]
+        assert call_arg["traversal_path"] == traversal_path
+        assert call_arg["hop_depth_per_retrieved_mu"] == hop_depth
+
+    print("[PASS] record_probe_result includes M46 traversal instrumentation fields")

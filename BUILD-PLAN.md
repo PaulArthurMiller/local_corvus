@@ -7618,6 +7618,613 @@ Branch: `milestone-47-k1-centrality-coefficient`.
 
 ---
 
+## Phase 1 Analysis Milestones — 48–52
+
+**Scoped 2026-09-04 by `/planner`**, from a review of
+`docs/phase_one_experiment_program.md` against Milestones 45–47 as built.
+These five exist because the program's own gates (R0 → R1 → R3 → R4) cannot
+be closed by analysis alone — four of them need code that does not exist
+today, and one (M52) is named now so R4 is not a surprise.
+
+**The finding that shaped this set:** every R3 knob (V1–V6) is already
+reachable. `config.yaml` carries `retrieval_level2_top_k`, `credit_lambda`,
+`credit_scale`, `negative_scope`, `evidence_cap.enabled`/`n_max`, and (M47)
+`k1_centrality_weight`; `CONFIG_OVERRIDES_JSON` is a general dotted-key
+deep-merge that validates each key resolves to an existing leaf
+(`backend/core/config_overrides.py`), and M44 Phase 1 put probe measurement
+on the resolved config. **No knob milestone is needed for R3.** What is
+missing is not the ability to *run* the sweep — it is the ability to *read*
+it: the Phase 1 headline metrics live in a script's Markdown output, the
+noise floor the distinguishability rule compares against has never been
+computed, and the provenance that proves two runs are comparable is split
+across a filesystem manifest and a config blob.
+
+### The gate picture
+
+```
+   R0 — reporting review                       R1 — noise floor
+   ──────────────────────                      ────────────────
+   R0-1 field audit ──────┐                    R1-a/b per-metric
+   R0-6 report-field      ├──▶ M48 ──────────▶ mean + SD of the
+        erratum ──────────┘    metrics          learned-static delta
+                               artifact    ┌──▶ = M50
+   R0-5 c_spoke1 ────────▶ M49 ────────────┘         │
+        anomaly           (also gates M50's          │ R1-c entry,
+                           anchor arm)               │ R1-d rule (Paul)
+                                                     ▼
+   R0-2 provenance ┐                            R3 — one-factor sweep
+   R0-4 sampling   ├──▶ M51 ──────────────────▶ V1..V6, 12 plans
+        params ────┘    forward-only:                │
+                        must land BEFORE the         │
+                        first R3 run, not before     ▼
+                        M50 (which reads 8      R4 — generalization
+                        archived runs that      ───────────────────
+                        predate it)             M52  seed_v4 + probe
+                                                     set + bank
+```
+
+Read the diagram left to right as "what unblocks what." Two things in it are
+easy to get backwards:
+
+**M51 is not a prerequisite for M50.** Provenance is forward-only — the 8
+archived runs were written before any of it existed and cannot be
+retrofitted. The noise floor is computed *from those 8 runs*, so it must be
+built from what they actually carry (the harness `manifest.json`, which does
+hold the full `plan` object and `resolved_config_snapshot`, plus the plan
+file's own content-hash-named `prompt_bank_path`). M51 exists so the *next*
+cohort — R3's twelve plans — can prove comparability from the report alone
+instead of from a directory on Paul's laptop.
+
+**M49 is small but sits upstream of a metric, not beside it.** If
+`c_spoke1` can never be surfaced by any real turn, then `cluster_c`'s
+anchor-strength cell in the noise floor is not "a flat trajectory" — it is
+"no measurement," and folding it into a mean and SD manufactures a number.
+Diagnose before aggregating.
+
+---
+
+## Phase 1 Metrics Artifact (R0-1 + Alpha D → versioned JSON) — Milestone 48
+
+**Status:** PROPOSED 2026-09-04. Gates R1 analysis (M50). Closes program
+items R0-1 and R0-6, and audit recommendation #1
+(`docs/reporting_data_audit_2026-08-26.md`, P0 "headline metrics are absent
+from generated reports").
+
+### The gap
+
+M45 Phase 2 computes every Phase 1 headline metric correctly and emits them
+as **Markdown prose in a docs file**:
+
+```
+  scripts/alpha_d_pathback.py --phase2
+        │
+        ▼
+  docs/evaluations/alpha_d_pathback_analysis.md      ← human-readable tables
+        │
+        ✗  no JSON, no metric-definition version, no per-cell numerator /
+           denominator, no machine-readable observed-vs-counterfactual flag
+        ▼
+  (nothing downstream can consume it)
+```
+
+`main()` in that script takes `--phase2-out` and writes Markdown; there is no
+`json.dump` of the metrics anywhere (the only one is the Phase 1 mismatch
+dump). Meanwhile the generated experiment report still leads with the legacy
+§6.1 probe pass rate. An analyst — human or agent — reading a report has no
+way to know the four-bucket partition is the headline, and no way to get its
+denominators.
+
+Three consequences, all of which bite M50 directly: a cross-run comparison
+would have to re-parse Markdown tables or re-run the script per run with no
+guarantee both invocations used the same metric definitions; the OUT_OF_DEPTH
+and chase-down numbers are labeled COUNTERFACTUAL in prose that a downstream
+consumer will not carry; and nothing distinguishes "this bucket is 0" from
+"this bucket was not computed for this run."
+
+### Phase 1 — the field audit (R0-1)
+
+This runs **first and separately**, and it is the M45 pattern applied one
+level up: validate the numbers against raw rows before building anything
+that consumes them.
+
+For one archived run (recommend `exp0b`, the cleanest baseline), verify each
+field the cross-run comparison will consume against the raw
+`probe_results` / `analytics` / `edge_update_events` rows it derives from:
+
+| Field | Cross-check against |
+|---|---|
+| 4-bucket partition counts | must sum to the `battery_mode="mean"` probe-row count with a known gold; REACHED vs. `gold_mu_rank IS NOT NULL` (M45 already does this one — extend the pattern to the other three buckets) |
+| `gold_mu_rank` | recomputed from `retrieved_mu_ids` + `probe_set_v3.yaml` golds |
+| anchor-strength trajectory | `edge_update_events` α/β replay vs. the recorded per-event posterior |
+| terminal-seed chase-down yield | denominator = OUTBID + OUT_OF_DEPTH turns exactly; the COUNTERFACTUAL label present |
+| K2 runner-up rate | pool-eligible denominator vs. the 13% never-entered-pool population |
+| `control_shadow` checks | each check's PASS/FAIL/SKIP against the rows it reads (note PR #87 already fixed two of these — confirm the fixes hold on archived data) |
+
+**Output:** a field-by-field table in
+`docs/evaluations/r0_report_field_audit.md`, marking each field
+`confirmed` / `defect` / `not-computed`, naming the query used. Every
+`defect` gets fixed in Phase 2 or filed with a rationale for deferring.
+
+**This is also what closes R0-6.** The one open erratum in
+`experiment_protocol.md` §8 is the "report field list" — it was left open
+explicitly because it depends on this audit. The audit's confirmed-field
+list is that list; write it into §8 and check the box.
+
+### Phase 2 — the versioned artifact
+
+Emit one JSON per run, plus a manifest of the cohort:
+
+```
+  per run:  memory/reports/phase1_metrics_{experiment_id}_{ts}.json
+  {
+    "metric_definition_version": "1",          ← bump on any definition change
+    "experiment_id": ..., "plan_id": ..., "condition": ...,
+    "battery_mode_filter": "mean",
+    "source_provenance": { manifest path, runtime_config_hash,
+                           prompt_bank_path, seed_fixture_version,
+                           probe_set_version },
+    "metrics": {
+      "partition": {
+        "REACHED":  {"n": .., "d": .., "rate": .., "status": "observed"},
+        "OUTBID":   {...},
+        "OUT_OF_DEPTH": {..., "status": "observed", "horizon": 2},
+        "DISCONNECTED": {...}
+      },
+      "chase_down_yield": {"n": .., "d": .., "status": "counterfactual",
+                           "counterfactual_note": "retrieve() has never
+                            performed this walk"},
+      "k2_runner_up": {"rank_distribution": {...}, "status": "observed"},
+      "anchor_strength": {per trained spoke, per session, alpha/beta}
+    },
+    "per_session": { same shape, keyed by session index }
+  }
+```
+
+Rules the shape encodes, each of which the audit asked for by name:
+
+- **`status` is a data field, not a footnote.** `observed` |
+  `counterfactual` | `not_computed`. A consumer that ignores it is wrong
+  loudly rather than quietly.
+- **Every rate carries its numerator and denominator.** A rate alone cannot
+  distinguish 0/0 from 0/140.
+- **`metric_definition_version` is mandatory and is compared, not
+  displayed.** M50 refuses to pool runs whose versions differ.
+- **Per-session cells are first-class**, because the V6 pre-registration
+  entry in `sensitivity_baseline.md` says in as many words that a pooled
+  headline will dilute the one place V6's mechanisms differ. A per-session
+  read must not require re-running the script with a different flag.
+
+**Where the code lives:** extend `scripts/alpha_d_pathback.py` (same file,
+new emit path — the M45 Phase 2 precedent of "same script, new section, no
+second copy of the metric formulas"). Markdown rendering becomes a
+projection of the JSON, not a parallel computation. That is the point: two
+renderings that compute independently is the M43/M44 drift failure in
+miniature.
+
+### Done when
+
+- [ ] `docs/evaluations/r0_report_field_audit.md` exists, every consumed
+      field marked, every `defect` fixed or filed
+- [ ] `experiment_protocol.md` §8's last erratum box checked, with the
+      field list written in
+- [ ] JSON emitted for all 8 archived learned runs
+- [ ] **Tie-back:** every number in the regenerated
+      `alpha_d_pathback_analysis.md` equals the corresponding JSON value —
+      asserted by a test, not by eye, since Markdown is now a projection
+- [ ] Archived Markdown output unchanged where the audit found no defect
+      (a diff of the regenerated file against the merged one is the check;
+      any intended change is named in the build notes)
+- [ ] Full suite green
+
+### Risks and open questions
+
+- ⚠ **The audit may find a defect in a number already published in
+  `EVALUATIONS.md` and `sensitivity_baseline.md`.** That is the audit
+  working. Correct the published number in place with a dated note; do not
+  quietly regenerate the file.
+- ⚠ **Do not put the metrics into the *generated experiment report* in this
+  milestone.** The report is produced by the backend at run time from live
+  tables; Alpha D reconstructs from archived state offline. Merging them is
+  a real design question (which process owns the metric?) and it is not on
+  the critical path — M50 consumes the JSON either way. Deferred with this
+  rationale, not forgotten.
+- ? **Does `metric_definition_version` start at 1 or at 45.2?** Recommend a
+  plain integer starting at 1, with the M45 Phase 2 definitions as version 1.
+
+**Estimate:** one to two sessions (the audit is most of it).
+
+---
+
+## `c_spoke1` Reachability Diagnosis (R0-5) — Milestone 49
+
+**Status:** PROPOSED 2026-09-04. Closes program item R0-5 (§7-5, owner CC).
+Small and independent of M48; sits upstream of M50's anchor-strength arm.
+
+### The question, and why it is now urgent rather than curious
+
+Two independent instruments say the same thing about one trained spoke:
+
+- `docs/evaluations/alpha_c_lockin_analysis.md` — `vs_c1` never wins a
+  single session across all 8 archived runs.
+- M45 Phase 2 Finding 4 — `cluster_c`'s trained spoke shows a flat
+  α/β = 1.0/1.0 hub-edge trajectory in **every one of the 8 runs**, with
+  0–1 output→gold co-activation edges ever created and never more than one
+  ever credited. Every other trained spoke shows traffic by session 2.
+
+M45's own finding says the mechanism is not a close contest lost — it is
+that `c_spoke1` is **structurally never retrieved during real turns**, so
+its hub edge never receives one write-side touch. That is either a content
+bug (the prompt bank / probe content for `cluster_c` cannot surface it) or a
+mechanism finding (it is reachable and retrieval still never takes it).
+`sensitivity_baseline.md` gets an entry either way — that is the program's
+§1-8 rule.
+
+It becomes urgent at M50 because a trained spoke that was never measurable
+is not a data point with a flat trajectory; it is a missing cell. Averaging
+four spokes when one of them is an artifact puts a manufactured zero into
+the noise floor that R3 will then be compared against.
+
+### Scope
+
+A read-only script, `scripts/c_spoke1_reachability.py`, in the
+`v6_centrality_counterfactual.py` mould — `graph.db` plus the frozen
+fixtures, no backend, no Docker, no network. Three checks:
+
+1. **Vocabulary check.** Does `c_spoke1`'s anchor word (per
+   `seed_v3_mu_spec.md` §1's two-tier scheme) appear in any `cluster_c`
+   prompt in the frozen bank (`prompt_bank_e2adf796…`)? And does any
+   `cluster_c` probe in `probe_set_v3.yaml` name it? If the entry
+   vocabulary never appears, BM25 cannot put it in the candidate pool and
+   the answer is "content bug," full stop.
+2. **Candidacy check.** Across all archived real turns, does `c_spoke1`
+   ever appear in `analytics.candidate_set_before_ranking`? This is the
+   empirical version of check 1 and is decisive: present-but-never-ranked
+   and never-a-candidate are different diagnoses.
+3. **Sibling comparison.** Run the same two checks for the other
+   `cluster_c` spokes and for the other clusters' trained spokes. A defect
+   local to `c_spoke1` and a defect affecting all of `cluster_c` call for
+   different fixes.
+
+### Done when
+
+- [ ] The three checks run against all 8 archived runs and the frozen
+      fixtures
+- [ ] `docs/sensitivity_baseline.md` carries a dated entry naming the verdict
+      (**content bug** or **mechanism finding**) and the script path
+- [ ] `phase_one_experiment_program.md` R0-5 checked and §7-5 resolved in
+      place
+- [ ] If the verdict is *content bug*: M50 records `cluster_c`'s anchor cell
+      as `not_computed`, not as a zero — and the disposition of the frozen
+      bank is raised as a decision for Paul (see the risk below)
+
+### Risks and open questions
+
+- ⚠ **A content-bug verdict collides with §1-4, frozen inputs.** The Phase 1
+  invariant freezes the bank, the fixture, and the probe set for all of
+  Phase 1. If `cluster_c`'s bank content is the defect, fixing it
+  invalidates every archived run's comparability, and *not* fixing it means
+  Phase 1 runs with three usable trained spokes instead of four. **This is
+  Paul's call, not the milestone's** — the milestone's job is to produce the
+  verdict and state the trade-off. Recommendation, stated in advance: do not
+  unfreeze. Record `cluster_c` as a known-dead cell for Phase 1, carry three
+  trained spokes through R3, and fix the content in seed_v4 (M52), where a
+  new bank is being generated anyway.
+- ? **Is `trained_spokes: {cluster_c: c_spoke1}` itself the bug?** M29 exists
+  precisely so the trained target per cluster is a plan choice. If a sibling
+  `cluster_c` spoke is reachable, switching the plan key is a one-line fix —
+  but it still changes the R3 cohort's shape relative to the archived
+  baselines. Same decision, same recommendation.
+
+**Estimate:** half a session.
+
+---
+
+## Cross-Run Replicate & Noise-Floor Artifact (R1, R2) — Milestone 50
+
+**Status:** PROPOSED 2026-09-04. Depends on M48; informed by M49. Closes
+program items R1-a, R1-b, R1-c and R2's done-when. Audit recommendation #3
+(P0 "replicate/noise-floor statistics are not assembled").
+
+### The gap
+
+Every report the system produces compares conditions **inside one plan**.
+The Phase 1 distinguishability rule compares a variation's learned−static
+delta against **the SD of that same delta across baseline plans** — a
+quantity that has never been computed by anything, and that no artifact is
+shaped to hold:
+
+```
+  what exists today                what the rule needs
+  ─────────────────                ───────────────────
+  plan exp0b:                      baseline cohort (3 plans):
+    learned   ─┐                     d1 = learned−static  (exp0b)
+    static    ─┴─▶ d1                d2 = learned−static  (exp0b-rep2)
+                                     d3 = learned−static  (exp0b-rep3)
+  plan exp0b-rep2:                        │
+    learned   ─┐                          ▼
+    static    ─┴─▶ d2                mean(d), SD(d)   ← the noise floor
+                                          │
+  plan exp0b-rep3:                        ▼
+    learned   ─┐                   |d_variation − mean(d)| > 2·SD ?
+    static    ─┴─▶ d3                          ← the rule
+```
+
+The unit of inference is **the replicate, not the probe row.** 1,120 probe
+measurements across 8 runs look like a large sample and are not: they are 8
+independent draws of the thing being compared. Pooling probe rows as if they
+were independent replicates would shrink the apparent noise floor by an
+order of magnitude and make every R3 variation look distinguishable. The
+artifact must make that mistake structurally impossible.
+
+### Scope
+
+`scripts/phase1_noise_floor.py` (new) — consumes M48's per-run JSON, never
+`graph.db` directly. That separation is deliberate: M48 owns the metric
+definitions and M50 owns the statistics over them, so a metric change lands
+in one place.
+
+**Cohort keying.** Two runs are poolable only if they match on:
+`metric_definition_version`, seed-fixture version, probe-set version,
+prompt-bank path (content-hash-named, so this is a content hash),
+`trained_spokes`, `series_count` / `turns_per_series`, `conditions`, and
+the set of `config_overrides` keys (the factor under test). Anything else
+is a **separate cohort**, refused rather than silently merged. Mismatches
+are reported as a table, because "these two runs are not comparable, here
+is the field that differs" is itself a finding — it is exactly how cfgB's
+invalidity would have surfaced without M44 being spent to find it.
+
+**Outputs, per cohort and per metric in §5 of the program:**
+
+- per-replicate learned−static delta (whole-run and per-session)
+- cohort mean, sample SD (n−1), and n
+- coverage: expected vs. observed probe rows per condition × session ×
+  battery repeat; missingness reason where they differ
+- a `not_computed` passthrough — M48's status field propagates; a cell that
+  was never measured never becomes a zero in a mean
+
+**Three reads to produce, all from the same artifact:**
+
+1. **R1-a/R1-b** — the baseline cohort's floor (3 runs today), whole-run and
+   per-session, for every §5 metric.
+2. **R2** — cfgA's delta against that floor, with the §2 quasi-pairing
+   caveat attached to rep1 in the output, not in a footnote someone has to
+   remember.
+3. **A power statement.** Given the measured SD, what effect size would a
+   2-replicate R3 variation need to clear 2·SD? This is the number that says
+   whether R3's `×2` is enough, and it is cheap to compute once the SD
+   exists. If it says a 2-replicate design cannot resolve a plausible
+   effect, that is a finding to act on *before* spending twelve nights.
+
+### Done when
+
+- [ ] `docs/evaluations/r1_noise_floor.md` + the per-cohort JSON exist
+- [ ] `docs/sensitivity_baseline.md` has the "Round 1 noise floor" entry
+      (R1-c) naming `scripts/phase1_noise_floor.py` so it is re-runnable
+      when rep4/rep5 land
+- [ ] `sensitivity_baseline.md` has the cfgA-vs-floor entry (R2's done-when)
+- [ ] cfgB's disposition recorded in the same entry (§7-2 — M45's Finding 3
+      already recommends writing it off; this is where that becomes a
+      decision on the record)
+- [ ] A test proves the artifact **refuses** to pool two runs differing in
+      any cohort key, and **refuses** to treat probe rows as replicates
+      (assert n = number of plans, not number of rows)
+- [ ] The program's R1 note is answered explicitly: is the SD large relative
+      to cfgA's effect? If yes, baseline rep4–rep5 are queued before R3
+
+### Risks and open questions
+
+- ⚠ **n = 3 is a thin SD and the rule is built on it.** A sample SD from
+  three draws has enormous uncertainty; a 2·SD threshold computed from it is
+  a soft line, not a bright one. Report the n alongside every SD and resist
+  rendering the threshold as a precise number. This is the argument for
+  rep4–rep5 and the reason the power statement above is in scope.
+- ⚠ **R1-d, the distinguishability rule, is Paul's decision, not this
+  milestone's output.** The milestone supplies the numbers and a
+  recommendation. The program says the rule is finalized at R1-d; leaving it
+  a draft in §5 after this lands is a blocker for R3, not a loose end.
+- ? **Whole-run or per-session as the headline comparison?** The V6
+  pre-registration says per-session, for V6 specifically. Recommend
+  computing both always and letting the pre-registration for each variation
+  name which one it is read against — decided per variation, before its run.
+
+**Estimate:** one to two sessions.
+
+---
+
+## Run Provenance + Metric Status Fields (R0-2, R0-4) — Milestone 51
+
+**Status:** PROPOSED 2026-09-04. **Forward-only — must land before the first
+R3 run.** Independent of M48/M50 (which read archived runs that predate any
+of this and cannot be retrofitted). Closes program items R0-2 and R0-4, and
+audit recommendation #2 (P0 "provenance is split and incomplete", plus the
+two P1 items on aggregation and comparability).
+
+### The defect, confirmed by reading the code
+
+`backend/core/orchestrator.py:682` writes `full_config_snapshot=_CONFIG` —
+the resolved config **verbatim**, which means `edge_update.rng_seed` is
+recorded as `null` on every row while the Thompson stream actually ran on
+`resolve_rng_seed()`'s `crc32(experiment_id)`
+(`backend/learning/edge_update.py:117`). That function's own docstring says
+"recorded in run metadata (`config_hash` / `full_config_snapshot` already
+capture `edge_update.rng_seed` verbatim)" — verbatim is exactly the problem:
+the recorded value is the input `null`, not the resolved integer.
+
+`RunRecord` (`backend/analytics/run_log.py:22`) carries no `plan_id`, no
+`random_seed`, no prompt-bank hash, no fixture content hash, and no git SHA.
+Those live in the harness's `harness_runs/*/manifest.json` (which does hold
+the full `plan` object, `config_hash`, `runtime_config_hash`, and
+`resolved_config_snapshot`) — i.e. **on Paul's filesystem, beside the run,
+not inside it.** A report JSON handed to anyone else cannot prove which
+cohort it belongs to.
+
+R0-2 asks for exactly the union of these. It fails today on the resolved
+seed, the git SHAs, and the content hashes; it passes on `plan_id` only
+because `experiment_id` is `{plan_id}_{condition}` and can be split.
+
+### Phase 1 — the provenance object
+
+One `provenance` object, written identically into the analytics row and into
+the experiment report JSON:
+
+```
+  provenance = {
+    "plan_id", "attempt", "condition", "random_seed",
+    "resolved_edge_rng_seed",        ← the integer actually used, not null
+    "prompt_bank_sha256",            ← content hash, not the path
+    "seed_fixture_sha256",           ← content hash, not "v3"
+    "probe_set_sha256",              ← content hash, not "v3"
+    "harness_git_sha", "backend_git_sha",
+    "report_schema_version", "metric_definition_version",
+    "runtime_config_hash", "overridden_keys",
+    "agent_sampling_params": {},     ← R0-4
+    "agent_sampling_source": "ollama_server_default"
+  }
+```
+
+**`agent_sampling_params` is the R0-4 answer, and it is deliberately
+empty.** Bulk turns send no sampling parameters; generation runs at the
+Ollama server + model default. That was established 2026-08-27 and the
+decision was made **not to pin it**, because pinning to 0.0 mid-programme
+would collapse the very sampling-noise floor M50 is computing and would
+change the data-generating process between exp01 and exp02. So this field
+*records* the current behavior explicitly rather than changing it — an empty
+dict with a named source is a fact, whereas an absent field is an unanswered
+question. If it is ever pinned, `backend/memory/extractor.py`'s
+summarization call needs the same treatment (it also sends none, and its
+summary MU is wired into the graph and into `activated_mu_ids`), and the
+pinned cohort becomes a new baseline rather than a pooled one.
+
+**A version label is not a hash.** `"v3"` is a mutable pointer to a file;
+`sha256` of the file's bytes is evidence. The audit says this in as many
+words and it is the difference between "these runs declared the same
+fixture" and "these runs used the same fixture."
+
+### Phase 2 — metric status and honest aggregation
+
+The audit's two P1 items, which are the same defect in three places: absent
+data and zero are indistinguishable to a machine consumer.
+
+- Every metric in the generated report carries `status`, numerator,
+  denominator, expected row count, observed row count, missing reason, and
+  `source` (`stored_snapshot` | `live_recompute`). A section recomputed from
+  the live graph after a wipe is marked **degraded**, not silently rendered.
+- `overall_pass` distinguishes PASS / WARN-INCOMPLETE / FAIL. **A required
+  check's SKIP must never be equivalent to PASS** — that is how a control
+  with no evidence scores as a clean control, the same shape as the
+  malformed-JSON defect PR #87 already fixed in `control_shadow.py`.
+- Coverage validation: exact probe-ID × session × battery-repeat counts,
+  uniqueness, and parse validity. Malformed values are integrity failures,
+  not empty lists.
+- Deprecate unqualified mean-gold-rank deltas (P1, selection bias: the mean
+  excludes probes where gold is absent, so it *improves* as failures rise).
+  Pair conditional rank with retrieval coverage wherever it is still shown.
+
+### Done when
+
+- [ ] A fresh 2-plan micro-queue (the M27 verification shape — small, real,
+      cheap) produces report JSON carrying every `provenance` field
+      populated, with `resolved_edge_rng_seed` an integer matching
+      `resolve_rng_seed()` recomputed by hand from the `experiment_id`
+- [ ] Archived reports and archived analytics rows still load — additive
+      only, NULL-safe reads, the M46 migration pattern
+- [ ] A required check that SKIPs produces `overall_pass != PASS`, proven by
+      a test
+- [ ] Audit gate items 2 and 3 (`docs/reporting_data_audit_2026-08-26.md`,
+      "Recommended autonomous-analysis gate") verifiably pass on the new run
+- [ ] `phase_one_experiment_program.md` R0-2 and R0-4 checked
+- [ ] Full suite green
+
+### Explicitly out of scope
+
+- **Pinning agent temperature.** Decided against, above and on 2026-08-27.
+- **The plan analysis contract and the autonomous-plan validator** (audit
+  recommendations #4 and #5). Those serve the analyst/theorizer agents,
+  which are Phase 2 work per the program's R5. Naming them here so they are
+  visibly deferred rather than forgotten.
+- **Retrofitting archived runs.** Impossible, and pretending otherwise is
+  worse than the gap. M50 is built against what the archive actually holds.
+
+### Risks and open questions
+
+- ⚠ **Git SHA capture inside a Docker backend.** The backend runs in a
+  container that may not carry `.git`. Pass the SHA in as an env var from
+  the harness at container start rather than shelling out to `git` from
+  inside the backend — and record it as `unknown` explicitly if unset, never
+  omit the key.
+- ⚠ **`config_hash` already means two unrelated things** (M43's naming note).
+  Do not add a third. `runtime_config_hash` and the plan's own `config_hash`
+  keep their existing meanings; new fields get new names.
+
+**Estimate:** one to two sessions.
+
+---
+
+## seed_v4 Fixture, Probe Set, and Bank (R4 gate) — Milestone 52
+
+**Status:** PROPOSED 2026-09-04, **blocked on R3.** Named now so the cost of
+R4 is visible while R3 is still being planned, not discovered the night R3
+finishes. Do not build until R3's survivor set is known.
+
+### Why this is a real build and not a config change
+
+`scripts/generate_seed_v3.py` is not a parameterized fixture generator. Its
+content — the four proper-noun rule families (Kestrel, Marrow, Vessel,
+Ledger), the invented value tokens (TILDEBAR, WAIVERKEY, …), the two-tier
+entry-vocabulary/answer-token split, the 34 MUs and 64 reciprocal edges — is
+written into the script and into `seed_v3_mu_spec.md`. R4 asks for a fixture
+whose **topology and vocabulary are changed and whose convention families are
+regenerated**, which means a new spec, a new generator run, a new verifier
+pass, and a new frozen prompt bank.
+
+The v3 pipeline is the template and it worked: generate a draft → 9
+verifier checks → Paul reviews the prose → human freeze step →
+`verify --frozen`. Follow it exactly. The one thing v4 must preserve is the
+*property*, not the content: BM25 alone reaches the hub and never the gold
+spoke, so a correct answer is causally downstream of graph traversal.
+
+### Scope (to be sharpened when R3 lands)
+
+1. `seed_v4_mu_spec.md` — new vocabulary families, and a **deliberately
+   different topology**. The hub:spoke `edge_weight_sum` ratio is 8:1 in v3
+   by design; if V6 says that entry-point structure was load-bearing, v4
+   should vary it on purpose so R4 can tell "the effect generalizes" from
+   "the effect was a property of an 8:1 hub."
+2. `scripts/generate_seed_v4.py` + `scripts/verify_seed_v4.py`, following
+   the v3 pattern. Consider factoring the shared checks out rather than
+   copying a third time — three copies is where that decision is normally
+   made.
+3. `probes/probe_set_v4.yaml`.
+4. One prompt bank generated via Sonnet, then frozen, content-hash-named
+   like the Phase 1 bank.
+5. Harness wiring: `seed_fixture_version` / `probe_set_version` accept
+   `"v4"` (M28 did this for v3 — check whether the plumbing is already
+   version-generic before scoping work here).
+6. **If M49 returned "content bug":** fix `cluster_c`'s defect here. This is
+   the milestone where unfreezing costs nothing.
+
+### Done when
+
+- [ ] `verify_seed_v4.py --frozen` passes all checks
+- [ ] A baseline ×2 and each R3 survivor ×2 can be queued against v4 with
+      no code change beyond the version strings
+- [ ] The R4 comparison is possible: each survivor markable *generalizes* /
+      *fixture-specific*
+
+### Risks and open questions
+
+- ⚠ **Generation cost and a human review step.** v3's freeze needed Paul to
+  read the generated prose. Budget for that; it is not an autonomous
+  milestone.
+- ? **How different is "different"?** Too similar and R4 proves nothing; too
+  different and a failed effect is ambiguous between "fixture-specific" and
+  "the new fixture is broken." Sharpen against R3's actual survivors — the
+  right axis of variation depends on which knobs survived.
+
+**Estimate:** two to three sessions, plus Paul's review time.
+
+---
+
 ## Status
 
 ```

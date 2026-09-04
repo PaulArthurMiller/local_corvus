@@ -2,6 +2,58 @@
 
 ## Current state
 
+**2026-09-04 update (3): `/planner` session — reviewed
+`docs/phase_one_experiment_program.md` against Milestones 45-47 and filed
+five new milestones, M48-M52. Docs only, no code.**
+**The finding that shaped the set: R3 is blocked on *reading*, not on
+*running*.** Every pre-registered R3 knob (V1-V6) is already reachable —
+all six keys exist in `config.yaml`, `CONFIG_OVERRIDES_JSON` is a general
+dotted-key deep-merge that rejects any key not resolving to an existing
+leaf, and M44 Phase 1 put probe measurement on the resolved config (the gap
+that invalidated cfgB). **No knob milestone is outstanding.** What is
+missing is the instrumentation the program's own gates assume:
+**M48** (R0-1 field audit, then Alpha D's metrics promoted from Markdown
+prose to versioned JSON with numerator/denominator/status per cell — also
+closes R0-3 and R0-6's last erratum);
+**M49** (the `c_spoke1` reachability diagnosis, R0-5 — runs *before* R1
+so a never-measurable trained spoke isn't averaged into the noise floor as
+a zero);
+**M50** (the cross-run replicate/noise-floor artifact R1-a/b/c and R2 both
+need and that nothing computes today — replicate, never probe row, as the
+unit of inference; also emits a power statement on whether R3's x2 design
+can resolve a plausible effect);
+**M51** (forward-only run provenance + honest metric-status fields, R0-2/
+R0-4 — **must land before the first R3 run**);
+**M52** (seed_v4 fixture/probe set/bank, scoped now, blocked on R3).
+**R0-2 confirmed FAILING by code read:** `orchestrator.py:682` writes
+`full_config_snapshot=_CONFIG` verbatim, so `edge_update.rng_seed` records
+as `null` on every row while the Thompson stream actually ran on
+`resolve_rng_seed()`'s `crc32(experiment_id)`; `RunRecord` carries no
+`plan_id`, `random_seed`, content hashes, or git SHAs — those exist only in
+`harness_runs/*/manifest.json` on disk. Provenance is forward-only and
+cannot be retrofitted, which is why M51 gates R3 execution but not R1
+analysis (M50 is built against what the 8 archived runs actually hold).
+**R0-4 recorded as already answered** (2026-08-27): bulk turns send no
+sampling parameters; deliberately left unpinned; M51 records the fact rather
+than changing it.
+`docs/phase_one_experiment_program.md` updated throughout — every R0 item
+now names its milestone, R1/R2/R3/R4 carry their gate pointers, §2's agent-
+generation row reflects the R0-4 answer, a §6 log entry was appended, and
+§7 gained two new open decisions (7 and 8).
+**Three decisions surfaced for Paul, not taken:** §7-7 the R1-d
+distinguishability rule (M50 supplies the SDs, from n=3 — thin); §7-8
+`c_spoke1`'s disposition if M49 says content bug (recommendation: do not
+unfreeze, carry three trained spokes, fix in seed_v4); §7-2 cfgB
+(recommendation: write it off — M45 already priced `level2_k` at every value
+from archived data).
+**Next step:** build M48, or — if the machine has free nights — queue
+baseline rep4/rep5 first. Those two runs are the highest-value use of
+machine time right now: they thicken the n=3 noise floor the whole
+distinguishability rule rests on, and they would be the **first runs ever to
+record probe `traversal_path`** (M46), making M48's probe metrics observed
+rather than reconstructed. See BUILD-PLAN.md's "Phase 1 Analysis Milestones
+— 48-52" section for the gate diagram.
+
 **2026-09-04 update (2): `/build` session — Milestone 46 complete (Probe
 Traversal Instrumentation).**
 `probe_results` gains `traversal_path`/`hop_depth_per_retrieved_mu`

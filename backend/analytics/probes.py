@@ -68,6 +68,12 @@ class ProbeResult(BaseModel):
     series_id: Optional[str] = None
     battery_mode: str = "mean"
     battery_repeat_index: Optional[int] = None
+    # M46 — probe traversal instrumentation. Mirrors RetrievalResult's own
+    # fields of the same name (backend/memory/retrieval.py) so a probe row
+    # carries exactly what a real analytics row already does, closing the
+    # gap that forced M45's reconstructor to work from real turns only.
+    traversal_path: list[dict] = Field(default_factory=list)
+    hop_depth_per_retrieved_mu: dict[str, int] = Field(default_factory=dict)
 
     @field_validator("battery_mode")
     @classmethod
@@ -166,4 +172,9 @@ async def compute_probe_result(
         series_id=series_id,
         battery_mode=battery_mode,
         battery_repeat_index=battery_repeat_index,
+        # M46 — nothing new computed here: retrieve() has always returned
+        # these on RetrievalResult (see the K2 traversal + hop-depth build
+        # in retrieval.py), only stored for real turns until now.
+        traversal_path=list(retrieval_result.traversal_path),
+        hop_depth_per_retrieved_mu=dict(retrieval_result.hop_depth_per_retrieved_mu),
     )

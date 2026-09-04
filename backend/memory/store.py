@@ -166,7 +166,9 @@ CREATE TABLE IF NOT EXISTS probe_results (
     experiment_id TEXT,
     series_id TEXT,
     battery_mode TEXT NOT NULL DEFAULT 'mean',
-    battery_repeat_index INTEGER
+    battery_repeat_index INTEGER,
+    traversal_path TEXT NOT NULL DEFAULT '[]',
+    hop_depth_per_retrieved_mu TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS seed_fixture_manifest (
@@ -276,6 +278,15 @@ async def _migrate_db(db: aiosqlite.Connection) -> None:
         # without silently misreporting a judge-alone rate.
         ("feedback_events", "judge_model_verdict", "TEXT"),
         ("feedback_events", "judge_model_rationale", "TEXT"),
+        # M46: probe_results gains the same traversal instrumentation real
+        # turns already carry on `analytics` (see the M8 block above) —
+        # `retrieve()` (backend/memory/retrieval.py) has always returned
+        # these on its RetrievalResult; POST /admin/run-probe simply hadn't
+        # been persisting them. Additive columns, NULL-safe reads (see
+        # query_probe_results() below) — archived pre-M46 probe rows must
+        # keep loading for M44's §6.3 geometry check and M45's reconstructor.
+        ("probe_results", "traversal_path", "TEXT NOT NULL DEFAULT '[]'"),
+        ("probe_results", "hop_depth_per_retrieved_mu", "TEXT NOT NULL DEFAULT '{}'"),
     ]
     for table, column, col_type in add_column_migrations:
         try:
@@ -1058,8 +1069,8 @@ class GraphStore:
                      condition_label, retrieved_mu_ids, gold_mu_rank,
                      retrieval_precision, retrieval_recall, bm25_scores_per_mu,
                      outcome_override, experiment_id, series_id, battery_mode,
-                     battery_repeat_index)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     battery_repeat_index, traversal_path, hop_depth_per_retrieved_mu)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result["result_id"],
@@ -1077,6 +1088,12 @@ class GraphStore:
                     result.get("series_id"),
                     result.get("battery_mode", "mean"),
                     result.get("battery_repeat_index"),
+                    # M46 — traversal_path/hop_depth_per_retrieved_mu, from
+                    # the RetrievalResult compute_probe_result() already
+                    # received. Same additive-column shape as battery_mode/
+                    # battery_repeat_index above.
+                    _json.dumps(result.get("traversal_path", [])),
+                    _json.dumps(result.get("hop_depth_per_retrieved_mu", {})),
                 ),
             )
             await db.commit()
@@ -1135,6 +1152,14 @@ class GraphStore:
             r = dict(row)
             r["retrieved_mu_ids"] = _json.loads(r.get("retrieved_mu_ids") or "[]")
             r["bm25_scores_per_mu"] = _json.loads(r.get("bm25_scores_per_mu") or "{}")
+            # M46 — additive columns; `or "[]"`/`or "{}"` handles both a
+            # missing key (pre-M46 archived rows, migration backfills the
+            # column but not historical content) and a NULL value the same
+            # way the sibling columns above already do.
+            r["traversal_path"] = _json.loads(r.get("traversal_path") or "[]")
+            r["hop_depth_per_retrieved_mu"] = _json.loads(
+                r.get("hop_depth_per_retrieved_mu") or "{}"
+            )
             # outcome_override is plain TEXT — no JSON decode needed
             result.append(r)
         return result

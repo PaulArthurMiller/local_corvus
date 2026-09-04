@@ -1283,3 +1283,137 @@ class TestProbeResultDualModeBattery:
             assert results[0]["battery_mode"] == "mean"
             assert results[0]["battery_repeat_index"] is None
             print("[PASS] migration adds probe_results dual-mode columns; legacy rows default correctly")
+
+
+# ---------------------------------------------------------------------------
+# M46: traversal_path / hop_depth_per_retrieved_mu on probe_results
+# ---------------------------------------------------------------------------
+
+
+class TestProbeResultTraversalInstrumentation:
+    """probe_results rows carry traversal_path/hop_depth_per_retrieved_mu —
+    the same traversal instrumentation real turns record on `analytics` —
+    so M45's reconstructor no longer needs to work from real turns alone."""
+
+    @staticmethod
+    def _probe_result(result_id, session, traversal_path=None, hop_depth_per_retrieved_mu=None):
+        return {
+            "result_id": result_id,
+            "probe_id": "p06",
+            "run_id": None,
+            "measurement_session_index": session,
+            "condition_label": "learned",
+            "retrieved_mu_ids": ["mu-a", "mu-b"],
+            "gold_mu_rank": 2,
+            "retrieval_precision": 1.0,
+            "retrieval_recall": 1.0,
+            "bm25_scores_per_mu": {"mu-a": 2.0},
+            "experiment_id": "plan1_learned",
+            "traversal_path": traversal_path,
+            "hop_depth_per_retrieved_mu": hop_depth_per_retrieved_mu,
+        }
+
+    @staticmethod
+    def _sync_probe(store):
+        run(store.sync_probes([{
+            "probe_id": "p06",
+            "probe_set_version": "v2",
+            "phenomenon_type": "ranking_improvement",
+            "prompt_text": "test",
+            "gold_mu_ids": ["mu-a", "mu-b"],
+            "is_bridge_probe": False,
+            "bridge_pair_id": None,
+        }]))
+
+    def test_insert_and_query_round_trips_traversal_path_and_hop_depth(self):
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            traversal_path = [
+                {"source_mu_id": "mu-a", "edge_id": "edge-1", "target_mu_id": "mu-b", "hop_depth": 1},
+            ]
+            hop_depth = {"mu-a": 0, "mu-b": 1}
+            run(store.insert_probe_result(self._probe_result(
+                "r1", 1, traversal_path=traversal_path, hop_depth_per_retrieved_mu=hop_depth,
+            )))
+
+            results = run(store.query_probe_results(probe_id="p06"))
+            assert len(results) == 1
+            assert results[0]["traversal_path"] == traversal_path
+            assert results[0]["hop_depth_per_retrieved_mu"] == hop_depth
+            print("[PASS] traversal_path/hop_depth_per_retrieved_mu round-trip through insert/query")
+
+    def test_traversal_fields_default_empty_when_omitted(self):
+        """A caller that omits the keys entirely (pre-M46 shape) still inserts
+        cleanly — the .get() defaults in insert_probe_result() land [] / {}."""
+        with TempDBStore() as store:
+            self._sync_probe(store)
+            result = self._probe_result("r1", 1)
+            del result["traversal_path"]
+            del result["hop_depth_per_retrieved_mu"]
+            run(store.insert_probe_result(result))
+
+            results = run(store.query_probe_results(probe_id="p06"))
+            assert results[0]["traversal_path"] == []
+            assert results[0]["hop_depth_per_retrieved_mu"] == {}
+            print("[PASS] traversal_path/hop_depth_per_retrieved_mu default to []/{} when omitted from the insert dict")
+
+    def test_migration_adds_traversal_columns_to_existing_probe_results_table(self):
+        """A pre-M46 DB (probe_results without traversal_path/hop_depth_
+        per_retrieved_mu) gains the columns on next open; existing rows read
+        back with traversal_path=[] and hop_depth_per_retrieved_mu={} — the
+        NULL-safe default M44's §6.3 geometry check and M45's reconstructor
+        both depend on for the 8 archived pre-M46 runs."""
+        import aiosqlite
+
+        async def _build_old_db(db_path):
+            db = await aiosqlite.connect(db_path)
+            await db.execute("""
+                CREATE TABLE probes (
+                    probe_id TEXT PRIMARY KEY,
+                    probe_set_version TEXT NOT NULL,
+                    phenomenon_type TEXT NOT NULL,
+                    prompt_text TEXT NOT NULL,
+                    gold_mu_ids TEXT NOT NULL DEFAULT '[]',
+                    is_bridge_probe INTEGER NOT NULL DEFAULT 0,
+                    bridge_pair_id TEXT
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE probe_results (
+                    result_id TEXT PRIMARY KEY,
+                    probe_id TEXT NOT NULL REFERENCES probes(probe_id),
+                    run_id TEXT,
+                    measurement_session_index INTEGER NOT NULL,
+                    condition_label TEXT NOT NULL,
+                    retrieved_mu_ids TEXT NOT NULL DEFAULT '[]',
+                    gold_mu_rank INTEGER,
+                    retrieval_precision REAL,
+                    retrieval_recall REAL,
+                    bm25_scores_per_mu TEXT NOT NULL DEFAULT '{}',
+                    outcome_override TEXT,
+                    experiment_id TEXT,
+                    series_id TEXT,
+                    battery_mode TEXT NOT NULL DEFAULT 'mean',
+                    battery_repeat_index INTEGER
+                )
+            """)
+            await db.execute(
+                "INSERT INTO probe_results (result_id, probe_id, measurement_session_index, condition_label) "
+                "VALUES ('old-row', 'p06', 1, 'learning')"
+            )
+            await db.commit()
+            await db.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "old_graph.db"
+            run(_build_old_db(db_path))
+
+            with mock.patch.object(store_module, "_DB_PATH", db_path):
+                store = GraphStore()
+                results = run(store.query_probe_results(probe_id="p06"))
+
+            assert len(results) == 1
+            assert results[0]["result_id"] == "old-row"
+            assert results[0]["traversal_path"] == []
+            assert results[0]["hop_depth_per_retrieved_mu"] == {}
+            print("[PASS] migration adds probe_results traversal columns; legacy rows default to []/{}")

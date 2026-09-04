@@ -1,0 +1,14 @@
+{
+  "queue_id": "exp0b_rep4",
+  "on_plan_failure": "halt",
+  "max_total_budget_usd": 30.0,
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "plans": [
+    {
+      "plan_path": "../plans/exp0b-rep4_2026-09-04.json"
+    }
+  ]
+}

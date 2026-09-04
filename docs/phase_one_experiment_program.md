@@ -67,7 +67,7 @@ Know these before reading any two runs as "different."
 | Probe placement, prompt-id assignment | Run Plan `random_seed` | Same seed → same turn/probe sequence. |
 | Thompson draws on training turns | `edge_update.rng_seed: null` → derived from `EXPERIMENT_ID` = `{plan_id}_{condition}` | **A new `plan_id` is a new Thompson stream even when `random_seed` is reused.** exp01's "quasi-paired" reuse of rep2's seed pairs the turn sequence only. To truly pair, set `edge_update.rng_seed` explicitly via `config_overrides` — decision pending, §7-3. |
 | Probe sample-battery draws | Separate RNG stream in `run_probe()`; `sample_battery_repeats: 25` | Never perturbs training-turn reproducibility. |
-| Agent (Gemma) generation | Not pinned in `config.yaml` | Ollama generation at nonzero temperature is a variance source on every bulk turn's output MU content and therefore on co-activation edges. **Action R0-4:** record what temperature the orchestrator actually sends. |
+| Agent (Gemma) generation | Not pinned, deliberately | **R0-4 answered 2026-08-27:** bulk turns send *no* sampling parameters at all — generation runs at the Ollama server + model default, which is a variance source on every bulk turn's output MU content and therefore on co-activation edges. Left unpinned on purpose (pinning mid-programme would collapse the very noise floor R1 measures); BUILD-PLAN M51 records the fact in provenance rather than changing it. |
 | Judge verdicts | `judge.temperature: 0.0` | Near-deterministic; residual Ollama nondeterminism possible. |
 | Seed fixture, prompt bank | Frozen (§1-4) | Hash-checked at preflight. |
 
@@ -80,23 +80,44 @@ Know these before reading any two runs as "different."
 Purpose: the analyst agent will read reports without a human correcting for
 known defects, so the fields it consumes must be right *now*.
 
-- [ ] R0-1 CC audits every field the cross-run comparison will consume
+- [ ] R0-1 **BUILD-PLAN M48 Phase 1.** CC audits every field the cross-run
+      comparison will consume
       (the 4-bucket partition counts, `gold_mu_rank`, anchor-strength
       trajectories per trained spoke, terminal-seed yield, K2 runner-up rate,
       `control_shadow` sanity checks) against raw `probe_results` /
       `analytics` rows for one archived run. Cross-validation like the
       REACHED-vs-`gold_mu_rank` match in M45 Phase 2 is the model.
-- [ ] R0-2 Confirm each run row records: `plan_id`, `random_seed`, the
+- [ ] R0-2 **BUILD-PLAN M51 Phase 1 — currently FAILS, confirmed by code
+      read 2026-09-04.** `orchestrator.py:682` writes
+      `full_config_snapshot=_CONFIG` verbatim, so `edge_update.rng_seed`
+      records as `null` while the Thompson stream ran on
+      `crc32(experiment_id)`; `RunRecord` carries no `plan_id`,
+      `random_seed`, content hashes, or git SHAs (those live only in the
+      harness `manifest.json` on disk). Provenance is forward-only — this
+      cannot be retrofitted onto the 8 archived runs, so it gates R3
+      execution, not R1 analysis. Confirm each run row records: `plan_id`, `random_seed`, the
       *resolved* `edge_update.rng_seed` (not `null`), prompt-bank hash,
       fixture version, `full_config_snapshot`, harness + backend git SHA.
-- [ ] R0-3 Confirm the prompt bank is loaded from `prompt_bank_path` and never
+- [ ] R0-3 **BUILD-PLAN M48 Phase 1** (folded into the field audit).
+      Confirm the prompt bank is loaded from `prompt_bank_path` and never
       regenerated in queue mode (protocol says so; verify the code path).
-- [ ] R0-4 Record the agent-model sampling parameters actually sent to Ollama
-      on bulk turns (§2). Pin them in `config.yaml` if not already.
-- [ ] R0-5 `c_spoke1` anomaly (sensitivity F4): check whether the prompt bank /
-      probe content for `cluster_c` can ever surface `c_spoke1` on a real
-      turn. Outcome goes in `sensitivity_baseline.md` either way — content
-      bug or mechanism finding.
+- [ ] R0-4 **Answered 2026-08-27; recording it is BUILD-PLAN M51 Phase 1.**
+      Bulk turns send *no* sampling parameters — generation runs at the
+      Ollama server + model default. The decision was made **not to pin**
+      them: pinning to 0.0 mid-programme would collapse the sampling-noise
+      floor R1 is computing and change the data-generating process between
+      exp01 and exp02. M51 records the fact explicitly
+      (`agent_sampling_params: {}`, `agent_sampling_source:
+      ollama_server_default`) rather than changing it. If it is ever pinned,
+      `backend/memory/extractor.py`'s summarisation call needs the same
+      treatment and the pinned cohort becomes a new baseline.
+- [ ] R0-5 **BUILD-PLAN M49.** `c_spoke1` anomaly (sensitivity F4): check
+      whether the prompt bank / probe content for `cluster_c` can ever
+      surface `c_spoke1` on a real turn. Outcome goes in
+      `sensitivity_baseline.md` either way — content bug or mechanism
+      finding. **Runs before R1's analysis, not after:** a trained spoke that
+      was never measurable is a missing cell, and averaging it into the noise
+      floor as a zero manufactures a number R3 is then compared against.
 - [ ] R0-6 Errata in §8 applied to `experiment_protocol.md`. **6 of 7 items
       applied by BUILD-PLAN M47** (config_overrides/expected_config
       documented, `tuning_knobs` retired, `seed_fixture_version` added to
@@ -104,7 +125,8 @@ known defects, so the fields it consumes must be right *now*.
       non-Thompson-seeding caveat added, two-condition default noted, worked
       example replaced, and a new "Sweepable hyperparameter knobs" reference
       table added incl. V6). **Still open:** the "report field list" item —
-      it depends on R0-1's field audit, which has not run yet.
+      it depends on R0-1's field audit, which has not run yet. **Closed by
+      BUILD-PLAN M48 Phase 1**, whose confirmed-field table *is* that list.
 
 **Done when:** R0-1 through R0-6 checked, and `sensitivity_baseline.md` has
 an entry for R0-5.
@@ -112,7 +134,13 @@ an entry for R0-5.
 ### R1 — Baseline noise floor ✅ runs / ⬜ analysis
 
 Runs exist: baseline ×3 (`prior 1.0/1.0`, `weight_mode: sample`,
-`retrieval_level2_top_k: 1`). What is missing is the analysis.
+`retrieval_level2_top_k: 1`). What is missing is the analysis — and the
+analysis is missing because nothing computes it. **R1-a/b/c are BUILD-PLAN
+M50** (cross-run replicate & noise-floor artifact), which consumes **M48**'s
+per-run metrics JSON. Neither existed as of 2026-09-04: M45's metrics are
+emitted as Markdown prose only, and no artifact anywhere assembles a
+learned−static delta across plans. **R1-d stays Paul's decision**, made from
+M50's numbers.
 
 - [ ] R1-a Per-metric mean and SD across the three baseline learned runs, for
       every metric in §5, at the whole-run level and per session where the
@@ -136,9 +164,24 @@ large relative to the effects in cfgA, queue baseline rep4–rep5 before R3.
   as "invalid — override not applied."
 
 **Done when:** cfgA has a `sensitivity_baseline.md` entry stating effect vs.
-noise floor, and cfgB's disposition is recorded.
+noise floor, and cfgB's disposition is recorded. Both are outputs of
+BUILD-PLAN M50, which computes cfgA's delta against the same floor it builds
+for R1. M45 Phase 2's K2 runner-up distribution already recommends writing
+cfgB off (it prices `level2_k` at every value from archived data, so a re-run
+adds nothing); M50's entry is where that becomes a decision on the record.
 
 ### R3 — Pre-registered one-factor sweep ⬜ (blocked on R0, R1)
+
+**No knob milestone is outstanding.** Verified 2026-09-04: every V1–V6 key
+exists in `config.yaml` (`retrieval_level2_top_k`, `credit_lambda`,
+`credit_scale`, `negative_scope`, `evidence_cap.enabled`/`n_max`,
+`k1_centrality_weight`), `CONFIG_OVERRIDES_JSON` is a general dotted-key
+deep-merge that rejects any key not resolving to an existing leaf, and M44
+Phase 1 put probe measurement on the resolved config (the gap that
+invalidated cfgB). R3 is blocked on **reading**, not on **running**:
+R0 (M48/M49/M51) and R1 (M50). BUILD-PLAN **M51 must land before the first
+R3 run** — provenance is forward-only and cannot be added to a run after it
+executes.
 
 Each variation ×2 replicates (distinct `plan_id`, distinct `random_seed`);
 a third replicate only if the delta lands inside the noise band and the knob
@@ -171,7 +214,13 @@ the surviving set for R4 is named in §6.
 ### R4 — Fixture generalization ⬜ (blocked on R3)
 
 New fixture `seed_v4` (topology and vocabulary changed, convention families
-regenerated; prompt bank generated once via Sonnet, then frozen). Run baseline
+regenerated; prompt bank generated once via Sonnet, then frozen).
+**Scoped as BUILD-PLAN M52** — a real build, not a config change:
+`generate_seed_v3.py` hard-codes its vocabulary families and topology, so v4
+needs a new spec, generator, verifier, probe set, and frozen bank, plus
+Paul's prose review at the freeze step. Named now so R4's cost is visible
+while R3 is still being planned; not to be built until R3's survivors are
+known. Run baseline
 ×2 and each R3 survivor ×2. Question: which R3 effects hold on a corpus the
 configs were not tuned against. Cross-cluster bridge-MU rank movement is the
 primary instrument here.
@@ -237,6 +286,32 @@ Draft at R5, informed by which metrics actually moved.
 
 ## 6. Progress log (append-only, newest first)
 
+- **2026-09-04 (plan)** — `/planner` reviewed this document against
+  Milestones 45–47 as built and filed **five new milestones, M48–M52**, in
+  `BUILD-PLAN.md`. The review's central finding: **R3 is blocked on reading,
+  not on running.** Every V1–V6 knob is already reachable through
+  `CONFIG_OVERRIDES_JSON` (all six keys present in `config.yaml`; the
+  override mechanism validates each dotted key against an existing leaf; M44
+  Phase 1 put probe measurement on the resolved config), so no knob milestone
+  is outstanding. What is missing is the instrumentation the program's own
+  gates assume: **M48** promotes M45's Phase 1 metrics from Markdown prose to
+  a versioned JSON artifact carrying numerator/denominator/status per cell,
+  and runs the R0-1 field audit first (closing R0-1, R0-3 and R0-6's last
+  erratum); **M49** diagnoses the `c_spoke1` anomaly (R0-5) *before* R1
+  averages a never-measurable cell into the noise floor; **M50** builds the
+  cross-run replicate/noise-floor artifact that R1-a/b/c and R2 both need and
+  that nothing computes today, with the replicate — never the probe row — as
+  the unit of inference; **M51** adds forward-only run provenance and honest
+  metric-status fields (R0-2, which a code read confirmed **fails** today:
+  `full_config_snapshot` records `edge_update.rng_seed: null` while the
+  Thompson stream ran on `crc32(experiment_id)`, and `RunRecord` carries no
+  `plan_id`, content hashes, or git SHAs), and must land before the first R3
+  run; **M52** scopes seed_v4 for R4. R0-4 was recorded as already answered
+  (no sampling params sent; deliberately unpinned) — M51 records the fact
+  rather than changing it. Three decisions were surfaced for Paul rather than
+  taken: §7-7 (R1-d), §7-8 (`c_spoke1` disposition if it is a content bug),
+  and §7-2 (cfgB, now with a standing recommendation).
+
 - **2026-08-26 (build)** — BUILD-PLAN M47 built: `config.yaml` gained
   `hyperparameters.k1_centrality_weight` (default `1.0`), `_k1_score()` in
   `backend/memory/retrieval.py` reads it, 6 new tests in
@@ -298,7 +373,28 @@ Draft at R5, informed by which metrics actually moved.
    Keep 5 for all of Phase 1 for comparability; note it in R1-c. *Decided
    2026-08-26 unless objected.*
 5. **`c_spoke1` never retrieved.** R0-5. Content bug or mechanism? *Owner: CC.*
-6. **Agent sampling parameters unpinned.** R0-4. *Owner: CC.*
+6. **Agent sampling parameters unpinned.** R0-4. **Resolved 2026-08-27 /
+   recorded 2026-09-04:** bulk turns send none; generation runs at the Ollama
+   server + model default. Deliberately left unpinned — pinning mid-programme
+   would collapse the sampling-noise floor R1 measures and split exp01 from
+   exp02 as a data-generating process. BUILD-PLAN M51 records it in
+   provenance. If it is ever pinned, `backend/memory/extractor.py`'s
+   summarisation call needs the same treatment and the pinned cohort is a new
+   baseline, not a pooled one.
+7. **R1-d: the distinguishability rule.** §5's 2 × baseline-SD rule is still
+   a draft, and BUILD-PLAN M50 will supply the SDs it needs — from **n = 3**,
+   which is a very thin basis for a threshold. M50 also computes the effect
+   size a 2-replicate R3 variation would need to clear that line. Finalise the
+   rule from those numbers before R3 opens; this is a blocker for R3, not a
+   loose end. *Owner: Paul, after M50.*
+8. **`c_spoke1` disposition if M49 returns "content bug."** Fixing the frozen
+   bank invalidates every archived run's comparability (§1-4); not fixing it
+   means Phase 1 runs with three usable trained spokes instead of four.
+   Recommendation: **do not unfreeze** — record `cluster_c` as a known-dead
+   cell for Phase 1, carry three trained spokes through R3, and fix the
+   content in seed_v4 (M52), where a new bank is being generated anyway. Same
+   answer applies if the defect turns out to be the `trained_spokes` key
+   choice rather than the content. *Owner: Paul, after M49.*
 
 ---
 

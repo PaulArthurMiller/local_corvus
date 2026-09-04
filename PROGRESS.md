@@ -2,7 +2,40 @@
 
 ## Current state
 
-**2026-09-04 update: `/catchup` + `/build` session — fixed an undeclared
+**2026-09-04 update (2): `/build` session — Milestone 46 complete (Probe
+Traversal Instrumentation).**
+`probe_results` gains `traversal_path`/`hop_depth_per_retrieved_mu`
+(additive columns, NULL-safe reads, same shape as M30's `battery_mode`/
+`battery_repeat_index`). The persistence path is `analytics/probes.py`'s
+`compute_probe_result()`/`record_probe_result()`, not a code change inside
+`api/admin.py`'s `run_probe()` body — a scope-list detail, not a deviation
+in effect, since `run_probe()` already hands `compute_probe_result()` the
+`RetrievalResult` that carries both fields. 25 new tests, full suite 1291
+passed (1266 + 25 new), 2 pre-existing unrelated skips, no regressions.
+**Live verification (M44/M47 pattern, real Docker backend, the same
+678-MU `graph.db` state M47 used):** a fresh `POST /admin/run-probe`
+(`vs_a1`, `weight_mode: mean`) wrote a `probe_results` row with a
+non-empty `traversal_path` (10 hops) and `hop_depth_per_retrieved_mu` for
+the first time — read straight back via `sqlite3`, confirming the API
+response wasn't the only place carrying the fields. **The Done-when's
+real cross-check** — replayed M45's own topology-existence and
+`k2_runner_up_rank` K2-scoring formulas directly against the live `edges`
+table (not `scripts/alpha_d_pathback.py`'s `GraphReconstructor`, which
+event-sources an *archived, wiped-since* run's topology — the wrong tool
+for a fresh, un-wiped probe, per Phase 1's own docstring) — and both
+matched the recorded row exactly: same 10 (source, edge_id, target)
+triples, same K2 winner, same `hop_depth_per_retrieved_mu`. No mutation
+(678 MUs/1324 edges unchanged; only the one throwaway `probe_results` row
+was added, clearly labeled `condition_label=m46-live-check`); `git
+status` stayed clean throughout (`memory/graph.db` is gitignored,
+`config.yaml` never touched). See BUILD-PLAN.md's Milestone 46 section,
+"Build notes 2026-09-04," for the full record.
+Branch: `milestone-46-probe-traversal-instrumentation`.
+**Next step:** open the PR; after merge, Milestone 47 is already complete
+(PR #85, merged) — no unbuilt milestone remains in BUILD-PLAN.md as of this
+session, pending Paul's next scoping decision.
+
+**2026-09-04 update (1): `/catchup` + `/build` session — fixed an undeclared
 harness dependency and a stale Milestone 45 status line; no new milestone
 built.**
 `/build` was asked to build "Milestone 45 Phase 2" per an earlier `/catchup`

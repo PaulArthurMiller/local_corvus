@@ -7125,9 +7125,10 @@ would have fired otherwise; none did).
 
 ## Probe Traversal Instrumentation — Milestone 46
 
-**Status:** PROPOSED 2026-08-24. Follows Milestone 45. Originally scoped to
+**Status:** COMPLETE 2026-09-04. Follows Milestone 45. Originally scoped to
 bundle with an `admin.py` config fix; that fix **already shipped as M44 Phase
-1**, so this stands alone.
+1**, so this stands alone. See the "Build notes 2026-09-04" section below the
+scope/Done-when for the full record.
 
 ### The gap
 
@@ -7194,6 +7195,85 @@ turns" to "validated directly."
   real turns would swamp every existing analytics query, including item C's
   lock-in script and M45's own reconstructor. If probe analytics rows are ever
   wanted, that is its own milestone with its own argument.
+
+### Build notes 2026-09-04
+
+Built exactly to scope, with one implementation-detail deviation from the
+scope list's item 2: the persistence path is
+`backend/analytics/probes.py`'s `compute_probe_result()`/
+`record_probe_result()`, not a code change inside `api/admin.py`'s
+`run_probe()` body — `run_probe()` already delegates to
+`compute_probe_result()` with the `RetrievalResult` in hand, so that is
+where `traversal_path`/`hop_depth_per_retrieved_mu` naturally flow through
+to the recorded `ProbeResult`. Nothing computed differently; `retrieve()`
+already returned both fields on every call.
+
+**Storage volume question resolved by inspection, not by re-deriving the
+compact form:** `retrieve()`'s `traversal_path` was already the compact
+`{source_mu_id, edge_id, target_mu_id, hop_depth}` shape the risk item
+asked for (confirmed by reading `backend/memory/retrieval.py` before
+writing any code) — there was no fuller "real-turn structure" to trim
+down to it. No config flag was added; live volume at 3,640 rows/run stayed
+an open question deferred to whoever runs the next measurement-heavy
+queue, per the risk item's own fallback framing.
+
+25 new tests across three files, matching the existing M21/M30
+`probe_results` conventions (`TempDBStore`, the `_patched_run` route-
+handler pattern from `test_run_probe_dual_mode.py`):
+`tests/test_analytics/test_probes.py` (compute/record pass-through, empty-
+default case), `tests/test_memory/test_store.py` (insert/query round-trip,
+omitted-key default, migration on a pre-M46 DB), and a new
+`tests/test_api/test_run_probe_traversal_instrumentation.py` (response
+body and the `ProbeResult` handed to `record_probe_result` both carry the
+fields, including the no-K2-hop empty case). Full suite: 1291 passed (1266
+pre-existing + 25 new), 2 pre-existing unrelated skips, no regressions.
+
+**Live verification (M44/M47 pattern, real Docker backend, real
+`graph.db` — same 678-MU state M47 verified against,
+`runtime_config_hash=fd71fc92…`, `RUN_CONDITION=static_weight`,
+`overridden_keys: []`):** `POST /admin/run-probe` for `vs_a1`
+(`probe_set_version: v3`, `weight_mode: mean`) returned `gold_mu_rank=4`
+(seed hub `a0000001…` at K1, gold `a0000002…` the sole K2 winner) and, for
+the first time, a non-empty `traversal_path` (10 hops: the hub's 7 seed-
+fixture outgoing edges to `a0000002..a0000008`/`ab000001`, plus one
+conversation-edge hop from each of the two non-hub K1 entries) and
+`hop_depth_per_retrieved_mu` (`{hub: 0, ...: 0, a0000002: 1}`). Read
+straight back out of `memory/graph.db` via `sqlite3` (bypassing the API)
+to confirm the row landed with both new columns populated exactly as the
+response showed — the additive migration also proved itself live here: an
+archived pre-M46 row read moments earlier from the same live database came
+back with `traversal_path: []`/`hop_depth_per_retrieved_mu: {}`, not an
+error, confirming the NULL-safe default path M44's §6.3 check and M45's
+reconstructor both depend on.
+
+**The cross-check itself — "M45's reconstructor reproduces it":** rather
+than invoking `scripts/alpha_d_pathback.py`'s `GraphReconstructor` (which
+event-sources an *archived, wiped-since* run's topology from
+`analytics`/`edge_update_events` — the wrong tool here, since this probe's
+graph state is the live, un-wiped `edges`/`memory_units` tables, which
+Phase 1's own docstring names as the ground truth to reconstruct *from*,
+not *for*), the two formulas the reconstructor's Phase 2 encodes
+(`verify_topology_tieback`'s existence+completeness check;
+`k2_runner_up_rank`'s K2 scoring — `sum(weight * dir_multiplier)` per
+K1-outgoing target under `condition=static_weight`, i.e. the raw
+`edges.weight` column) were replayed directly against the live `edges`
+table for the fresh probe's three K1 MUs. Both matched the recorded row
+exactly: the 10 reconstructed (source, edge_id, target) triples equalled
+`traversal_path`'s recorded set; the reconstructed K2 winner and
+`hop_depth_per_retrieved_mu` equalled the recorded ones. This is the
+milestone's real value realized — the same reconstruction logic M45
+validated against real turns now ties back against a probe turn directly,
+with no analogy required.
+
+Confirmed no mutation: `memory_units`/`edges` counts unchanged (678/1324)
+before and after the probe call — only `probe_results` grew, by the one
+throwaway row (`experiment_id=learning-2026-09-04`,
+`condition_label=m46-live-check`, `measurement_session_index=9001`, all
+clearly non-conflicting with any archived run's labels). `git status`
+stayed clean throughout — `memory/graph.db` is gitignored and
+`config.yaml` was never touched.
+
+Branch: `milestone-46-probe-traversal-instrumentation`.
 
 ---
 
@@ -8087,6 +8167,6 @@ experiment_ids.
 
 **Milestone 45:** Proposed 2026-08-24 — Path-Back Instrumentation (Plan Alpha D). Two phases: an archived-data graph reconstructor validated by a three-component tie-back (α/β, topology, slate) across all 8 learned runs, then the metrics layer — a four-bucket exclusive partition (reached / outbid / out-of-depth / disconnected) as headline, chase-down yield and K2 runner-up rank distribution as priced counterfactuals, anchor strength as the write-side longitudinal metric. `docs/sensitivity_baseline.md` is created in Phase 2 with the two structural findings from the Alpha D scoping (~6% of created edges ever weight-updated; K1's `edge_weight_sum` is undirected total degree). Not gated on M44 — the script never calls the probe endpoint. **Phase 1 COMPLETE 2026-08-26** (`scripts/alpha_d_pathback.py`, 30 tests, zero mismatches across all 8 runs/1,680 turns — see the Phase 1 build notes in the milestone's own section for the conv-edge-identity design point). **Phase 2 COMPLETE 2026-08-26** (PR #83, merged) — the metrics layer, 33 more tests (63 total), `docs/evaluations/alpha_d_pathback_analysis.md`, and `docs/sensitivity_baseline.md`. Headline: 80–82% OUTBID pooled vs. 0–3% DISCONNECTED — the late-session collapse is a read-side problem, not a write-side one. See the Phase 2 build notes in the milestone's own section. **Milestone 45 fully COMPLETE.**
 
-**Milestone 46:** Proposed 2026-08-24 — Probe Traversal Instrumentation. `probe_results` gains `traversal_path` and `hop_depth_per_retrieved_mu` so future runs need no reconstruction; the Done-when is a live probe row that M45's reconstructor reproduces exactly. Follows M45. The `admin.py` half of its originally-scoped bundle already shipped as M44 Phase 1.
+**Milestone 46:** Complete 2026-09-04 — Probe Traversal Instrumentation. `probe_results` gains `traversal_path` and `hop_depth_per_retrieved_mu`, populated via `analytics/probes.py`'s `compute_probe_result()` (a scope-list detail: the flow-through lands there, not inside `api/admin.py`'s `run_probe()` body, since `run_probe()` already delegates to `compute_probe_result()` with the `RetrievalResult` in hand). 25 new tests, no regressions (1291 total). **Live verification against a real Docker backend and the real `graph.db`** (same 678-MU state M47 used): a fresh `POST /admin/run-probe` for `vs_a1` wrote a `traversal_path`/`hop_depth_per_retrieved_mu`-carrying row, and replaying M45's own topology-existence and K2-scoring formulas directly against the live `edges` table reproduced that row exactly — the Done-when's real value, delivered without reconstruction-by-analogy. See the milestone's own "Build notes 2026-09-04" for the full record, including why the live `edges` table (not `scripts/alpha_d_pathback.py`'s event-sourcing reconstructor) was the right cross-check tool for a fresh, un-wiped probe. Follows M45. The `admin.py` half of its originally-scoped bundle already shipped as M44 Phase 1.
 
 **Milestone 47:** COMPLETE 2026-08-26 — built same day as the proposal. K1 Centrality Coefficient (R3-V6 Knob). Added `hyperparameters.k1_centrality_weight` (default 1.0 = pre-M47 behavior bit-for-bit; 0.0 = the pre-registered "flagged off" value) so `_k1_score()`'s undirected-total-degree term is now a plan override instead of a hard-coded constant. Gates `docs/phase_one_experiment_program.md` §3 R3-V6 per its §7-1a (already resolved by the prior planning commit); independent of M46. 6 new tests — a 3-candidate fixture proving the coefficient is a genuine scalar multiplier (three distinct total K1 orderings across 0.0/0.5/1.0, not a two-state branch) plus a config-override wiring test against the real orchestrator/real config.yaml. Also folded in 6 of 7 `docs/experiment_protocol.md` §8 errata items (config_overrides/expected_config documented, `tuning_knobs` retired, v3-wiring section corrected, a new sweepable-knobs reference table) and wrote (not ran) the two-replicate R3-V6 plan file. **Live verification (M44 pattern, real Docker backend, real graph.db, same graph state twice):** the same probe returned a different slate under the override — seed hub `a0000001…` dropped out entirely and `gold_mu_rank` went from 4 to None, confirming the pre-registration's prediction. Backend restored to baseline hash afterward; `git status` clean; `config.yaml` committed at 1.0. Full suite 1266 passed, no regressions. See the milestone's own "Build notes 2026-08-26" for the full record, including a Done-when text/code mismatch found and worked around (queue-level `--dry-run` doesn't assert `expected_config` for a plan that also carries `config_overrides` — verified via the real assertion function against a live backend instead).

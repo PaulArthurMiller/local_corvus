@@ -1,0 +1,68 @@
+{
+  "plan_id": "exp0b-rep5-2026-09-04",
+  "plan_name": "Experiment Round 1 replicate 5 - identical to exp0b-2026-08-06 / rep2 / rep3 (same frozen bank, fixture v3, probe set v3, shape, trained_spokes, judge, two-condition M40 design) except plan_id/plan_name/random_seed. Thickens the R1 noise floor from n=3 to n=5: phase_one_experiment_program.md R1's own done-when says three replicates is thin, and BUILD-PLAN M50 computes the learned-static SD that the entire distinguishability rule (R1-d) rests on. ALSO the first baseline runs recorded after BUILD-PLAN M46, so their probe rows carry traversal_path / hop_depth_per_retrieved_mu - M48's probe metrics become OBSERVED for these two runs rather than reconstructed. Config state is config.yaml's committed baseline, unchanged: config_overrides is EMPTY and expected_config asserts the 13 baseline-defining keys (every knob R3 V1-V6 will move, plus the two cfgA/cfgB moved) so a config.yaml left switched by an earlier sweep hard-stops at queue preflight instead of silently producing a fourth config's data labelled baseline. rep1-3 declared nothing here; this is a strictly stronger guard, not a config difference.",
+  "conceptual_fields": {
+    "count": 4,
+    "subjects": "auto"
+  },
+  "series_count": 5,
+  "turns_per_series": 70,
+  "probe_ratio": 0.4,
+  "probe_placement": "end",
+  "probe_set_version": "v3",
+  "seed_fixture_version": "v3",
+  "expected_config": {
+    "edge_update.prior_alpha": 1.0,
+    "edge_update.prior_beta": 1.0,
+    "edge_update.seed_prior_alpha": 1.0,
+    "edge_update.seed_prior_beta": 1.0,
+    "edge_update.weight_mode": "sample",
+    "edge_update.credit_scale": 1.0,
+    "edge_update.credit_lambda": 0.6,
+    "edge_update.negative_scope": "path",
+    "edge_update.evidence_cap.enabled": false,
+    "hyperparameters.retrieval_level1_top_k": 3,
+    "hyperparameters.retrieval_level2_top_k": 1,
+    "hyperparameters.k1_centrality_weight": 1.0,
+    "reporting.pass_rank_thresholds.spoke_retrieval": 4
+  },
+  "config_overrides": {},
+  "trained_spokes": {
+    "cluster_a": "a_spoke1",
+    "cluster_b": "b_spoke3",
+    "cluster_c": "c_spoke1",
+    "cluster_d": "d_spoke5"
+  },
+  "difficulty": {
+    "hop_distance_levels": [
+      0,
+      1
+    ]
+  },
+  "judge": {
+    "model": "gemma4:e4b",
+    "temperature": 0.0
+  },
+  "conditions": [
+    "learned",
+    "static_weight"
+  ],
+  "condition_order": [
+    "learned",
+    "static_weight"
+  ],
+  "error_policy": {},
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "budget_cap": 25.0,
+  "prompt_gen": {
+    "model": "claude-sonnet-5",
+    "max_retries": 2
+  },
+  "dry_run": false,
+  "dry_run_n": 2,
+  "random_seed": 20260905,
+  "prompt_bank_path": "prompt_banks/prompt_bank_e2adf7962c0a780e1df48f362c6cf0d8158a40bfc57e0e83765afca95e661403.json"
+}

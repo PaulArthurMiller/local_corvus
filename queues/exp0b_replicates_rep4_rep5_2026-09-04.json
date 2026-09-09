@@ -1,0 +1,17 @@
+{
+  "queue_id": "exp0b_replicates_rep4_rep5",
+  "on_plan_failure": "continue",
+  "max_total_budget_usd": 50.0,
+  "notification": {
+    "enabled": true,
+    "channel": "log"
+  },
+  "plans": [
+    {
+      "plan_path": "../plans/exp0b-rep4_2026-09-04.json"
+    },
+    {
+      "plan_path": "../plans/exp0b-rep5_2026-09-04.json"
+    }
+  ]
+}
